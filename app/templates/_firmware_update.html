@@ -1,0 +1,538 @@
+  <!-- Firmware Update Management Card -->
+  <div class="mb-4 w-full px-2 leading-normal text-gray-800 lg:px-0">
+    <div class="rounded border bg-white shadow">
+      <div class="border-b p-3">
+        <h5 class="font-bold text-gray-600 flex items-center">
+          <svg class="w-5 h-5 mr-2 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <!-- Outer box -->
+            <rect x="2" y="2" width="20" height="20" rx="3" stroke-width="2"/>
+            <!-- Photonicat "P" shape -->
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 6v12M7 6h6a3 3 0 0 1 0 6H7"/>
+            <!-- Circuit-like lines -->
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M15 14h3M15 16h2"/>
+          </svg>
+          {{locales["card_title_firmware_manager"]}}
+          <div x-show="!firmware_check_completed" class="flex items-center ml-3">
+            <img src="/static/loading.gif" class="w-4 h-4 mr-1" />
+            <span class="text-sm text-gray-500">{{locales["firmware_checking"]}}</span>
+          </div>
+        </h5>
+      </div>
+      <div class="py-3 px-4">
+        <!-- Dev Server Section (conditionally shown if reachable) -->
+        <div x-show="dev_server_reachable" class="mb-4">
+          <div class="flex items-center justify-between mb-2">
+            <div class="flex items-center">
+              <div class="w-3 h-3 bg-orange-500 rounded-full mr-2 animate-pulse"></div>
+              <h6 class="font-bold text-lg text-orange-800">{{locales["dev_server_title"]}}</h6>
+              <div class="ml-2 px-2 py-1 bg-orange-100 text-orange-800 text-xs rounded-full font-medium">
+                {{locales["dev_only"]}}
+              </div>
+            </div>
+            <div x-show="dev_firmware_newer" class="text-sm font-medium text-orange-600">{{locales["dev_firmware_available"]}}</div>
+          </div>
+          
+          <!-- Dev Server Update Available -->
+          <div x-show="dev_firmware_newer" class="mb-3 rounded bg-gradient-to-r from-orange-50 to-yellow-50 border border-orange-200 p-3">
+            <div class="flex items-start">
+              <div class="flex-grow">
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                  <div class="bg-white rounded-lg p-3 border">
+                    <div class="text-sm text-gray-600 mb-1">{{locales["firmware_current_version"]}}</div>
+                    <div class="font-semibold text-gray-800 text-sm" x-text="format_version_with_hash_and_date(dev_firmware_info.local_version, dev_firmware_info.local_revision, dev_firmware_info.local_hash, dev_firmware_info.local_build_date)"></div>
+                  </div>
+                  <div class="bg-white rounded-lg p-3 border border-orange-300 hover:border-blue-400 transition-colors cursor-pointer" @click="handleRemoteVersionClick('dev_firmware')">
+                    <div class="text-sm text-orange-600 mb-1">{{locales["dev_latest_version"]}}</div>
+                    <div class="font-semibold text-orange-800 text-sm" x-text="format_version_with_hash_and_date(dev_firmware_info.dev_filename, dev_firmware_info.dev_revision, dev_firmware_info.dev_hash, dev_firmware_info.dev_build_date)"></div>
+                    <div x-show="dev_firmware_info.dev_sha256_available" class="mt-2 text-xs text-gray-600">
+                      <div class="flex items-center">
+                        <svg class="w-3 h-3 mr-1 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.99.01l.01-.01"></path>
+                        </svg>
+                        <span class="font-medium">SHA256 checksum available</span>
+                      </div>
+                      <div class="font-mono text-xs text-gray-500 break-all mt-1" x-text="dev_firmware_info.dev_sha256_hash"></div>
+                    </div>
+                    <div x-show="!dev_firmware_info.dev_sha256_available" class="mt-2 text-xs text-yellow-600">
+                      <div class="flex items-center">
+                        <svg class="w-3 h-3 mr-1 text-yellow-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01"></path>
+                        </svg>
+                        <span>No checksum available</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                
+                <div class="flex flex-col sm:flex-row gap-3">
+                  <a x-bind:href="dev_firmware_info.dev_download_url" 
+                     target="_blank" 
+                     class="flex-1 inline-flex items-center justify-center px-4 py-3 bg-orange-600 text-white rounded-lg hover:bg-orange-700 transition-colors font-medium">
+                    <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                    </svg>
+                    {{locales["dev_download_button"]}}
+                  </a>
+                  <button @click="start_dev_firmware_upgrade()"
+                          x-show="!firmware_upgrading"
+                          :disabled="dev_firmware_upgrading"
+                          :class="dev_firmware_upgrading ? 'bg-gray-400 cursor-not-allowed' : 'bg-orange-500 hover:bg-orange-600'"
+                          class="flex-1 inline-flex items-center justify-center px-4 py-3 text-white rounded-lg transition-colors font-medium">
+                    <svg x-show="dev_firmware_upgrading" class="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                      <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                      <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    <svg x-show="!dev_firmware_upgrading" class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+                    </svg>
+                    <span x-text="getDevFirmwareButtonText()"></span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Dev Server Up to Date -->
+          <div x-show="dev_versions_same && dev_server_reachable" class="mb-4 rounded bg-gradient-to-r from-gray-50 to-orange-50 border border-gray-200 p-4">
+            <div class="flex items-start">
+              <div class="flex-shrink-0 mr-3">
+                <div class="w-10 h-10 bg-green-100 rounded-full flex items-center justify-center">
+                  <svg class="w-6 h-6 text-green-800" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                  </svg>
+                </div>
+              </div>
+              <div class="flex-grow">
+                <h6 class="font-bold text-lg text-green-800 mb-3">{{locales["dev_firmware_up_to_date"]}}</h6>
+                <p class="text-sm text-gray-600 mb-4">You are up to date, but you can still upgrade if needed.</p>
+                
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                  <div class="bg-white rounded-lg p-3 border border-green-300">
+                    <div class="text-sm text-gray-600 mb-1">{{locales["dev_current_version"]}} (Local)</div>
+                    <div class="font-semibold text-gray-800 text-sm" x-text="format_version_with_hash_and_date(dev_firmware_info.local_version, dev_firmware_info.local_revision, dev_firmware_info.local_hash, dev_firmware_info.local_build_date)"></div>
+                  </div>
+                  <div class="bg-white rounded-lg p-3 border hover:border-blue-400 transition-colors cursor-pointer" @click="handleRemoteVersionClick('dev_firmware')">
+                    <div class="text-sm text-gray-600 mb-1">{{locales["dev_latest_version"]}} (Remote)</div>
+                    <div class="font-semibold text-gray-800 text-sm" x-text="format_version_with_hash_and_date(dev_firmware_info.dev_filename, dev_firmware_info.dev_revision, dev_firmware_info.dev_hash, dev_firmware_info.dev_build_date)"></div>
+                    <div x-show="dev_firmware_info.dev_sha256_available" class="mt-2 text-xs text-gray-600">
+                      <div class="flex items-center">
+                        <svg class="w-3 h-3 mr-1 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.99.01l.01-.01"></path>
+                        </svg>
+                        <span class="font-medium">SHA256 checksum available</span>
+                      </div>
+                      <div class="font-mono text-xs text-gray-500 break-all mt-1" x-text="dev_firmware_info.dev_sha256_hash"></div>
+                    </div>
+                    <div x-show="!dev_firmware_info.dev_sha256_available" class="mt-2 text-xs text-yellow-600">
+                      <div class="flex items-center">
+                        <svg class="w-3 h-3 mr-1 text-yellow-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01"></path>
+                        </svg>
+                        <span>No checksum available</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                
+                <div class="flex flex-col sm:flex-row gap-3">
+                  <a x-bind:href="dev_firmware_info.dev_download_url" 
+                     target="_blank" 
+                     class="flex-1 inline-flex items-center justify-center px-4 py-3 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition-colors font-medium">
+                    <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                    </svg>
+                    {{locales["dev_download_button"]}}
+                  </a>
+                  <button @click="start_dev_firmware_upgrade()"
+                          x-show="!firmware_upgrading"
+                          :disabled="dev_firmware_upgrading"
+                          :class="dev_firmware_upgrading ? 'bg-gray-400 cursor-not-allowed' : 'bg-gray-500 hover:bg-gray-600'"
+                          class="flex-1 inline-flex items-center justify-center px-4 py-3 text-white rounded-lg transition-colors font-medium">
+                    <svg x-show="dev_firmware_upgrading" class="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                      <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                      <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    <svg x-show="!dev_firmware_upgrading" class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+                    </svg>
+                    <span x-text="getDevFirmwareButtonText()"></span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Dev Server Has Older Version -->
+          <div x-show="!dev_versions_same && !dev_firmware_newer && dev_server_reachable" class="mb-4 rounded bg-gradient-to-r from-blue-50 to-orange-50 border border-blue-200 p-4">
+            <div class="flex items-start">
+              <div class="flex-shrink-0 mr-3">
+                <div class="w-10 h-10 bg-blue-100 rounded-full flex items-center justify-center">
+                  <svg class="w-6 h-6 text-blue-800" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                  </svg>
+                </div>
+              </div>
+              <div class="flex-grow">
+                <h6 class="font-bold text-lg text-blue-800 mb-3">Dev firmware available (older version)</h6>
+                <p class="text-sm text-gray-600 mb-4">Your current version is newer, but you can still upgrade to the dev version if needed.</p>
+                
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                  <div class="bg-white rounded-lg p-3 border border-green-300">
+                    <div class="text-sm text-green-600 mb-1">{{locales["firmware_current_version"]}}</div>
+                    <div class="font-semibold text-green-800 text-sm" x-text="format_version_with_hash_and_date(dev_firmware_info.local_version, dev_firmware_info.local_revision, dev_firmware_info.local_hash, dev_firmware_info.local_build_date)"></div>
+                  </div>
+                  <div class="bg-white rounded-lg p-3 border hover:border-blue-400 transition-colors cursor-pointer" @click="handleRemoteVersionClick('dev_firmware')">
+                    <div class="text-sm text-gray-600 mb-1">{{locales["dev_latest_version"]}}</div>
+                    <div class="font-semibold text-gray-800 text-sm" x-text="format_version_with_hash_and_date(dev_firmware_info.dev_filename, dev_firmware_info.dev_revision, dev_firmware_info.dev_hash, dev_firmware_info.dev_build_date)"></div>
+                    <div x-show="dev_firmware_info.dev_sha256_available" class="mt-2 text-xs text-gray-600">
+                      <div class="flex items-center">
+                        <svg class="w-3 h-3 mr-1 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.99.01l.01-.01"></path>
+                        </svg>
+                        <span class="font-medium">SHA256 checksum available</span>
+                      </div>
+                      <div class="font-mono text-xs text-gray-500 break-all mt-1" x-text="dev_firmware_info.dev_sha256_hash"></div>
+                    </div>
+                    <div x-show="!dev_firmware_info.dev_sha256_available" class="mt-2 text-xs text-yellow-600">
+                      <div class="flex items-center">
+                        <svg class="w-3 h-3 mr-1 text-yellow-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01"></path>
+                        </svg>
+                        <span>No checksum available</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                
+                <div class="flex flex-col sm:flex-row gap-3">
+                  <a x-bind:href="dev_firmware_info.dev_download_url" 
+                     target="_blank" 
+                     class="flex-1 inline-flex items-center justify-center px-4 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium">
+                    <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                    </svg>
+                    {{locales["dev_download_button"]}}
+                  </a>
+                  <button @click="start_dev_firmware_upgrade()"
+                          x-show="!firmware_upgrading"
+                          :disabled="dev_firmware_upgrading"
+                          :class="dev_firmware_upgrading ? 'bg-gray-400 cursor-not-allowed' : 'bg-blue-500 hover:bg-blue-600'"
+                          class="flex-1 inline-flex items-center justify-center px-4 py-3 text-white rounded-lg transition-colors font-medium">
+                    <svg x-show="dev_firmware_upgrading" class="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                      <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                      <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    <svg x-show="!dev_firmware_upgrading" class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+                    </svg>
+                    <span x-text="getDevFirmwareButtonText()"></span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="flex items-center justify-between mb-2">
+          <div class="flex items-center">
+            <div class="w-3 h-3 bg-green-500 rounded-full mr-2 animate-pulse"></div>
+            <h6 class="font-bold text-lg text-blue-800">{{locales["production_server_title"]}}</h6>
+            <div class="ml-2 px-2 py-1 bg-blue-100 text-blue-800 text-xs rounded-full font-medium">
+              {{locales["stable"]}}
+            </div>
+          </div>
+          <div class="flex items-center gap-2">
+            <div x-show="firmware_update_available" class="text-sm font-medium text-green-600">{{locales["firmware_new_version_available"]}}</div>
+            <div x-show="firmware_check_completed && !firmware_update_available" class="text-sm font-medium text-green-600 flex items-center">
+              <svg class="w-4 h-4 mr-1 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+              </svg>
+              {{locales["firmware_up_to_date"]}}
+            </div>
+          </div>
+        </div>
+        
+        <!-- Firmware Update Available -->
+        <div x-show="firmware_update_available" class="mb-3 rounded bg-gradient-to-r from-green-50 to-blue-50 border border-green-200 p-3">
+          <div class="flex items-start">
+            <div class="flex-shrink-0 mr-3">
+              <div class="w-8 h-8 bg-green-100 rounded-full flex items-center justify-center">
+                <svg class="w-5 h-5 text-green-800" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path>
+                </svg>
+              </div>
+            </div>
+            <div class="flex-grow">
+              
+              <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                <div class="bg-white rounded-lg p-3 border">
+                  <div class="text-sm text-gray-600 mb-1">{{locales["firmware_current_version"]}}</div>
+                  <div class="font-semibold text-gray-800" x-text="format_version_display(firmware_info.local_version)"></div>
+                </div>
+                <div class="bg-white rounded-lg p-3 border border-green-300 hover:border-blue-400 transition-colors cursor-pointer" @click="handleRemoteVersionClick('prod_firmware')">
+                  <div class="text-sm text-green-600 mb-1">{{locales["firmware_latest_version"]}}</div>
+                  <div class="font-semibold text-green-800" x-text="format_version_display(firmware_info.remote_filename)"></div>
+                  <div x-show="firmware_info.sha256_available" class="mt-2 text-xs text-gray-600">
+                    <div class="flex items-center">
+                      <svg class="w-3 h-3 mr-1 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.99.01l.01-.01"></path>
+                      </svg>
+                      <span class="font-medium">SHA256 checksum available</span>
+                    </div>
+                    <div class="font-mono text-xs text-gray-500 break-all mt-1" x-text="firmware_info.sha256_hash"></div>
+                  </div>
+                  <div x-show="!firmware_info.sha256_available" class="mt-2 text-xs text-yellow-600">
+                    <div class="flex items-center">
+                      <svg class="w-3 h-3 mr-1 text-yellow-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01"></path>
+                      </svg>
+                      <span>No checksum available</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              
+              <div class="flex flex-col sm:flex-row gap-3">
+                <a x-bind:href="firmware_info.download_url" 
+                   target="_blank" 
+                   class="flex-1 inline-flex items-center justify-center px-4 py-3 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors font-medium">
+                  <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                  </svg>
+                  {{locales["firmware_download_button"]}}
+                </a>
+                <button @click="start_prod_firmware_upgrade()"
+                        x-show="!firmware_upgrading"
+                        :disabled="production_firmware_upgrading"
+                        :class="production_firmware_upgrading ? 'bg-gray-400 cursor-not-allowed' : 'bg-pcatblue hover:bg-blue-700'"
+                        class="flex-1 inline-flex items-center justify-center px-4 py-3 text-white rounded-lg transition-colors font-medium">
+                  <svg x-show="production_firmware_upgrading" class="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                  <svg x-show="!production_firmware_upgrading" class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path>
+                  </svg>
+                  <span x-text="getProdFirmwareButtonText()"></span>
+                </button>
+                <a x-bind:href="window.location.protocol + '//' + window.location.hostname + ':8080' + firmware_info.luci_flash_url" 
+                   target="_blank" 
+                   class="flex-1 inline-flex items-center justify-center px-4 py-3 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition-colors font-medium">
+                  <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path>
+                  </svg>
+                  {{locales["firmware_flash_button"]}}
+                  <svg class="w-4 h-4 ml-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"></path>
+                  </svg>
+                </a>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Firmware Up to Date - Version Display -->
+        <div x-show="firmware_check_completed && !firmware_update_available" class="mb-3 rounded bg-gradient-to-r from-gray-50 to-blue-50 border border-gray-200 p-3">
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div class="bg-white rounded-lg p-2 border border-green-300">
+              <div class="text-sm text-gray-600 mb-1">{{locales["firmware_current_version"]}}</div>
+              <div class="font-semibold text-gray-800" x-text="format_version_display(firmware_info.local_version)"></div>
+            </div>
+            <div class="bg-white rounded-lg p-2 border hover:border-blue-400 transition-colors cursor-pointer" @click="handleRemoteVersionClick('prod_firmware')">
+              <div class="text-sm text-gray-600 mb-1">{{locales["firmware_latest_version"]}}</div>
+              <div class="font-semibold text-gray-800" x-text="format_version_display(firmware_info.remote_filename)"></div>
+              <div x-show="firmware_info.sha256_available" class="mt-2 text-xs text-gray-600">
+                <div class="flex items-center">
+                  <svg class="w-3 h-3 mr-1 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.99.01l.01-.01"></path>
+                  </svg>
+                  <span class="font-medium">SHA256 available</span>
+                </div>
+                <div class="font-mono text-xs text-gray-500 break-all mt-1" x-text="firmware_info.sha256_hash"></div>
+              </div>
+              <div x-show="!firmware_info.sha256_available" class="mt-2 text-xs text-yellow-600">
+                <div class="flex items-center">
+                  <svg class="w-3 h-3 mr-1 text-yellow-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01"></path>
+                  </svg>
+                  <span>No checksum</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Checkpoint Progress -->
+        <div x-show="checkpoint_mode" class="mb-4 rounded bg-gradient-to-r from-orange-50 to-yellow-50 border border-orange-200 p-4">
+          <div class="flex items-start">
+            <div class="flex-shrink-0 mr-3">
+              <div class="w-10 h-10 bg-orange-100 rounded-full flex items-center justify-center">
+                <svg x-show="checkpoint_status.stage !== 'error'" class="w-6 h-6 text-orange-800 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                </svg>
+                <svg x-show="checkpoint_status.stage === 'error'" class="w-6 h-6 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                </svg>
+              </div>
+            </div>
+            <div class="flex-grow">
+              <h6 class="font-bold text-lg text-orange-800 mb-3">Creating Checkpoint</h6>
+              <p class="text-sm text-orange-800 mb-3" x-text="checkpoint_status.message"></p>
+              <div class="text-xs text-orange-600">
+                Downloading firmware for inspection. You will be asked to confirm before installation.
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Firmware Upgrade Progress -->
+        <div x-show="firmware_upgrading" class="mb-4 rounded bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 p-4">
+          <div class="flex items-start">
+            <div class="flex-shrink-0 mr-3">
+              <div class="w-10 h-10 bg-blue-100 rounded-full flex items-center justify-center">
+                <svg x-show="upgrade_status.stage !== 'error'" class="w-6 h-6 text-blue-800 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                </svg>
+                <svg x-show="upgrade_status.stage === 'error'" class="w-6 h-6 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                </svg>
+              </div>
+            </div>
+            <div class="flex-grow">
+              <h6 class="font-bold text-lg text-blue-800 mb-3">{{locales["firmware_upgrading"]}}</h6>
+              
+              <!-- Stage indicators -->
+              <div class="grid grid-cols-5 gap-2 mb-4">
+                <div class="text-center">
+                  <div class="w-8 h-8 mx-auto rounded-full flex items-center justify-center text-white text-sm font-bold"
+                       :class="upgrade_status.stage === 'download' || upgrade_status.stage === 'verify' || upgrade_status.stage === 'prepare' || upgrade_status.stage === 'install' || upgrade_status.stage === 'restart' ? 'bg-blue-600' : 'bg-gray-300'">1</div>
+                  <div class="text-xs mt-1" :class="upgrade_status.stage === 'download' ? 'text-blue-600 font-semibold' : 'text-gray-500'">{{locales["stage_download"]}}</div>
+                </div>
+                <div class="text-center">
+                  <div class="w-8 h-8 mx-auto rounded-full flex items-center justify-center text-white text-sm font-bold"
+                       :class="upgrade_status.stage === 'verify' || upgrade_status.stage === 'prepare' || upgrade_status.stage === 'install' || upgrade_status.stage === 'restart' ? 'bg-blue-600' : 'bg-gray-300'">2</div>
+                  <div class="text-xs mt-1" :class="upgrade_status.stage === 'verify' ? 'text-blue-600 font-semibold' : 'text-gray-500'">{{locales["stage_verify"] or "Verify"}}</div>
+                </div>
+                <div class="text-center">
+                  <div class="w-8 h-8 mx-auto rounded-full flex items-center justify-center text-white text-sm font-bold"
+                       :class="upgrade_status.stage === 'prepare' || upgrade_status.stage === 'install' || upgrade_status.stage === 'restart' ? 'bg-blue-600' : 'bg-gray-300'">3</div>
+                  <div class="text-xs mt-1" :class="upgrade_status.stage === 'prepare' ? 'text-blue-600 font-semibold' : 'text-gray-500'">{{locales["stage_prepare"]}}</div>
+                </div>
+                <div class="text-center">
+                  <div class="w-8 h-8 mx-auto rounded-full flex items-center justify-center text-white text-sm font-bold"
+                       :class="upgrade_status.stage === 'install' || upgrade_status.stage === 'restart' ? 'bg-blue-600' : 'bg-gray-300'">4</div>
+                  <div class="text-xs mt-1" :class="upgrade_status.stage === 'install' ? 'text-blue-600 font-semibold' : 'text-gray-500'">{{locales["stage_install"]}}</div>
+                </div>
+                <div class="text-center">
+                  <div class="w-8 h-8 mx-auto rounded-full flex items-center justify-center text-white text-sm font-bold"
+                       :class="upgrade_status.stage === 'restart' ? 'bg-green-600' : 'bg-gray-300'">5</div>
+                  <div class="text-xs mt-1" :class="upgrade_status.stage === 'restart' ? 'text-green-600 font-semibold' : 'text-gray-500'">{{locales["stage_restart"]}}</div>
+                </div>
+              </div>
+              
+              <!-- Progress bar removed - logs show progress now -->
+              
+              <!-- Status message -->
+              <p class="text-sm" 
+                 :class="upgrade_status.stage === 'error' ? 'text-red-600' : 'text-blue-800'"
+                 x-text="upgrade_status.message"></p>
+              
+              <!-- SHA256 Verification Display -->
+              <div x-show="upgrade_status.stage === 'verify' && upgrade_status.message && (upgrade_status.message.includes('SHA256') || upgrade_status.message.includes('checksum'))" 
+                   class="mt-3 p-3 rounded-lg border">
+                <div x-show="upgrade_status.message.includes('✅')" class="bg-green-50 border-green-200">
+                  <div class="flex items-start">
+                    <svg class="w-5 h-5 text-green-600 mr-2 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                    </svg>
+                    <div class="flex-grow">
+                      <div class="font-semibold text-green-800 text-sm">✅ SHA256 Verification PASSED</div>
+                      <div class="text-xs text-green-700 mt-1">Firmware integrity verified - safe to proceed with installation</div>
+                    </div>
+                  </div>
+                </div>
+                <div x-show="upgrade_status.message.includes('❌')" class="bg-red-50 border-red-200">
+                  <div class="flex items-start">
+                    <svg class="w-5 h-5 text-red-600 mr-2 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                    </svg>
+                    <div class="flex-grow">
+                      <div class="font-semibold text-red-800 text-sm">❌ SHA256 Verification FAILED</div>
+                      <div class="text-xs text-red-700 mt-1">Firmware integrity check failed - installation blocked for safety</div>
+                    </div>
+                  </div>
+                </div>
+                <div x-show="upgrade_status.message.includes('⚠️')" class="bg-yellow-50 border-yellow-200">
+                  <div class="flex items-start">
+                    <svg class="w-5 h-5 text-yellow-600 mr-2 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.728-.833-2.498 0L3.34 16.5c-.77.833.192 2.5 1.732 2.5z"></path>
+                    </svg>
+                    <div class="flex-grow">
+                      <div class="font-semibold text-yellow-800 text-sm">⚠️ SHA256 Verification Unavailable</div>
+                      <div class="text-xs text-yellow-700 mt-1">Proceeding without checksum verification - ensure firmware source is trusted</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+                 
+              <!-- Warning message during critical stages -->
+              <div x-show="upgrade_status.stage === 'install' || upgrade_status.stage === 'restart'" 
+                   class="mt-3 bg-yellow-100 border border-yellow-400 text-yellow-700 px-3 py-2 rounded text-sm">
+                <strong>⚠️ Warning:</strong> Do not power off or disconnect the device during this process!
+              </div>
+
+              <!-- Cancel button for download stage only -->
+              <div x-show="upgrade_status.stage === 'download'" class="mt-3">
+                <button @click="cancel_firmware_upgrade()"
+                        :disabled="canceling_firmware_download"
+                        :class="canceling_firmware_download ? 'bg-gray-400 cursor-not-allowed' : 'bg-red-600 hover:bg-red-700'"
+                        class="px-3 py-1 text-white rounded text-sm flex items-center">
+                  <svg x-show="canceling_firmware_download" class="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                  <span x-text="getCancelDownloadButtonText()"></span>
+                </button>
+              </div>
+
+              <!-- Additional info for download -->
+              <div x-show="upgrade_status.stage === 'download' && upgrade_status.message.includes('MB')" 
+                   class="mt-2 text-xs text-gray-600">
+                Downloads continue in background even if you navigate away from this page.
+              </div>
+              
+              <!-- Debug info section (expandable) - only show if debug logs enabled -->
+              {% if show_debug_logs %}
+              <div class="mt-3 border-t pt-3">
+                <button @click="show_debug_info = !show_debug_info" 
+                        class="text-xs text-gray-500 hover:text-gray-700 flex items-center">
+                  <svg x-show="!show_debug_info" class="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path>
+                  </svg>
+                  <svg x-show="show_debug_info" class="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+                  </svg>
+                  Show Debug Info
+                </button>
+                
+                <div x-show="show_debug_info" x-transition class="mt-2 bg-gray-50 p-2 rounded text-xs font-mono">
+                  <div><strong>Stage:</strong> <span x-text="upgrade_status.stage || 'none'"></span></div>
+                  <div><strong>Progress:</strong> <span x-text="upgrade_status.progress || 0"></span>%</div>
+                  <div><strong>Active:</strong> <span x-text="upgrade_status.active ? 'Yes' : 'No'"></span></div>
+                  <div><strong>Keep Config:</strong> <span x-text="upgrade_status.keep_config ? 'Yes' : 'No'"></span></div>
+                  <div x-show="upgrade_status.firmware_url"><strong>URL:</strong> <span x-text="upgrade_status.firmware_url" class="break-all"></span></div>
+                  <div x-show="upgrade_status.start_time"><strong>Started:</strong> <span x-text="new Date(upgrade_status.start_time * 1000).toLocaleString()"></span></div>
+                  <div x-show="upgrade_status.error" class="text-red-600"><strong>Error:</strong> <span x-text="upgrade_status.error"></span></div>
+                  <div class="mt-1 text-gray-500">
+                    Download location: /tmp/firmware_upgrade_*<br>
+                    Check server logs for detailed download tool and sysupgrade output.
+                  </div>
+                </div>
+              </div>
+              {% endif %}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>

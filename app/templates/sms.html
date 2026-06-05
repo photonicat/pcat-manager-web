@@ -1,0 +1,13 @@
+{% extends '_base.html' %} {% block html_head0 %}
+<script defer src="/static/socket.io.js"></script>
+{% endblock %} {% block content %}
+<h1>Coming Soon</h1>
+{% endblock %}
+
+{% block bottom %}
+<script>
+  document.addEventListener("alpine:init", () => {
+    Alpine.store("app").set_page("update");
+  });
+</script>
+{% endblock %}

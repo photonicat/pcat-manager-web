@@ -1,0 +1,68 @@
+{
+  "mediatek": [
+    {
+      "设置当前使用的为卡1 > AT+GTDUALSIM=0": "AT+GTDUALSIM=0"
+    },
+    {
+      "设置当前使用的为卡2 > AT+GTDUALSIM=1": "AT+GTDUALSIM=1"
+    },
+    {
+      "手动设置接入点 > AT+CGDCONT=3,\"IPV4V6\",\"APN\"": "AT+CGDCONT=3,\"IPV4V6\",\"在此设置APN\""
+    },
+    {
+      "手动拨号 > AT+CGACT=1,3": "AT+CGACT=1,3"
+    },
+    {
+      "停止拨号 > AT+CGACT=0,3": "AT+CGACT=0,3"
+    },
+    {
+      "查询当前端口模式 > AT+GTUSBMODE?": "AT+GTUSBMODE?"
+    },
+    {
+      "RNDIS拨号模式（40） > AT+GTUSBMODE=40": "AT+GTUSBMODE=40"
+    },
+    {
+      "RNDIS拨号模式（41） > AT+GTUSBMODE=41": "AT+GTUSBMODE=41"
+    },
+    {
+      "锁4G > AT+GTACT=2": "AT+GTACT=2"
+    },
+    {
+      "锁5G > AT+GTACT=14": "AT+GTACT=14"
+    },
+    {
+      "恢复自动搜索网络 > AT+GTACT=20": "AT+GTACT=20"
+    },
+    {
+      "查询当前连接的网络类型 > AT+PSRAT?": "AT+PSRAT?"
+    },
+    {
+      "查询载波聚合小区信息 > AT+GTCAINFO?": "AT+GTCAINFO?"
+    },
+    {
+      "查询模组IMEI > AT+GTSN=0,7": "AT+GTSN=0,7"
+    },
+    {
+      "更改模组IMEI > AT+GTSN=1,7,\"IMEI\"": "AT+GTSN=1,7,\"在此设置IMEI\""
+    },
+    {
+      "解锁FCC > AT+GTFCCLOCKMODE=0": "AT+GTFCCLOCKMODE=0"
+    },
+    {
+      "解除ESIM锁定 > AT+GTESIMCFG=0,0,0": "AT+GTESIMCFG=0,0,0"
+    },
+    {
+      "解除温控 > AT+GTTHERMAL=0": "AT+GTTHERMAL=0"
+    },
+    {
+      "获取当前温度 > AT+GTSENRDTEMP=0": "AT+GTSENRDTEMP=0"
+    },
+    {
+      "重启模组 > AT+CFUN=15": "AT+CFUN=15"
+    },
+    {
+      "注意: FM350不支持漫游偏好配置": "MediaTek modems don't support roaming preference AT commands. Roaming is controlled by network operator and SIM settings."
+    }
+  ],
+  "quectel": []
+}

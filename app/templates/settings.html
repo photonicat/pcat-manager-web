@@ -1,0 +1,592 @@
+{% extends '_base.html' %} {% block content %}
+<div class="container mx-auto w-full pt-10 pb-12 sm:pt-24 sm:pb-12 md:pt-28 lg:px-4" x-data="wifi_settings">
+  <div class="flex items-center justify-between">
+    <h1 class="px-1 py-4 font-bold uppercase text-gray-600">{{locales["nav_settings"]}}</h1>
+  </div>
+
+  {% include '_notification.html' %}
+  <div class="mb-4 flex w-full leading-normal text-gray-800">
+    <div class="grow">
+      <div class="border bg-white">
+        <div class="border-b">
+          <ul class="flex justify-between">
+            {% if stm32_firmware_exist %}
+            <li class="basis-1/4 cursor-pointer border text-center hover:font-semibold">
+              <a href="/device_control" class="block p-1 sm:p-3">{{locales["tab_device_control"]}}</a>
+            </li>
+            <li class="basis-1/4 cursor-pointer border text-center hover:font-semibold">
+              <a href="/general_settings" class="block p-1 sm:p-3">{{locales["tab_general_settings"]}}</a>
+            </li>
+            <li class="basis-1/4 cursor-pointer border border-b-2 border-b-pcatblue text-center font-semibold hover:font-semibold">
+              <a href="/settings" class="block p-1 sm:p-3">Wi-Fi</a>
+            </li>
+            <li class="basis-1/4 cursor-pointer border text-center hover:font-semibold">
+              <a href="/timer" class="block p-1 sm:p-3">{{locales["tab_timers"]}}</a>
+            </li>
+            {% else %}
+            <li class="basis-1/3 cursor-pointer border text-center hover:font-semibold">
+              <a href="/device_control" class="block p-1 sm:p-3">{{locales["tab_device_control"]}}</a>
+            </li>
+            <li class="basis-1/3 cursor-pointer border text-center hover:font-semibold">
+              <a href="/general_settings" class="block p-1 sm:p-3">{{locales["tab_general_settings"]}}</a>
+            </li>
+            <li class="basis-1/3 cursor-pointer border border-b-2 border-b-pcatblue text-center font-semibold hover:font-semibold">
+              <a href="/settings" class="block p-1 sm:p-3">Wi-Fi</a>
+            </li>
+            {% endif %}
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
+  <!--wifi config loading modal-->
+  <div class="modal block" x-cloak x-show="configing">
+    <section class="modal-main w-full sm:w-1/2">
+      <div class="flex items-start justify-between rounded-t border-b p-3">
+        <h3 class="text-base font-semibold text-gray-900 lg:text-xl">{{locales["operation_tip"]}}</h3>
+      </div>
+      <div class="space-y-6 p-6">
+        <p>{{locales["configuring_wifi_message"] | safe}}</p>
+        <p>{{locales["configuring_wifi_message2"]}}</p>
+      </div>
+      <div class="flex items-center justify-center space-x-4 rounded-b border-t border-gray-200 p-4">
+        <img src="/static/loading.gif" />
+      </div>
+    </section>
+  </div>
+  <!-- /modal -->
+
+
+  <div class="mb-8 w-full flex flex-col md:flex-row gap-4 px-2 leading-normal text-gray-800 md:px-0">
+    <div class="grow rounded border bg-white shadow">
+      <div class="flex justify-between border-b p-3">
+        <h5 class="font-bold text-gray-600">
+          <span x-text="wifiinfo_0.device_type"></span> Wi-Fi
+          <span x-show="wifiinfo_0.device_type === 'PCIE' && '{{pcie_wifi_name}}'" class="text-xs font-light text-gray-500 ml-2">{{pcie_wifi_name}}</span>
+        </h5>
+      </div>
+      <div class="p-5">
+        <div class="container mx-auto max-w-xl">
+          <div class="grid grid-cols-1 gap-6 text-center text-gray-400" x-show="!wifi_info_0_available">{{locales["no_wifi_info_config"]}}</div>
+          <div class="grid grid-cols-1 gap-6" x-show="wifi_info_0_available">
+            <label class="block">
+              <span class="text-gray-700">Wi-Fi SSID</span>
+              <input type="text" class="mt-1 block w-full" maxlength="31" required value="" x-model="wifiinfo_0.ssid" />
+              <span class="text-red-500" x-show="ssid_help_text_0 !== ''" x-text="ssid_help_text_0"></span>
+            </label>
+
+            <label class="block"
+              ><span class="text-gray-700">{{locales["wifi_encrp"]}}</span>
+              <select class="mt-1 block w-full" x-model="wifiinfo_0.encryption">
+                <template x-for="option in encryption_options_for(wifiinfo_0)" :key="option[0]">
+                  <option :value="option[0]" :title="option[2] || ''" x-text="option[1]"></option>
+                </template>
+              </select>
+            </label>
+
+            <label class="block" x-data="{plain_password:false}" x-show="wifiinfo_0.encryption != 'none'">
+              <div class="flex items-center justify-between">
+                <span class="text-gray-700">{{locales["wifi_password"]}}</span>
+                <svg x-cloak x-show="!plain_password" @click="plain_password = !plain_password" xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 cursor-pointer" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path>
+                </svg>
+
+                <svg x-cloak x-show="plain_password" @click="plain_password = !plain_password" xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21"></path>
+                </svg>
+              </div>
+
+              <input x-show="!plain_password" type="password" class="mt-1 block w-full" maxlength="40" x-model="wifiinfo_0.password" />
+              <input x-show="plain_password" type="text" class="mt-1 block w-full" maxlength="40" x-model="wifiinfo_0.password" />
+              <span class="text-red-500" x-show="password_help_text_0 !== ''" x-text="password_help_text_0"></span>
+            </label>
+
+            <label class="block"
+              ><span class="text-gray-700">{{locales["wifi_frequency"]}}</span>
+
+              <div class="mt-1 flex flex-wrap gap-2">
+                <template x-for="opt in frequency_options_for(wifiinfo_0)" :key="opt.value">
+                  <label @click="wifiinfo_0.frequency = opt.value"
+                         :class="wifiinfo_0.frequency === opt.value ? 'border-blue-600 bg-gray-50' : ''"
+                         :title="opt.tooltip"
+                         class="relative group flex items-center space-x-4 rounded-lg border px-6 py-2 cursor-pointer">
+                    <span x-text="opt.label"></span>
+                    <span class="pointer-events-none absolute left-1/2 -translate-x-1/2 -top-9 hidden group-hover:block whitespace-nowrap rounded bg-gray-900 px-2 py-1 text-xs text-white shadow-lg z-10"
+                          x-text="opt.tooltip"></span>
+                  </label>
+                </template>
+              </div></label
+            ><!--<label class="flex items-center">
+              <span class="mr-4 text-gray-700">{{locales["hide_wifi_ssid"]}}</span>
+              <input type="checkbox" class="" x-model="wifiinfo_0.hide_ssid" />
+            </label>-->
+
+            <div class="mb-6 flex space-x-2 items-end sm:space-x-4">
+              <div class="flex flex-col flex-wrap">
+                <div class="text-gray-700 mb-2">{{locales["toggle_wifi"]}}</div>
+                <label class="relative flex cursor-pointer items-center">
+                  <input class="peer sr-only" type="checkbox" x-model="wifiinfo_0.enabled" />
+                  <div
+                    class="h-6 w-11 rounded-full border-2 border-gray-200 bg-gray-200 after:absolute after:top-0.5 after:left-0.5 after:h-5 after:w-5 after:rounded-full after:border after:border-gray-300 after:bg-white after:shadow-sm after:transition-all after:duration-300 peer-checked:border-blue-600 peer-checked:bg-blue-600 peer-checked:after:translate-x-full peer-checked:after:border-white"
+                  ></div>
+                  <span class="ml-2 select-none text-base text-gray-400" x-text="wifiinfo_0.enabled ? '{{locales['common_enable']}}' : '{{locales['common_disable']}}'"></span>
+                </label>
+              </div>
+            </div>
+
+            <div class="mt-4 flex justify-between">
+              <button type="button" 
+                      :disabled="wifi_0_loading"
+                      :class="wifi_0_loading ? 'bg-gray-400 cursor-not-allowed' : 'bg-pcatblue hover:bg-pcatblue-400'"
+                      class="focus:ring-blue-300 mr-2 mb-2 w-full rounded-lg px-5 py-2.5 text-center text-sm font-medium text-white focus:ring-4 sm:w-32 flex items-center justify-center" 
+                      @click="config_wifi_0">
+                <!-- Loading Spinner -->
+                <svg x-show="wifi_0_loading" class="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                  <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                  <path class="opacity-75" fill="currentColor" d="m4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                <!-- Button Text -->
+                <span x-text="wifi_0_loading ? 'Saving...' : '{{locales['common_save']}}'"></span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div><!--/p-5-->
+    </div>
+    <div class="grow rounded border bg-white shadow" x-show="wifi_info_1_available">
+      <div class="flex justify-between border-b p-3">
+        <h5 class="font-bold text-gray-600">
+          <span x-text="wifiinfo_1.device_type"></span> Wi-Fi
+          <span x-show="wifiinfo_1.device_type === 'PCIE' && '{{pcie_wifi_name}}'" class="text-xs font-light text-gray-500 ml-2">{{pcie_wifi_name}}</span>
+        </h5>
+      </div>
+      <div class="p-5">
+        <div class="container mx-auto max-w-xl">
+          <div class="grid grid-cols-1 gap-6 text-center text-gray-400" x-show="!wifi_info_1_available">{{locales["no_wifi_info_config"]}}</div>
+          <div class="grid grid-cols-1 gap-6" x-show="wifi_info_1_available">
+            <label class="block">
+              <span class="text-gray-700">Wi-Fi SSID</span>
+              <input type="text" class="mt-1 block w-full" maxlength="31" required value="" x-model="wifiinfo_1.ssid" />
+              <span class="text-red-500" x-show="ssid_help_text_1 !== ''" x-text="ssid_help_text_1"></span>
+            </label>
+
+            <label class="block"
+              ><span class="text-gray-700">{{locales["wifi_encrp"]}}</span>
+              <select class="mt-1 block w-full" x-model="wifiinfo_1.encryption">
+                <template x-for="option in encryption_options_for(wifiinfo_1)" :key="option[0]">
+                  <option :value="option[0]" :title="option[2] || ''" x-text="option[1]"></option>
+                </template>
+              </select>
+            </label>
+
+            <label class="block" x-data="{plain_password:false}" x-show="wifiinfo_1.encryption != 'none'">
+              <div class="flex items-center justify-between">
+                <span class="text-gray-700">{{locales["wifi_password"]}}</span>
+                <svg x-cloak x-show="!plain_password" @click="plain_password = !plain_password" xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 cursor-pointer" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path>
+                </svg>
+
+                <svg x-cloak x-show="plain_password" @click="plain_password = !plain_password" xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21"></path>
+                </svg>
+              </div>
+
+              <input x-show="!plain_password" type="password" class="mt-1 block w-full" maxlength="40" x-model="wifiinfo_1.password" />
+              <input x-show="plain_password" type="text" class="mt-1 block w-full" maxlength="40" x-model="wifiinfo_1.password" />
+              <span class="text-red-500" x-show="password_help_text_1 !== ''" x-text="password_help_text_1"></span>
+            </label>
+
+            <label class="block">
+              <span class="text-gray-700">{{locales["wifi_frequency"]}}</span>
+
+              <div class="mt-1 flex flex-wrap gap-2">
+                <template x-for="opt in frequency_options_for(wifiinfo_1)" :key="opt.value">
+                  <label @click="wifiinfo_1.frequency = opt.value"
+                         :class="wifiinfo_1.frequency === opt.value ? 'border-blue-600 bg-gray-50' : ''"
+                         :title="opt.tooltip"
+                         class="relative group flex items-center space-x-4 rounded-lg border px-6 py-2 cursor-pointer">
+                    <span x-text="opt.label"></span>
+                    <span class="pointer-events-none absolute left-1/2 -translate-x-1/2 -top-9 hidden group-hover:block whitespace-nowrap rounded bg-gray-900 px-2 py-1 text-xs text-white shadow-lg z-10"
+                          x-text="opt.tooltip"></span>
+                  </label>
+                </template>
+              </div>
+            </label>
+
+            <div class="mb-6 flex space-x-2 items-end sm:space-x-4">
+              <div class="flex flex-col flex-wrap">
+                <div class="text-gray-700 mb-2">{{locales["toggle_wifi"]}}</div>
+                <label class="relative flex cursor-pointer items-center">
+                  <input class="peer sr-only" type="checkbox" x-model="wifiinfo_1.enabled" />
+                  <div
+                    class="h-6 w-11 rounded-full border-2 border-gray-200 bg-gray-200 after:absolute after:top-0.5 after:left-0.5 after:h-5 after:w-5 after:rounded-full after:border after:border-gray-300 after:bg-white after:shadow-sm after:transition-all after:duration-300 peer-checked:border-blue-600 peer-checked:bg-blue-600 peer-checked:after:translate-x-full peer-checked:after:border-white"
+                  ></div>
+                  <span class="ml-2 select-none text-base text-gray-400" x-text="wifiinfo_1.enabled ? '{{locales['common_enable']}}' : '{{locales['common_disable']}}'"></span>
+                </label>
+              </div>
+            </div>
+
+            <div class="mt-4 flex justify-between">
+              <button type="button" 
+                      :disabled="wifi_1_loading"
+                      :class="wifi_1_loading ? 'bg-gray-400 cursor-not-allowed' : 'bg-pcatblue hover:bg-pcatblue-400'"
+                      class="focus:ring-blue-300 mr-2 mb-2 w-full rounded-lg px-5 py-2.5 text-center text-sm font-medium text-white focus:ring-4 sm:w-32 flex items-center justify-center" 
+                      @click="config_wifi_1">
+                <!-- Loading Spinner -->
+                <svg x-show="wifi_1_loading" class="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                  <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                  <path class="opacity-75" fill="currentColor" d="m4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                <!-- Button Text -->
+                <span x-text="wifi_1_loading ? 'Saving...' : '{{locales['common_save']}}'"></span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div><!--/p-5-->
+    </div>
+  </div>
+
+</div>
+<!--/container.w-full-->
+
+{% endblock %} {% block bottom %}
+<script>
+  document.addEventListener("alpine:init", () => {
+    Alpine.store("app").set_page("settings");
+
+    Alpine.data("wifi_settings", () => ({
+      init() {
+        this.$watch("wifiinfo_0.ssid", (value) => {
+          if (value.length > 0) {
+            if (value.length < 32) {
+              this.ssid_help_text_0 = "";
+            } else {
+              this.ssid_help_text_0 = "{{locales['wifi_ssid_too_long']}}";
+            }
+          }
+        });
+
+        this.$watch("wifiinfo_0.password", (value) => {
+          if (this.wifiinfo_0.encryption !== "none") {
+            if (value !== undefined && value.length > 0) {
+              if (value.length < 8) {
+                this.password_help_text_0 = "{{locales['wifi_password_at_least_8']}}";
+              } else {
+                this.password_help_text_0 = "";
+              }
+            }
+          }
+        });
+
+        this.$watch("wifiinfo_1.ssid", (value) => {
+          if (value.length > 0) {
+            if (value.length < 32) {
+              this.ssid_help_text_1 = "";
+            } else {
+              this.ssid_help_text_1 = "{{locales['wifi_ssid_too_long']}}";
+            }
+          }
+        });
+
+        this.$watch("wifiinfo_1.frequency", (value) => {
+          if (value === "6g_be") {
+            this.wifiinfo_1.encryption = "sae";
+          }
+        });
+
+        this.$watch("wifiinfo_1.password", (value) => {
+          if (this.wifiinfo_1.encryption !== "none") {
+            if (value !== undefined && value.length > 0) {
+              if (value.length < 8) {
+                this.password_help_text_1 = "{{locales['wifi_password_at_least_8']}}";
+              } else {
+                this.password_help_text_1 = "";
+              }
+            }
+          }
+        });
+
+        fetch("/api/v2/wireless.json")
+          .then((response) => response.json())
+          .then((data) => {
+            if(data.interfaces.length > 0) {
+              this.wifi_info_0_available = data.interfaces[0]["exist"];
+
+              if (this.wifi_info_0_available) {
+                let info = {
+                  ssid: data.interfaces[0]["ssid"] || "",
+                  encryption: data.interfaces[0]["encryption"] || "",
+                  password: data.interfaces[0]["password"],
+                  frequency: data.interfaces[0]["frequency"],
+                  hide_ssid: data.interfaces[0]["hidden"] === "1",
+                  device_type: data.interfaces[0]["device_type"],
+                  device: data.interfaces[0]["device"],
+                  enabled: data.interfaces[0]["enabled"],
+                  capabilities: data.interfaces[0]["capabilities"] || {is_pcie: false, bands: {}}
+                };
+                this.wifiinfo_0 = info;
+              }
+
+              if(data.interfaces.length > 1) {
+                this.wifi_info_1_available = data.interfaces[1]["exist"];
+
+                if (this.wifi_info_1_available) {
+                  let info = {
+                    ssid: data.interfaces[1]["ssid"] || "",
+                    encryption: data.interfaces[1]["encryption"] || "",
+                    password: data.interfaces[1]["password"],
+                    frequency: data.interfaces[1]["frequency"],
+                    hide_ssid: data.interfaces[1]["hidden"] === "1",
+                    device_type: data.interfaces[1]["device_type"],
+                    device: data.interfaces[1]["device"],
+                    enabled: data.interfaces[1]["enabled"],
+                    capabilities: data.interfaces[1]["capabilities"] || {is_pcie: false, bands: {}}
+                  };
+                  this.wifiinfo_1 = info;
+                }
+              }
+            }
+          });
+      },
+      configing: false,
+      configing_timeout: 0,
+      // [value, label, tooltip]
+      encrp_options: [
+        ["none", "No Encryption", "Open network · no authentication"],
+        ["psk2", "WPA2-PSK", "WPA2 Personal · AES-CCMP · PSK"],
+      ],
+
+      encrp_options_wifi6: [
+        ["none", "No Encryption", "Open network · no authentication"],
+        ["psk2", "WPA2-PSK", "WPA2 Personal · AES-CCMP · PSK"],
+      ],
+
+      encrp_option_sae: ["sae", "WPA3-SAE", "WPA3 Personal · SAE · PMF required"],
+
+      // Frequency catalog. shown decides per-radio visibility from board.json caps.
+      // tooltip is the hover hint described in the UI.
+      freq_catalog: [
+        {value: "2g",    label: "2.4 GHz (N)",  tooltip: "Wi-Fi 4 · HT20 · 20 MHz · ch 1-11",
+         shown: c => true},
+        {value: "5g",    label: "5 GHz (AC)",   tooltip: "Wi-Fi 5 · VHT40 · 40 MHz · ch 149",
+         shown: c => !!(c.bands && c.bands["5g"] && c.bands["5g"].vht)},
+        {value: "5g_ax", label: "5 GHz (AX)",   tooltip: "Wi-Fi 6 · HE80 · 80 MHz · ch 149",
+         shown: c => !!(c.bands && c.bands["5g"] && c.bands["5g"].he)},
+        {value: "5g_be", label: "5 GHz (BE)",   tooltip: "Wi-Fi 7 · EHT80 · 80 MHz · ch 149",
+         shown: c => !!(c.bands && c.bands["5g"] && c.bands["5g"].eht)},
+        {value: "6g_be", label: "6 GHz (BE)",   tooltip: "Wi-Fi 7 · EHT320 · 320 MHz · ch 201 · WPA3 required",
+         shown: c => !!(c.bands && c.bands["6g"] && c.bands["6g"].eht)},
+      ],
+
+      frequency_options_for(info) {
+        let caps = info && info.capabilities ? info.capabilities : {bands: {}};
+        // Legacy fallback: if the device says PCIE but capabilities are empty
+        // (e.g. board.json missing), keep 5 GHz (AX) visible like before.
+        let legacy_pcie = info && info.device_type === "PCIE" && (!caps.bands || Object.keys(caps.bands || {}).length === 0);
+        return this.freq_catalog.filter(o => o.shown(caps) || (legacy_pcie && o.value === "5g_ax"));
+      },
+
+      encryption_options_for(info) {
+        // 6 GHz mandates WPA3-SAE; only show SAE option.
+        if (info && info.frequency === "6g_be") {
+          return [this.encrp_option_sae];
+        }
+        let base = this.encrp_options_wifi6.slice();
+        let is_be = info && info.frequency === "5g_be";
+        if (is_be) base.push(this.encrp_option_sae);
+        return base;
+      },
+
+      wifi_info_0_available: false,
+      wifi_info_1_available: false,
+      wifiinfo_0: {
+        ssid: "",
+        password: "",
+        encryption: "none",
+        frequency: "2g",
+        hide_ssid: false,
+        device: '',
+        device_type: '',
+        enabled: true,
+        capabilities: {is_pcie: false, bands: {}}
+      },
+
+      wifiinfo_1: {
+        ssid: "",
+        password: "",
+        encryption: "none",
+        frequency: "2g",
+        hide_ssid: false,
+        device: '',
+        device_type: '',
+        enabled: true,
+        capabilities: {is_pcie: false, bands: {}}
+      },
+
+      ssid_help_text_0: "",
+      ssid_help_text_1: "",
+      password_help_text_0: "",
+      password_help_text_1: "",
+
+      notification: {
+        show: false,
+        message: '',
+        message_en: '',
+        message_cn: '',
+        type: 'info' // 'success', 'error', 'info'
+      },
+      
+      // Loading states for AJAX buttons
+      wifi_0_loading: false,
+      wifi_1_loading: false,
+      config_wifi_0() {
+        // Prevent double-clicks
+        if (this.wifi_0_loading) return;
+        
+        let wifiinfo = this.wifiinfo_0;
+        wifiinfo.ssid = wifiinfo.ssid.trim();
+        this.wifiinfo_0 = wifiinfo;
+        if (this.wifiinfo_0.ssid === "") {
+          this.ssid_help_text_0 = "{{locales['wifi_ssid_is_empty']}}";
+          return;
+        } else if (this.wifiinfo_0.ssid.length > 32) {
+          this.ssid_help_text_0 = "{{locales['wifi_ssid_too_long']}}";
+          return;
+        }
+
+        if (this.wifiinfo_0.encryption !== "none") {
+          if (this.wifiinfo_0.password === "") {
+            this.password_help_text_0 = "{{locales['wifi_password_is_empty']}}";
+            return;
+          } else if (this.wifiinfo_0.password.length < 8) {
+            this.password_help_text_0 = "{{locales['wifi_password_at_least_8']}}";
+            return;
+          }
+        }
+
+        // Set loading state
+        this.wifi_0_loading = true;
+
+        const requestOptions = {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(this.wifiinfo_0),
+        };
+        fetch("/api/v1/wireless.json", requestOptions)
+          .then((response) => response.json())
+          .then((data) => {
+            if (data.status === "ok") {
+              this.configing = true;
+              this.configing_timeout = 9;
+              let _this = this;
+              let interval = setInterval(function(){
+                _this.configing_timeout = _this.configing_timeout - 1;
+                if(_this.configing_timeout == 0) {
+                  clearInterval(interval);
+                  _this.configing = false;
+                  _this.wifi_0_loading = false;
+                  window.location.reload();
+                }
+              }, 1000);
+            } else {
+              this.wifi_0_loading = false;
+              this.showNotification(data.message, data.message, 'error');
+            }
+          })
+          .catch((error) => {
+            this.wifi_0_loading = false;
+            this.showNotification('Network error occurred', '网络错误', 'error');
+            console.error('WiFi 0 configuration error:', error);
+          });
+      },
+
+      config_wifi_1() {
+        // Prevent double-clicks
+        if (this.wifi_1_loading) return;
+        
+        let wifiinfo = this.wifiinfo_1;
+        wifiinfo.ssid = wifiinfo.ssid.trim();
+        this.wifiinfo_1 = wifiinfo;
+        if (this.wifiinfo_1.ssid === "") {
+          this.ssid_help_text_1 = "{{locales['wifi_ssid_is_empty']}}";
+          return;
+        } else if (this.wifiinfo_1.ssid.length > 32) {
+          this.ssid_help_text_1 = "{{locales['wifi_ssid_too_long']}}";
+          return;
+        }
+
+        if (this.wifiinfo_1.encryption !== "none") {
+          if (this.wifiinfo_1.password === "") {
+            this.password_help_text_1 = "{{locales['wifi_password_is_empty']}}";
+            return;
+          } else if (this.wifiinfo_1.password.length < 8) {
+            this.password_help_text_1 = "{{locales['wifi_password_at_least_8']}}";
+            return;
+          }
+        }
+
+        // Set loading state
+        this.wifi_1_loading = true;
+
+        const requestOptions = {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(this.wifiinfo_1),
+        };
+        fetch("/api/v1/wireless.json", requestOptions)
+          .then((response) => response.json())
+          .then((data) => {
+            if (data.status === "ok") {
+              this.configing = true;
+              this.configing_timeout = 9;
+              let _this = this;
+              let interval = setInterval(function(){
+                _this.configing_timeout = _this.configing_timeout - 1;
+                if(_this.configing_timeout == 0) {
+                  clearInterval(interval);
+                  _this.configing = false;
+                  _this.wifi_1_loading = false;
+                  window.location.reload();
+                }
+              }, 1000);
+            } else {
+              this.wifi_1_loading = false;
+              this.showNotification(data.message, data.message, 'error');
+            }
+          })
+          .catch((error) => {
+            this.wifi_1_loading = false;
+            this.showNotification('Network error occurred', '网络错误', 'error');
+            console.error('WiFi 1 configuration error:', error);
+          });
+      },
+
+      showNotification(message_en, message_cn = '', type = 'info') {
+        this.notification.message_en = message_en;
+        this.notification.message_cn = message_cn;
+        this.notification.message = message_en; // Fallback
+        this.notification.type = type;
+        this.notification.show = true;
+        
+        // Auto-hide after 4 seconds for success and info messages
+        if (type !== 'error') {
+          setTimeout(() => {
+            this.notification.show = false;
+          }, 4000);
+        }
+        
+        // Also log to console for debugging
+        console.log(type.toUpperCase() + ': ' + message_en);
+      },
+
+      hideNotification() {
+        this.notification.show = false;
+      },
+
+    }));
+  });
+</script>
+{% endblock %}

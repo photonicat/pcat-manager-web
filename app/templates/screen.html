@@ -1,0 +1,2206 @@
+{% extends '_base.html' %}
+{% block html_head0 %}
+  <script defer src="/static/socket.io.js"></script>
+{% endblock %}
+
+{% block content %}
+<div class="container mx-auto w-full pt-10 pb-12 sm:pt-24 sm:pb-12 md:pt-28 lg:px-4" x-data="screen()" x-init="init()">
+  <div class="flex items-center justify-between">
+    <h1 class="px-1 py-4 font-bold uppercase text-gray-600">
+      {{ locales["nav_screen"] }}
+    </h1>
+  </div>
+
+  {% include '_notification.html' %}
+
+  <div class="mb-4 w-full flex flex-col md:flex-row gap-4 px-2 leading-normal text-gray-800 md:px-0">
+    <div class="grow rounded border bg-white shadow">
+      <!-- tabs: 2 equal-width, span the full bar (Settings | Editor) -->
+      <div class="flex items-center justify-between border-b grow">
+        <div class="flex items-stretch font-bold text-gray-600 grow">
+          <button @click="switch_tab('screen_settings')" :class="tab_page === 'screen_settings' ? 'border-b-2 border-b-pcatblue' : ''" class="flex-1 items-center border-x px-4 py-3">
+            {{ locales["tab_screen_settings"] }}
+          </button>
+          <button @click="switch_tab('screen_editor')" :class="tab_page === 'screen_editor' ? 'border-b-2 border-b-pcatblue' : ''" class="flex-1 items-center border-x px-4 py-3">
+            {{ locales["tab_screen_editor"] }}
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- screen_settings panel -->
+  <div class="flex flex-wrap" x-show="tab_page === 'screen_settings'" x-cloak>
+    <!-- screen settings -->
+    <div class="flex-grow bg-white shadow rounded flex flex-col overflow-y-auto mr-4 mb-4 pb-4">
+      <div class="flex justify-between border-b p-3">
+        <h5 class="font-bold text-gray-600">{{ locales["screen_settings_title"] }}</h5>
+      </div>
+      <div class="flex flex-col sm:flex-row gap-4 p-4">
+        <table class="list-info w-full p-5 text-gray-700 mb-4">
+          <tbody>
+            <tr>
+              <td class="text-left font-semibold">{{ locales["on_battery_auto_dim_time"] }}</td>
+              <td class="text-right font-semibold">
+                <div class="flex items-center justify-end">
+                  <input type="number" x-model.number="basic.on_battery_auto_dim_time" placeholder="-" class="w-40 text-center border rounded px-2 py-1"/>
+                </div>
+              </td>
+            </tr>
+            <tr>
+              <td class="text-left font-semibold">{{ locales["on_charger_auto_dim_time"] }}</td>
+              <td class="text-right font-semibold">
+                <div class="flex items-center justify-end">
+                  <input type="number" x-model.number="basic.on_charger_auto_dim_time" placeholder="-" class="w-40 text-center border rounded px-2 py-1"/>
+                </div>
+              </td>
+            </tr>
+            <tr>
+              <td class="text-left font-semibold">{{ locales["ping_site0"] }}</td>
+              <td class="text-right font-semibold">
+                <div class="flex items-center justify-end">
+                  <input type="text" x-model="basic.ping_site0" placeholder="" class="w-40 text-center border rounded px-2 py-1"/>
+                </div>
+              </td>
+            </tr>
+            <tr>
+              <td class="text-left font-semibold">{{ locales["ping_site1"] }}</td>
+              <td class="text-right font-semibold">
+                <div class="flex items-center justify-end">
+                  <input type="text" x-model="basic.ping_site1" placeholder="" class="w-40 text-center border rounded px-2 py-1"/>
+                </div>
+              </td>
+            </tr>
+            <tr>
+              <td class="text-left font-semibold">{{ locales["screen_max_brightness"] }} 1 - 100</td>
+              <td class="text-right font-semibold">
+                <div class="flex items-center justify-end">
+                  <input type="number" x-model.number="basic.screen_max_brightness" placeholder="" min="1" max="100" class="w-40 text-center border rounded px-2 py-1"/>
+                </div>
+              </td>
+            </tr>
+            <tr>
+              <td class="text-left font-semibold">{{ locales["screen_min_brightness"] }} 0 - 100</td>
+              <td class="text-right font-semibold">
+                <div class="flex items-center justify-end">
+                  <input type="number" x-model.number="basic.screen_min_brightness" placeholder="" min="0" max="100" class="w-40 text-center border rounded px-2 py-1"/>
+                </div>
+              </td>
+            </tr>
+            <tr>
+              <td class="text-left font-semibold">{{ locales["show_sms_feature"] }}</td>
+              <td class="text-right font-semibold">
+                <div class="flex items-center justify-end">
+                  <label class="relative flex cursor-pointer items-center">
+                    <input class="peer sr-only" type="checkbox" x-model="basic.show_sms"/>
+                    <div class="h-6 w-11 rounded-full border-2 border-gray-200 bg-gray-200 after:absolute after:top-0.5 after:left-0.5 after:h-5 after:w-5 after:rounded-full after:border after:border-gray-300 after:bg-white after:shadow-sm after:transition-all after:duration-300 peer-checked:border-blue-600 peer-checked:bg-blue-600 peer-checked:after:translate-x-full peer-checked:after:border-white"></div>
+                    <span class="ml-2 select-none text-base text-gray-400" x-text="basic.show_sms ? '{{locales['common_enable']}}' : '{{locales['common_disable']}}'"></span>
+                  </label>
+                </div>
+              </td>
+            </tr>
+            <tr x-show="basic.show_sms">
+              <td class="text-left font-semibold">{{ locales["sms_limit_for_screen"] }} 1 - 100</td>
+              <td class="text-right font-semibold">
+                <div class="flex items-center justify-end">
+                  <input type="number" x-model.number="basic.sms_limit_for_screen" placeholder="5" min="1" max="100" class="w-40 text-center border rounded px-2 py-1"/>
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="flex space-x-2 flex-wrap justify-end px-4">
+        <button @click="saveSettings()" 
+                :disabled="loading.saveSettings" 
+                :class="loading.saveSettings ? 'bg-gray-400 cursor-not-allowed' : 'bg-pcatblue hover:bg-pcatblue-400'" 
+                class="text-white px-4 py-2 rounded-lg font-semibold w-40 flex items-center justify-center">
+          <svg x-show="loading.saveSettings" class="animate-spin -ml-1 mr-2 h-4 w-4 text-white" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+          </svg>
+          <span x-text="getSaveSettingsButtonText()"></span>
+        </button>
+      </div>
+    </div>
+    <!-- screen preview -->
+    <div class="min-w-[300px] max-w-[300px] bg-white shadow rounded flex flex-col flex-start mb-4">
+      <div class="flex justify-between border-b p-3">
+        <h5 class="font-bold text-gray-600">{{ locales["screen_live_title"] }}</h5>
+      </div>
+      <div class="flex items-center justify-center p-4">
+        <img :src="frameSrc" alt="Screen frame" class="max-w-full max-h-[400px] rounded-2xl" />
+      </div>
+      <div class="flex flex-wrap justify-center px-4 mt-auto mb-4">
+        <button @click="shortClick()" 
+                :disabled="loading.shortClick" 
+                :class="loading.shortClick ? 'bg-green-600 scale-95' : 'bg-green-500 hover:bg-green-600 active:scale-95'" 
+                class="text-white px-4 py-2 rounded-lg font-semibold w-40 flex items-center justify-center space-x-2 transition-all duration-75">
+          <svg x-show="loading.shortClick" class="animate-spin h-4 w-4 text-white" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+          </svg>
+          <img x-show="!loading.shortClick" src="/static/short_click.svg" class="w-4 h-4" />
+          <span x-text="getShortClickButtonText()"></span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- merged Editor tab: top row = Canvas | Attributes | Live (3 equal cols);
+       bottom row = full-width JSON with a Diff|Full toggle -->
+  <div x-show="tab_page === 'screen_editor'" x-cloak class="flex flex-col gap-4 bg-gray-100 p-2 rounded">
+
+  <!-- top row: three equal-width columns (each exactly 1/3 via grid), each its own card.
+       grid-cols-3 + min-w-0 keeps the thirds equal at every width and never wraps -->
+  <div class="grid grid-cols-3 items-stretch gap-4">
+
+    <!-- left column (1/3): page selector + 172x320 canvas -->
+    <div class="bg-white shadow rounded flex flex-col min-w-0 overflow-x-auto">
+      <!-- uniform header bar: title + undo/redo (fixed height so all 3 columns match) -->
+      <div class="flex items-center justify-between border-b px-3 h-[52px] shrink-0">
+        <h5 class="font-bold text-gray-600 truncate">{{ locales["visual_canvas_title"] }}</h5>
+        <!-- undo / redo (Ctrl+Z / Ctrl+Shift+Z) -->
+        <div class="flex space-x-1 shrink-0">
+          <button @click="undo()" :disabled="!canUndo()" title="{{ locales['visual_undo'] | default('Undo') }} (Ctrl+Z)"
+                  :class="canUndo() ? 'text-gray-700 hover:bg-gray-200' : 'text-gray-300 cursor-not-allowed'"
+                  class="p-1.5 rounded">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M9 14L4 9l5-5"></path>
+              <path stroke-linecap="round" stroke-linejoin="round" d="M4 9h11a5 5 0 0 1 0 10h-1"></path>
+            </svg>
+          </button>
+          <button @click="redo()" :disabled="!canRedo()" title="{{ locales['visual_redo'] | default('Redo') }} (Ctrl+Shift+Z)"
+                  :class="canRedo() ? 'text-gray-700 hover:bg-gray-200' : 'text-gray-300 cursor-not-allowed'"
+                  class="p-1.5 rounded">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M15 14l5-5-5-5"></path>
+              <path stroke-linecap="round" stroke-linejoin="round" d="M20 9H9a5 5 0 0 0 0 10h1"></path>
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- body -->
+      <div class="flex flex-col p-3">
+      <!-- page selector -->
+      <div class="grid grid-cols-4 gap-1 mb-3">
+        <template x-for="p in [0,1,2,3]" :key="p">
+          <button @click="vpage = p"
+                  :class="vpage === p ? 'bg-pcatblue text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'"
+                  class="px-2 py-1 rounded text-sm font-semibold"
+                  x-text="`{{ locales['visual_page'] }} ${p}`"></button>
+        </template>
+      </div>
+
+      <!-- the device screen, intrinsically 258x480 (172x320 @ 1.5x). It is wrapped in
+           a scaler that shrinks it to fit narrow columns; the inner canvas is absolutely
+           positioned and CSS-transformed, so the wrapper's (scaled) height drives layout
+           flow and the column never overflows. The drag math reads the real on-screen
+           scale from the DOM (effScale) so editing stays accurate at any size. -->
+      <div class="relative mx-auto w-full overflow-hidden" x-ref="canvasBox"
+           :style="`max-width:258px;height:${480 * canvasCssScale}px;`">
+      <div class="absolute top-0 left-0 select-none rounded-lg overflow-hidden origin-top-left"
+           :style="`width:258px;height:480px;background:#0a0a12;transform:scale(${canvasCssScale});`"
+           @mousemove="onCanvasMove($event)" @mouseup="onCanvasUp()" @mouseleave="onCanvasUp()"
+           x-ref="canvas">
+        <!-- ===== TOP BAR & FOOTER — REAL pixels from the live device frame =====
+             Instead of reconstructing them, we slice the actual /screen/frame.png
+             (native 172x320, shown here at 258x480 = ×1.5). The top 32px LCD band
+             (→48px) and bottom 22px band (→33px) are cropped straight from the live
+             image via background-position, so they look EXACTLY like the device.
+             frameTs busts the cache so they refresh with the live preview. -->
+        <div class="absolute left-0 right-0 top-0 select-none pointer-events-none"
+             :style="`height:48px;background-image:url('${frameSrc}');background-repeat:no-repeat;background-size:258px 480px;background-position:left top;image-rendering:pixelated;`"></div>
+
+        <div class="absolute left-0 right-0 bottom-0 select-none pointer-events-none"
+             :style="`height:33px;background-image:url('${frameSrc}');background-repeat:no-repeat;background-size:258px 480px;background-position:left bottom;image-rendering:pixelated;`"></div>
+
+        <!-- thin guide lines marking the editable middle region boundaries -->
+        <div class="absolute left-0 right-0 pointer-events-none border-b border-pcatblue/40" style="top:48px;"></div>
+        <div class="absolute left-0 right-0 pointer-events-none border-t border-pcatblue/40" style="bottom:33px;"></div>
+
+        <template x-for="(el, idx) in pageElements()" :key="idx">
+          <div @mousedown="onElementDown($event, idx, 'move')"
+               :class="selectedIdx === idx ? 'ring-2 ring-pcatblue' : 'ring-1 ring-transparent hover:ring-gray-500'"
+               :style="elementStyle(el)"
+               class="absolute cursor-move whitespace-nowrap">
+            <span x-text="elementLabel(el)"></span>
+            <!-- resize handle for sized elements (graph/icon) -->
+            <div x-show="selectedIdx === idx && el.size"
+                 @mousedown.stop="onElementDown($event, idx, 'resize')"
+                 class="absolute bottom-0 right-0 w-3 h-3 bg-pcatblue cursor-se-resize"></div>
+          </div>
+        </template>
+      </div>
+      </div><!-- /canvas scaler -->
+      <p class="text-xs text-gray-400 mt-2 text-center">172 × 320 px · {{ locales["visual_drag_hint"] }}</p>
+      <p class="text-[11px] text-amber-600/80 mt-1 text-center leading-relaxed">ⓘ {{ locales["visual_zones_hint"] }}</p>
+      <p class="text-[11px] text-gray-400 mt-1 text-center leading-relaxed">{{ locales["visual_shortcuts_hint"] | default("Shortcuts: arrows nudge · Shift+arrows ×10 · Ctrl+Z undo · Ctrl+Shift+Z redo · Ctrl+D duplicate · Del delete · Ctrl+S save") }}</p>
+
+      <div class="grid grid-cols-2 gap-2 mt-4">
+        <!-- row 1: primary actions -->
+        <button @click="addElement()"
+                class="bg-green-500 hover:bg-green-600 text-white px-3 py-2 rounded-lg text-sm font-semibold shadow-sm transition-colors flex items-center justify-center">
+          + {{ locales["visual_add_element"] }}
+        </button>
+        <button @click="saveVisual()"
+                :disabled="loading.saveVisual"
+                :class="loading.saveVisual ? 'bg-gray-400 cursor-not-allowed' : 'bg-pcatblue hover:bg-pcatblue-400'"
+                class="text-white px-3 py-2 rounded-lg text-sm font-semibold shadow-sm transition-colors flex items-center justify-center">
+          <svg x-show="loading.saveVisual" class="animate-spin -ml-1 mr-2 h-4 w-4 text-white" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+          </svg>
+          <span x-text="getSaveVisualButtonText()"></span>
+        </button>
+
+        <!-- row 2: view / reload -->
+        <button @click="labelMode = (labelMode === 'label' ? 'key' : 'label')"
+                class="bg-gray-200 hover:bg-gray-300 text-gray-700 px-3 py-2 rounded-lg text-sm font-semibold transition-colors flex items-center justify-center"
+                x-text="labelMode === 'label' ? '{{ locales.visual_show_key }}' : '{{ locales.visual_show_label }}'"></button>
+        <button @click="loadVisual()"
+                class="bg-gray-200 hover:bg-gray-300 text-gray-700 px-3 py-2 rounded-lg text-sm font-semibold transition-colors flex items-center justify-center">
+          {{ locales["visual_reload"] }}
+        </button>
+
+        <!-- row 3: revert / reset (destructive) -->
+        <button @click="revertVisual()"
+                class="bg-gray-200 hover:bg-gray-300 text-gray-700 px-3 py-2 rounded-lg text-sm font-semibold transition-colors flex items-center justify-center">
+          {{ locales["visual_revert_saved"] }}
+        </button>
+        <button @click="resetVisualDefault()"
+                class="bg-red-100 hover:bg-red-200 text-red-700 px-3 py-2 rounded-lg text-sm font-semibold transition-colors flex items-center justify-center">
+          {{ locales["visual_reset_default"] }}
+        </button>
+      </div>
+      </div><!-- /body -->
+    </div>
+
+    <!-- center column (1/3): properties of selected element -->
+    <div class="bg-white shadow rounded flex flex-col min-w-0">
+      <!-- uniform header bar -->
+      <div class="flex items-center justify-between border-b px-3 h-[52px] shrink-0">
+        <h5 class="font-bold text-gray-600">{{ locales["visual_props_title"] }}</h5>
+      </div>
+      <div class="flex flex-col p-3">
+      <template x-if="selectedEl()">
+        <div class="space-y-3 text-sm text-gray-700" @change="pushHistory()">
+          <div class="flex items-center justify-between">
+            <label class="font-semibold whitespace-nowrap">{{ locales["visual_prop_type"] }}</label>
+            <select x-model="selectedEl().type" class="border rounded px-2 py-1 w-40 max-w-[55%] min-w-0">
+              <option value="text">text</option>
+              <option value="fixed_text">fixed_text</option>
+              <option value="icon">icon</option>
+              <option value="graph">graph</option>
+            </select>
+          </div>
+          <div class="flex items-center justify-between">
+            <label class="font-semibold whitespace-nowrap">{{ locales["visual_prop_label"] }}</label>
+            <input type="text" x-model="selectedEl().label" class="border rounded px-2 py-1 w-40 max-w-[55%] min-w-0"/>
+          </div>
+          <!-- data_key: links this text element to a live value. Offer a
+               typeahead of real keys (custom sources + built-in metrics) and
+               show, live, whether the typed key resolves — so users don't have
+               to guess or remember exact key names. -->
+          <div x-show="selectedEl().type === 'text'" class="flex flex-col gap-1">
+            <div class="flex items-center justify-between">
+              <label class="font-semibold whitespace-nowrap flex items-center gap-1">
+                data_key
+                <span class="text-gray-400 cursor-help"
+                      title="{{ locales['dk_help_tip'] | default('The name of the value to display here. Pick a custom source you defined below, or a built-in device metric. Leave empty to show static text only.') }}">ⓘ</span>
+              </label>
+              <input type="text" x-model="selectedEl().data_key" list="dataKeyOptions"
+                     placeholder="{{ locales['dk_placeholder'] | default('e.g. BtcUsd') }}"
+                     class="border rounded px-2 py-1 w-40 max-w-[55%] min-w-0 font-mono text-xs"/>
+              <datalist id="dataKeyOptions">
+                <template x-for="k in availableDataKeys()" :key="k">
+                  <option :value="k"></option>
+                </template>
+              </datalist>
+            </div>
+            <!-- live status of the typed key: matched source + current value,
+                 a built-in metric, or a "no source" warning (typo / unsaved) -->
+            <template x-if="dataKeyStatus(selectedEl().data_key) === 'custom'">
+              <p class="text-[11px] text-green-600 leading-snug">
+                ✓ {{ locales["dk_status_custom"] | default("Linked to your data source.") }}
+                <span x-show="dataKeyValue(selectedEl().data_key) !== ''" class="font-mono text-gray-600">
+                  {{ locales["dk_now"] | default("now:") }} <span x-text="dataKeyValue(selectedEl().data_key)"></span></span>
+              </p>
+            </template>
+            <template x-if="dataKeyStatus(selectedEl().data_key) === 'builtin'">
+              <p class="text-[11px] text-blue-600 leading-snug">
+                ✓ {{ locales["dk_status_builtin"] | default("Built-in device metric.") }}
+                <span class="font-mono text-gray-600">{{ locales["dk_now"] | default("now:") }} <span x-text="dataKeyValue(selectedEl().data_key)"></span></span>
+              </p>
+            </template>
+            <template x-if="dataKeyStatus(selectedEl().data_key) === 'unknown'">
+              <p class="text-[11px] text-amber-600 leading-snug">
+                ⚠ {{ locales["dk_status_unknown"] | default("No data source has this key yet. Add a source below with this exact data_key, then Save and Restart. (Names are case-sensitive.)") }}
+              </p>
+            </template>
+            <template x-if="dataKeyStatus(selectedEl().data_key) === 'empty'">
+              <p class="text-[11px] text-gray-400 leading-snug">
+                {{ locales["dk_status_empty"] | default("Empty = no live value (shows the Label as static text). Type or pick a key to show a live value.") }}
+              </p>
+            </template>
+          </div>
+          <div class="flex items-center justify-between" x-show="selectedEl().type === 'text'">
+            <label class="font-semibold whitespace-nowrap">{{ locales["visual_prop_units"] }}</label>
+            <input type="text" x-model="selectedEl().units" class="border rounded px-2 py-1 w-40 max-w-[55%] min-w-0"/>
+          </div>
+          <div class="flex items-center justify-between" x-show="selectedEl().type === 'icon'">
+            <label class="font-semibold whitespace-nowrap">icon_path</label>
+            <input type="text" x-model="selectedEl().icon_path" class="border rounded px-2 py-1 w-40 max-w-[55%] min-w-0 font-mono text-xs"/>
+          </div>
+          <div class="flex items-center justify-between" x-show="selectedEl().type !== 'icon' && selectedEl().type !== 'graph'">
+            <label class="font-semibold whitespace-nowrap">{{ locales["visual_prop_font"] }}</label>
+            <select x-model="selectedEl().font" class="border rounded px-2 py-1 w-40 max-w-[55%] min-w-0">
+              <template x-for="f in fontNames" :key="f"><option :value="f" x-text="f"></option></template>
+            </select>
+          </div>
+          <div class="flex items-center justify-between" x-show="selectedEl().type !== 'icon' && selectedEl().type !== 'graph'">
+            <label class="font-semibold whitespace-nowrap">{{ locales["visual_prop_color"] }}</label>
+            <input type="color" :value="rgbToHex(selectedEl().color)" @input="setColor($event.target.value)" class="border rounded h-8 w-40"/>
+          </div>
+          <div class="flex items-center justify-between gap-2">
+            <label class="font-semibold whitespace-nowrap">{{ locales["visual_prop_position"] }}</label>
+            <div class="flex gap-1">
+              <input type="number" min="0" max="171" x-model.number="selectedEl().position.x" class="border rounded px-2 py-1 w-16" title="x"/>
+              <input type="number" min="0" :max="CONTENT_H - 1" x-model.number="selectedEl().position.y" class="border rounded px-2 py-1 w-16" title="y (0–265, content region)"/>
+            </div>
+          </div>
+          <div class="flex items-center justify-between gap-2" x-show="selectedEl().size">
+            <label class="font-semibold whitespace-nowrap">{{ locales["visual_prop_size"] }}</label>
+            <div class="flex gap-1">
+              <input type="number" min="1" x-model.number="selectedEl().size.width" class="border rounded px-2 py-1 w-16" title="w"/>
+              <input type="number" min="1" x-model.number="selectedEl().size.height" class="border rounded px-2 py-1 w-16" title="h"/>
+            </div>
+          </div>
+          <div class="flex items-center justify-between">
+            <label class="font-semibold whitespace-nowrap">{{ locales["visual_prop_enable"] }}</label>
+            <label class="relative flex cursor-pointer items-center">
+              <input class="peer sr-only" type="checkbox" :checked="selectedEl().enable === 1" @change="selectedEl().enable = $event.target.checked ? 1 : 0"/>
+              <div class="h-6 w-11 rounded-full border-2 border-gray-200 bg-gray-200 after:absolute after:top-0.5 after:left-0.5 after:h-5 after:w-5 after:rounded-full after:border after:border-gray-300 after:bg-white after:shadow-sm after:transition-all after:duration-300 peer-checked:border-blue-600 peer-checked:bg-blue-600 peer-checked:after:translate-x-full peer-checked:after:border-white"></div>
+            </label>
+          </div>
+          <div class="pt-2">
+            <button @click="deleteElement()" class="bg-red-500 hover:bg-red-600 text-white px-3 py-2 rounded-lg text-sm font-semibold w-full">
+              {{ locales["visual_delete_element"] }}
+            </button>
+          </div>
+        </div>
+      </template>
+      <template x-if="!selectedEl()">
+        <p class="text-sm text-gray-400">{{ locales["visual_no_selection"] }}</p>
+      </template>
+      </div><!-- /body -->
+    </div>
+
+    <!-- right column (1/3): live device frame -->
+    <div class="bg-white shadow rounded flex flex-col min-w-0">
+      <!-- uniform header bar -->
+      <div class="flex items-center justify-between border-b px-3 h-[52px] shrink-0">
+        <h5 class="font-bold text-gray-600">{{ locales["screen_live_title"] }}</h5>
+      </div>
+      <div class="flex items-center justify-center p-4">
+        <img :src="frameSrc" alt="Screen frame" class="max-w-full max-h-[400px] rounded-2xl" />
+      </div>
+      <div class="flex flex-wrap justify-center px-4 mt-auto mb-4">
+        <button @click="shortClick()"
+                :disabled="loading.shortClick"
+                :class="loading.shortClick ? 'bg-green-600 scale-95' : 'bg-green-500 hover:bg-green-600 active:scale-95'"
+                class="text-white px-4 py-2 rounded-lg font-semibold w-40 flex items-center justify-center space-x-2 transition-all duration-75">
+          <img x-show="!loading.shortClick" src="/static/short_click.svg" class="w-4 h-4" />
+          <span x-text="getShortClickButtonText()"></span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== Data Sources: custom_metrics that feed data_keys into the screen ===== -->
+  <div class="bg-white shadow rounded flex flex-col min-w-0">
+    <div class="flex items-center justify-between border-b px-3 h-[52px] shrink-0">
+      <div class="flex items-center gap-3">
+        <h5 class="font-bold text-gray-600">{{ locales["data_sources_title"] | default("Data Sources") }}</h5>
+        <span class="text-xs text-gray-400" x-text="`${custom_metrics.sources.length}`"></span>
+      </div>
+      <div class="flex items-center gap-3 shrink-0">
+        <button x-show="custom_metrics.sources.length > 0"
+                @click="toggleAllCollapsed()"
+                class="text-xs font-semibold text-gray-500 hover:underline"
+                x-text="collapseAllLabel()"></button>
+        <button @click="loadSourceStatus(); loadSourceValues()"
+                class="text-xs font-semibold text-pcatblue hover:underline">
+          {{ locales["data_sources_refresh_all"] | default("Refresh status") }}
+        </button>
+        <!-- Save the layout (which persists these sources) AND restart the
+             display so new/edited sources actually load and fetch. This is the
+             one action a user needs after adding a source. -->
+        <button @click="saveAndRestartSources()"
+                :disabled="loading.saveRestartSources"
+                :class="loading.saveRestartSources ? 'bg-gray-400 cursor-not-allowed' : 'bg-pcatblue hover:bg-pcatblue-400'"
+                class="text-white text-xs font-semibold px-2.5 py-1 rounded shadow-sm flex items-center gap-1.5"
+                title="{{ locales['ds_save_restart_tip'] | default('Save these sources and restart the screen so they take effect.') }}">
+          <svg x-show="loading.saveRestartSources" class="animate-spin h-3 w-3 text-white" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+          </svg>
+          <span x-text="loading.saveRestartSources ? dsLabels.savingRestarting : dsLabels.saveRestart"></span>
+        </button>
+      </div>
+    </div>
+
+    <div class="flex flex-col p-3 gap-3">
+      <div class="text-sm text-gray-600 leading-relaxed bg-blue-50 border-l-4 border-blue-400 rounded px-3 py-2">
+        <p class="font-semibold text-gray-700 mb-1">{{ locales["data_sources_how_title"] | default("How a data source reaches the screen") }}</p>
+        <p>
+          {{ locales["data_sources_help"] | default("A source fetches a value (from a URL, command, or UCI) and stores it under a data_key you choose. To show it, add a text element on the canvas and set its data_key to the SAME name — that links them.") }}
+        </p>
+        <p class="mt-1 font-mono text-xs text-gray-500">
+          {{ locales["data_sources_flow"] | default("source → data_key (e.g. BtcUsd) → text element with data_key = BtcUsd") }}
+        </p>
+        <p class="mt-1 text-xs text-amber-600">
+          ⚠ {{ locales["data_sources_casenote"] | default("The two data_key names must match exactly (case-sensitive). New/edited sources need Save and Restart to take effect.") }}
+        </p>
+      </div>
+
+      <!-- duplicate data_key warning banner -->
+      <div x-show="duplicateKeys().length > 0" x-cloak
+           class="bg-red-50 border-l-4 border-red-400 text-red-700 text-sm rounded px-3 py-2">
+        ⚠ {{ locales["ds_dup_banner"] | default("These data_keys are used by more than one enabled source and will overwrite each other on screen:") }}
+        <span class="font-mono font-semibold" x-text="duplicateKeys().map(k => '{' + k + '}').join(', ')"></span>
+      </div>
+
+      <!-- per-source rows -->
+      <template x-for="(s, si) in custom_metrics.sources" :key="si">
+        <div class="border rounded-lg p-3" :class="(s.enabled ? '' : 'opacity-60') + (isDupKey(s) ? ' border-red-400 ring-1 ring-red-300' : '')">
+          <!-- row header: collapse toggle, type, name, dup warning, value, refresh, enable, remove -->
+          <div class="flex flex-wrap items-center gap-2" :class="collapsedSources[si] ? '' : 'mb-2'">
+            <!-- collapse / expand chevron -->
+            <button @click="toggleCollapsed(si)" class="text-gray-500 hover:text-gray-700 shrink-0 w-5"
+                    :title="collapsedSources[si] ? collapseLabels.expand : collapseLabels.collapse">
+              <span x-text="collapsedSources[si] ? '▸' : '▾'"></span>
+            </button>
+            <select x-model="s.type" class="border rounded px-2 py-1 text-sm font-semibold">
+              <option value="http_poll">{{ locales["ds_type_http_poll"] | default("HTTP/HTTPS") }}</option>
+              <option value="command">{{ locales["ds_type_command"] | default("Command") }}</option>
+              <option value="uci">{{ locales["ds_type_uci"] | default("UCI value") }}</option>
+              <option value="env">{{ locales["ds_type_env"] | default("Env var") }}</option>
+              <option value="json_file">{{ locales["ds_type_json_file"] | default("JSON file") }}</option>
+            </select>
+            <input type="text" x-model="s.name" placeholder="{{ locales['ds_name'] | default('source name') }}"
+                   class="border rounded px-2 py-1 text-sm w-32"/>
+            <!-- when collapsed, show the data_key inline so rows are identifiable -->
+            <span x-show="collapsedSources[si] && (s.config || {}).data_key" class="text-xs font-mono text-gray-500" x-text="'{' + (s.config || {}).data_key + '}'"></span>
+            <!-- duplicate-key warning -->
+            <span x-show="isDupKey(s)" class="text-xs font-semibold px-2 py-1 rounded bg-red-100 text-red-700"
+                  title="{{ locales['ds_dup_key_tip'] | default('Another enabled source uses the same data_key; they will overwrite each other on screen.') }}">
+              ⚠ {{ locales["ds_dup_key"] | default("duplicate key") }}
+            </span>
+            <!-- status badge from firmware: error, or ok with success count -->
+            <template x-if="s.name && sourceStatus[s.name]">
+              <span class="text-xs font-mono px-2 py-1 rounded"
+                    :class="sourceStatus[s.name].last_error ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'"
+                    x-text="sourceStatus[s.name].last_error ? ('⚠ ' + sourceStatus[s.name].last_error) : ('✓ ' + (sourceStatus[s.name].stats ? (sourceStatus[s.name].stats.success_count + 'x') : 'ok'))"></span>
+            </template>
+            <div class="ml-auto flex items-center gap-2">
+              <!-- fetching spinner while a Refresh-now poll is in flight -->
+              <span x-show="refreshing[(s.config || {}).data_key]" class="text-xs text-gray-500 flex items-center gap-1">
+                <svg class="animate-spin h-3 w-3 text-gray-500" fill="none" viewBox="0 0 24 24">
+                  <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                  <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+                </svg>
+                {{ locales["ds_fetching"] | default("fetching…") }}
+              </span>
+              <!-- actual fetched value (or ERROR/TIMEOUT sentinel), beside Refresh now -->
+              <span x-show="!refreshing[(s.config || {}).data_key] && sourceValue(s) !== ''"
+                    class="text-xs font-mono px-2 py-1 rounded max-w-[200px] truncate"
+                    :class="isErrorValue(sourceValue(s)) ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-800'"
+                    :title="isErrorValue(sourceValue(s)) ? dsLabels.valueErrorTip : sourceValue(s)">
+                <span x-text="isErrorValue(sourceValue(s)) ? '⚠ ' : '= '"></span><span x-text="sourceValue(s)"></span>
+              </span>
+              <label class="relative flex cursor-pointer items-center" title="{{ locales['visual_prop_enable'] }}">
+                <input class="peer sr-only" type="checkbox" :checked="s.enabled === 1" @change="s.enabled = $event.target.checked ? 1 : 0"/>
+                <div class="h-5 w-9 rounded-full border-2 border-gray-200 bg-gray-200 after:absolute after:top-0.5 after:left-0.5 after:h-4 after:w-4 after:rounded-full after:border after:border-gray-300 after:bg-white after:shadow-sm after:transition-all peer-checked:border-blue-600 peer-checked:bg-blue-600 peer-checked:after:translate-x-full peer-checked:after:border-white"></div>
+              </label>
+              <button @click="refreshSource(s)" x-show="s.type === 'http_poll' || s.type === 'command' || s.type === 'uci'"
+                      class="text-xs font-semibold bg-gray-200 hover:bg-gray-300 text-gray-700 px-2 py-1 rounded">
+                {{ locales["ds_refresh_now"] | default("Refresh now") }}
+              </button>
+              <button @click="removeSource(si)" class="text-red-500 hover:text-red-700 text-sm px-1" title="{{ locales['visual_delete_element'] }}">✕</button>
+            </div>
+          </div>
+
+          <!-- type-specific config (hidden when row is collapsed) -->
+          <div x-show="!collapsedSources[si]">
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm">
+            <!-- data_key (all real source types) -->
+            <label class="flex items-center gap-2" x-show="s.type !== 'env' && s.type !== 'json_file'"
+                   title="{{ locales['ds_data_key_tip'] | default('The name this value is stored under. Set a text element on the canvas to this same data_key to display it.') }}">
+              <span class="font-semibold w-20 shrink-0">data_key</span>
+              <input type="text" x-model="s.config.data_key" placeholder="MyValue" class="border rounded px-2 py-1 flex-1 font-mono text-xs"/>
+            </label>
+
+            <!-- http_poll -->
+            <template x-if="s.type === 'http_poll'">
+              <label class="flex items-center gap-2 sm:col-span-2">
+                <span class="font-semibold w-20 shrink-0">URL</span>
+                <input type="text" x-model="s.config.url" placeholder="https://api.ipify.org" class="border rounded px-2 py-1 flex-1 font-mono text-xs"/>
+              </label>
+            </template>
+
+            <!-- command -->
+            <template x-if="s.type === 'command'">
+              <label class="flex items-center gap-2 sm:col-span-2">
+                <span class="font-semibold w-20 shrink-0">{{ locales["ds_command"] | default("Command") }}</span>
+                <input type="text" x-model="s.config.command" placeholder="cat /proc/loadavg" class="border rounded px-2 py-1 flex-1 font-mono text-xs"/>
+              </label>
+            </template>
+
+            <!-- uci -->
+            <template x-if="s.type === 'uci'">
+              <label class="flex items-center gap-2 sm:col-span-2">
+                <span class="font-semibold w-20 shrink-0">{{ locales["ds_uci_path"] | default("UCI path") }}</span>
+                <input type="text" x-model="s.config.uci_path" placeholder="network.lan.ipaddr" class="border rounded px-2 py-1 flex-1 font-mono text-xs"/>
+              </label>
+            </template>
+
+            <!-- parser (http_poll + command) -->
+            <label class="flex items-center gap-2" x-show="s.type === 'http_poll' || s.type === 'command'">
+              <span class="font-semibold w-20 shrink-0">{{ locales["ds_parser"] | default("Parser") }}</span>
+              <input type="text" x-model="s.config.parser" placeholder="stdout | json:path | regex:…" class="border rounded px-2 py-1 flex-1 font-mono text-xs"/>
+            </label>
+
+            <!-- interval + timeout -->
+            <label class="flex items-center gap-2" x-show="s.type !== 'env'">
+              <span class="font-semibold w-20 shrink-0">{{ locales["ds_interval"] | default("Interval (s)") }}</span>
+              <input type="number" min="1" x-model.number="s.config.interval" class="border rounded px-2 py-1 w-24"/>
+            </label>
+          </div>
+
+          <!-- shell warning for command/uci -->
+          <p x-show="s.type === 'command' || s.type === 'uci'" class="text-[11px] text-amber-600 mt-2 leading-relaxed">
+            ⚠ {{ locales["ds_shell_warning"] | default("Runs a shell command on the device with the display process's privileges. Only use trusted commands.") }}
+          </p>
+          </div><!-- /collapsible config -->
+        </div>
+      </template>
+
+      <template x-if="custom_metrics.sources.length === 0">
+        <p class="text-sm text-gray-400 text-center py-2">{{ locales["ds_empty"] | default("No custom data sources yet.") }}</p>
+      </template>
+
+      <!-- add buttons -->
+      <div class="flex flex-wrap gap-2">
+        <button @click="addSource('http_poll')" class="bg-green-500 hover:bg-green-600 text-white px-3 py-2 rounded-lg text-sm font-semibold">+ {{ locales["ds_type_http_poll"] | default("HTTP/HTTPS") }}</button>
+        <button @click="addSource('command')" class="bg-green-500 hover:bg-green-600 text-white px-3 py-2 rounded-lg text-sm font-semibold">+ {{ locales["ds_type_command"] | default("Command") }}</button>
+        <button @click="addSource('uci')" class="bg-green-500 hover:bg-green-600 text-white px-3 py-2 rounded-lg text-sm font-semibold">+ {{ locales["ds_type_uci"] | default("UCI value") }}</button>
+      </div>
+
+      <!-- ready-made HTTPS examples: one click drops in a complete, working source -->
+      <div class="mt-1">
+        <p class="text-xs font-semibold text-gray-500 mb-1">{{ locales["ds_examples_label"] | default("Examples (click to add a ready-made one):") }}</p>
+        <div class="flex flex-wrap gap-2">
+          <template x-for="ex in httpsExamples" :key="ex.id">
+            <button @click="addExample(ex)"
+                    class="bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 px-3 py-1.5 rounded-lg text-sm font-semibold flex items-center gap-1"
+                    :title="ex.url">
+              <span x-text="ex.icon"></span>
+              <span x-text="ex.label"></span>
+            </button>
+          </template>
+        </div>
+        <p class="text-[11px] text-gray-400 mt-1 leading-relaxed">
+          ⓘ {{ locales["ds_examples_internet_note"] | default("HTTP/HTTPS sources need the device to have internet access. If it is offline, the value shows ERROR or TIMEOUT.") }}
+        </p>
+      </div>
+
+      <!-- ready-made DEVICE-LOCAL examples: command / uci / env / json_file.
+           No internet needed; each was verified live on the device. Useful
+           because env/json_file have no inline editor fields. -->
+      <div class="mt-1">
+        <p class="text-xs font-semibold text-gray-500 mb-1">{{ locales["ds_local_examples_label"] | default("On-device examples (no internet needed):") }}</p>
+        <div class="flex flex-wrap gap-2">
+          <template x-for="ex in localExamples" :key="ex.id">
+            <button @click="addLocalExample(ex)"
+                    class="bg-green-50 hover:bg-green-100 text-green-700 border border-green-200 px-3 py-1.5 rounded-lg text-sm font-semibold flex items-center gap-1"
+                    :title="ex.group">
+              <span x-text="ex.icon"></span>
+              <span x-text="ex.label"></span>
+              <span class="text-[10px] font-mono text-green-500/70" x-text="ex.group"></span>
+            </button>
+          </template>
+        </div>
+        <p class="text-[11px] text-amber-600 mt-1 leading-relaxed">
+          ⚠ {{ locales["ds_local_examples_note"] | default("command / uci read from the device with the display's privileges. env reads a process variable; json_file reads a value from a file on the device.") }}
+        </p>
+      </div>
+
+      <p class="text-[11px] text-gray-400 leading-relaxed">
+        {{ locales["ds_save_hint"] | default("New or edited sources take effect only after you click “Save and Restart” above (this saves them and restarts the screen). “Refresh now” only tests a source that is already saved.") }}
+      </p>
+    </div>
+  </div>
+
+  <!-- bottom row: full-width JSON config with a Diff | Full toggle -->
+  <div class="bg-white shadow rounded flex flex-col min-w-0">
+    <!-- header bar: title + Diff|Full segmented toggle -->
+    <div class="flex items-center justify-between border-b px-3 h-[52px] shrink-0">
+      <div class="flex items-center gap-3">
+        <h5 class="font-bold text-gray-600">{{ locales["user_config_json_title"] }}</h5>
+        <span class="text-xs font-semibold"
+              :class="editorChanged() ? 'text-orange-600' : 'text-gray-400'"
+              x-text="editorChanged() ? '{{ locales.editor_diff_title }}' : '{{ locales.editor_no_changes }}'"></span>
+      </div>
+      <!-- Diff | Full segmented control -->
+      <div class="inline-flex rounded-md border overflow-hidden text-sm font-semibold shrink-0">
+        <button @click="jsonMode = 'diff'"
+                :disabled="!editorChanged()"
+                :class="jsonMode === 'diff' ? 'bg-pcatblue text-white' : (editorChanged() ? 'bg-white text-gray-600 hover:bg-gray-100' : 'bg-gray-100 text-gray-300 cursor-not-allowed')"
+                class="px-3 py-1">{{ locales["editor_mode_diff"] | default("Diff") }}</button>
+        <button @click="jsonMode = 'full'"
+                :class="jsonMode === 'full' ? 'bg-pcatblue text-white' : 'bg-white text-gray-600 hover:bg-gray-100'"
+                class="px-3 py-1 border-l">{{ locales["editor_mode_full"] | default("Full") }}</button>
+      </div>
+    </div>
+
+    <div class="flex flex-col p-3 gap-3">
+      <!-- reference links (compact, collapsible) -->
+      <details class="bg-blue-50 border-l-4 border-blue-400 rounded text-sm">
+        <summary class="cursor-pointer px-3 py-2 text-gray-700 font-semibold select-none">{{ locales["screen_json_help_text"] }}</summary>
+        <div class="px-3 pb-3 space-y-1">
+          <p class="text-sm text-gray-700">
+            <strong>📋 {{ locales["reference_config"] | default("Reference Config") }}:</strong>
+            <a href="https://raw.githubusercontent.com/photonicat/photonicat2_mini_display/refs/heads/main/config.json"
+               target="_blank" class="text-blue-600 hover:text-blue-800 underline font-mono text-xs">photonicat2_mini_display/config.json</a>
+          </p>
+          <p class="text-sm text-gray-700">
+            <strong>📖 {{ locales["programming_guide"] | default("Programming Guide") }}:</strong>
+            {% if locales.get("programming_guide") == "编程指南" %}
+            <a href="https://raw.githubusercontent.com/photonicat/photonicat2_mini_display/refs/heads/main/docs/screen_guide-zh_cn.md"
+               target="_blank" class="text-blue-600 hover:text-blue-800 underline font-mono text-xs">screen_guide-zh_cn.md</a>
+            {% else %}
+            <a href="https://raw.githubusercontent.com/photonicat/photonicat2_mini_display/refs/heads/main/docs/screen_guide-en.md"
+               target="_blank" class="text-blue-600 hover:text-blue-800 underline font-mono text-xs">screen_guide-en.md</a>
+            {% endif %}
+          </p>
+        </div>
+      </details>
+
+      <!-- FULL mode: editable JSON textarea -->
+      <div x-show="jsonMode === 'full'" class="w-full">
+        <textarea x-model="editor" class="w-full border rounded font-mono text-xs"
+                  :class="editorChanged() ? 'border-orange-400' : ''" rows="22"></textarea>
+      </div>
+
+      <!-- DIFF mode: read-only colored +/- diff vs last-saved config -->
+      <div x-show="jsonMode === 'diff'" x-cloak class="w-full">
+        <template x-if="editorChanged()">
+          <div class="border rounded bg-gray-900 overflow-auto" style="max-height:520px;">
+            <template x-for="(line, i) in diffLines()" :key="i">
+              <pre class="m-0 px-3 py-0.5 font-mono text-xs leading-relaxed whitespace-pre-wrap break-all"
+                   :class="line.kind === 'add' ? 'bg-green-900/60 text-green-200' : (line.kind === 'del' ? 'bg-red-900/60 text-red-200' : 'text-gray-400')"
+                   x-text="(line.kind === 'add' ? '+ ' : (line.kind === 'del' ? '- ' : '  ')) + line.text"></pre>
+            </template>
+          </div>
+        </template>
+        <template x-if="!editorChanged()">
+          <p class="text-sm text-gray-400 py-4 text-center">{{ locales["editor_no_changes"] }}</p>
+        </template>
+      </div>
+
+      <!-- action buttons -->
+      <div class="flex flex-wrap gap-3 justify-end">
+        <button @click="restartScreen()"
+                :disabled="loading.restartScreen"
+                :class="loading.restartScreen ? 'bg-gray-400 cursor-not-allowed' : 'bg-yellow-500 hover:bg-yellow-600'"
+                class="text-white px-4 py-2 rounded-lg font-semibold w-40 flex items-center justify-center">
+          <svg x-show="loading.restartScreen" class="animate-spin -ml-1 mr-2 h-4 w-4 text-white" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 0 18-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+          </svg>
+          <span x-text="getRestartScreenButtonText()"></span>
+        </button>
+        <button @click="loadDefault()" class="bg-red-300 hover:bg-red-400 text-white px-4 py-2 rounded-lg font-semibold w-40">
+          {{ locales["load_default"] }}
+        </button>
+        <button @click="saveEditor()"
+                :disabled="loading.saveEditor"
+                :class="loading.saveEditor ? 'bg-gray-400 cursor-not-allowed' : 'bg-pcatblue hover:bg-pcatblue-400'"
+                class="text-white px-4 py-2 rounded-lg font-semibold w-40 flex items-center justify-center">
+          <svg x-show="loading.saveEditor" class="animate-spin -ml-1 mr-2 h-4 w-4 text-white" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 0 18-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+          </svg>
+          <span x-text="getSaveEditorButtonText()"></span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  </div><!-- /merged Editor tab -->
+</div>
+{% endblock %}
+
+
+{% block bottom %}
+<script>
+  document.addEventListener("alpine:init", () => {
+    Alpine.store("app").set_page("screen");
+
+    Alpine.data("screen", () => ({
+      tab_page: (window.location.hash && ["screen_settings", "screen_editor"].includes(window.location.hash.substring(1))) ? window.location.hash.substring(1) : "screen_settings",
+
+      notification: {
+        show: false,
+        message: '',
+        message_en: '',
+        message_cn: '',
+        type: 'info' // 'success', 'error', 'info'
+      },
+
+      // Loading states for buttons
+      loading: {
+        saveSettings: false,
+        shortClick: false,
+        restartScreen: false,
+        saveEditor: false,
+        saveVisual: false,
+        saveRestartSources: false
+      },
+
+      // ---- visual editor state ----
+      // Device LCD is 172x320; canvas is rendered at SCALE for usability.
+      SCALE: 1.5,
+      LCD_W: 172,
+      LCD_H: 320,
+      // The firmware (photonicat2_mini_display main.go) composites 3 buffers:
+      // top bar (32px), middle/content (266px), footer (22px). renderMiddle()
+      // draws element position.(x,y) into the MIDDLE buffer, which is then sent
+      // at screen y-offset = TOP_BAR. So element.position.y is relative to the
+      // CONTENT region top (0..CONTENT_H-1), NOT the full 320px screen.
+      TOP_BAR: 32,
+      FOOTER: 22,
+      get CONTENT_H() { return this.LCD_H - this.TOP_BAR - this.FOOTER; }, // 266
+      // Extra CSS shrink applied to the (already 1.5x) canvas so it fits a narrow
+      // column. 1 = full 258px. The effective on-screen scale is SCALE*canvasCssScale.
+      canvasCssScale: 1,
+      fontNames: ["huge","gigantic","big","reg","thin","unit","tiny","micro","clock"],
+      // font point sizes from photonicat2_mini_display/main.go (DPI 72 → px == pt).
+      fontPx: { huge:34, gigantic:48, big:25, reg:18, thin:18, unit:15, tiny:12, micro:10, clock:20 },
+      // Orbitron hhea metrics (units/em=1000): ascent 1011, descent 243.
+      // The firmware places element.position.y at the TOP of the ascent box and
+      // draws the baseline at y + ascent (draw.go drawText: y = posY + ascent).
+      // Reproduce exactly in CSS by giving the text box line-height = (asc+desc)*size,
+      // which lands the baseline at asc*size from the top — same as the device.
+      FONT_ASC: 1.011,
+      FONT_DESC: 0.243,
+      // Orbitron weight per named font, mirroring the .ttf each uses in main.go
+      // (ExtraBold 800, Medium 500, Regular 400). Keeps glyph width/weight true.
+      fontWeight: { huge:800, gigantic:800, big:800, reg:800, thin:400, unit:500, tiny:400, micro:400, clock:500 },
+      vpage: 0,
+      selectedIdx: null,
+      // canvas preview mode: "label" shows the human label, "key" shows the
+      // raw data_key token (e.g. {net_wan_rx_speed}).
+      labelMode: "label",
+      display_template: { elements: { page0: [], page1: [], page2: [], page3: [] } },
+      // ---- custom data sources (firmware custom_metrics) ----
+      // Each source feeds a data_key into the device's globalData store, which
+      // text elements then display. Source types handled natively by the
+      // firmware: command (poll a shell command), http_poll (poll a URL),
+      // env, json_file. "uci" is a convenience preset that emits a command
+      // source running `uci get <path>`. See customMetrics.go in the firmware.
+      custom_metrics: { sources: [], global_settings: {} },
+      // live per-source status keyed by name (value + last_error), polled from
+      // the firmware via the web proxy.
+      sourceStatus: {},
+      sourceStatusTimer: null,
+      // current globalData values keyed by data_key, read from the device so
+      // "Refresh now" can show the actual fetched value next to the button.
+      sourceValues: {},
+      // data_keys currently being polled after a "Refresh now" (shows a spinner).
+      refreshing: {},
+      // per-source-index collapse state for the editor rows (true = collapsed).
+      collapsedSources: {},
+      // localized labels for collapse controls (kept out of the template markup
+      // so minification can't HTML-escape Jinja quotes inside attributes).
+      collapseLabels: {
+        expand: "{{ locales['ds_expand'] | default('Expand') }}",
+        collapse: "{{ locales['ds_collapse'] | default('Collapse') }}",
+        expandAll: "{{ locales['ds_expand_all'] | default('Expand all') }}",
+        collapseAll: "{{ locales['ds_collapse_all'] | default('Collapse all') }}",
+      },
+      // misc data-source labels kept here (not inline) so minification can't
+      // HTML-escape Jinja quotes inside attribute expressions.
+      dsLabels: {
+        valueErrorTip: "{{ locales['ds_value_error_tip'] | default('The fetch failed. Check the URL, the parser, and that the device has internet access.') }}",
+        saveRestart: "{{ locales['ds_save_restart'] | default('Save and Restart') }}",
+        savingRestarting: "{{ locales['ds_saving_restarting'] | default('Saving…') }}",
+      },
+      drag: { active: false, mode: null, idx: null, startX: 0, startY: 0, origX: 0, origY: 0, origW: 0, origH: 0 },
+      // undo/redo history of display_template snapshots (JSON strings).
+      // history[histIdx] is always the current state; undo walks back, redo forward.
+      history: [],
+      histIdx: -1,
+      clipboard: null, // copied element (for Ctrl+C / Ctrl+V)
+      keyHandler: null,
+
+      basic: {
+        ping_site0: "",
+        ping_site1: "",
+        on_battery_auto_dim_time: "",
+        on_charger_auto_dim_time: "",
+        screen_max_brightness: 100,
+        screen_min_brightness: 0,
+        show_sms: true,
+        sms_limit_for_screen: 5,
+      },
+
+      editor: "",
+      // pretty-printed snapshot of the last config loaded/saved from the device,
+      // used as the baseline for the JSON diff view.
+      savedEditor: "",
+      showDiff: false,
+      // JSON section view mode in the merged Editor tab: 'full' = editable textarea,
+      // 'diff' = read-only colored +/- diff vs the last saved config.
+      jsonMode: "full",
+      frameTs: Date.now(),
+      // The frame URL actually shown on screen. It only advances to a NEW
+      // frameTs once that image has fully loaded off-screen (see bumpFrame),
+      // so the visible <img>/background never goes blank mid-refresh — no
+      // flicker. All live-frame bindings use frameSrc, not frameTs directly.
+      frameSrc: "/api/v1/screen/frame.png?ts=" + Date.now(),
+      frameLoading: false,
+      refreshInterval: null,
+
+      init() {
+        // open socket.io and handle frame updates
+        window.socket = io({ transports: ["polling"], upgrade: false });
+        socket.on("frame_update", () => {
+          this.bumpFrame();
+        });
+
+        // start auto-refresh timer for screen image (every 3 seconds)
+        this.startAutoRefresh();
+
+        // load data for all panels
+        this.loadSettings();
+        this.loadEditor();
+        this.loadSmsLimit();
+        this.loadVisual();
+
+        // keep the raw-JSON editor + diff view in sync with live visual edits
+        // (drag/resize, add/delete, property changes all mutate display_template)
+        this.$watch("display_template", () => {
+          if (this.tab_page === "screen_editor") this.syncEditorFromVisual();
+        });
+        // custom data sources also live in user_config; mirror their edits into
+        // the JSON editor/diff the same way as layout edits.
+        this.$watch("custom_metrics", () => {
+          if (this.tab_page === "screen_editor") this.syncEditorFromVisual();
+        });
+
+        // Figma-style keyboard shortcuts for the visual editor.
+        this.keyHandler = (ev) => this.onVisualKeydown(ev);
+        window.addEventListener("keydown", this.keyHandler);
+
+        // Keep the canvas scaled to fit its (1/3-width) column. Recompute on any
+        // size change of the wrapper and on window resize.
+        this.$nextTick(() => this.updateCanvasScale());
+        this.resizeHandler = () => this.updateCanvasScale();
+        window.addEventListener("resize", this.resizeHandler);
+        if (this.$refs.canvasBox && window.ResizeObserver) {
+          this.canvasRO = new ResizeObserver(() => this.updateCanvasScale());
+          this.canvasRO.observe(this.$refs.canvasBox);
+        }
+      },
+
+      destroy() {
+        if (this.keyHandler) window.removeEventListener("keydown", this.keyHandler);
+        if (this.resizeHandler) window.removeEventListener("resize", this.resizeHandler);
+        if (this.canvasRO) this.canvasRO.disconnect();
+        this.stopAutoRefresh();
+      },
+
+      // Fit the 258px-wide canvas to the available column width (never upscale > 1).
+      updateCanvasScale() {
+        let box = this.$refs.canvasBox;
+        if (!box) return;
+        // wrapper is capped at 258px via max-width; its clientWidth is the room we have
+        let avail = box.clientWidth;
+        let scale = avail > 0 ? Math.min(1, avail / 258) : 1;
+        // avoid churn from sub-pixel jitter
+        if (Math.abs(scale - this.canvasCssScale) > 0.005) this.canvasCssScale = scale;
+      },
+
+      // The real on-screen pixels-per-LCD-pixel, read live from the DOM so drag math
+      // is correct at any css scale (falls back to the nominal SCALE*cssScale).
+      effScale() {
+        let c = this.$refs.canvas;
+        if (c) {
+          let w = c.getBoundingClientRect().width;
+          if (w > 0) return w / this.LCD_W;
+        }
+        return this.SCALE * this.canvasCssScale;
+      },
+
+      startAutoRefresh() {
+        // clear any existing interval
+        if (this.refreshInterval) {
+          clearInterval(this.refreshInterval);
+        }
+        
+        // set up new interval to refresh every 3 seconds
+        this.refreshInterval = setInterval(() => {
+          this.bumpFrame();
+        }, 3000);
+      },
+
+      // Refresh the live preview WITHOUT flicker: fetch the next frame into an
+      // off-screen Image first, and only swap the visible src once it has fully
+      // decoded. The old frame stays painted until the new one is ready, so the
+      // <img> / background-image never blanks out between loads. Skips if a load
+      // is already in flight (avoids piling up requests).
+      bumpFrame() {
+        if (this.frameLoading) return;
+        this.frameLoading = true;
+        let ts = Date.now();
+        let url = "/api/v1/screen/frame.png?ts=" + ts;
+        let img = new Image();
+        let done = (ok) => {
+          this.frameLoading = false;
+          if (ok) {
+            this.frameTs = ts;       // keep in sync for any other consumers
+            this.frameSrc = url;     // already cached → instant, flicker-free swap
+          }
+        };
+        img.onload = () => done(true);
+        img.onerror = () => done(false);
+        img.src = url;
+      },
+
+      stopAutoRefresh() {
+        if (this.refreshInterval) {
+          clearInterval(this.refreshInterval);
+          this.refreshInterval = null;
+        }
+      },
+
+      switch_tab(tab) {
+        this.tab_page = tab;
+        window.location.hash = tab;
+        // the canvas column has no width while the editor tab is hidden, so
+        // recompute the fit-scale once it becomes visible
+        if (tab === "screen_editor") this.$nextTick(() => this.updateCanvasScale());
+      },
+
+      async loadSettings() {
+        try {
+          let res = await fetch("/api/v1/screen/user_config.json");
+          let cfg = await res.json();
+
+          this.basic.ping_site0 = cfg.ping_site0 || "taobao.com";
+          this.basic.ping_site1 = cfg.ping_site1 || "photonicat.com";
+          this.basic.on_battery_auto_dim_time = cfg.screen_dimmer_time_on_battery_seconds || 60;
+          this.basic.on_charger_auto_dim_time = cfg.screen_dimmer_time_on_dc_seconds       || 86400;
+          this.basic.screen_max_brightness = cfg.screen_max_brightness || 100;
+          this.basic.screen_min_brightness = cfg.screen_min_brightness || 0;
+          this.basic.show_sms                  = cfg.show_sms !== false;
+          this.basic.sms_limit_for_screen      = cfg.sms_limit_for_screen || 5;
+        } catch (e) {
+          console.error("Failed loading settings", e);
+        }
+      },
+
+      async saveSettings() {
+        this.loading.saveSettings = true;
+        try {
+          let current = JSON.parse(this.editor);
+
+          let merged = {
+            ...current,
+            show_sms:                             this.basic.show_sms,
+            screen_dimmer_time_on_battery_seconds: this.basic.on_battery_auto_dim_time,
+            screen_dimmer_time_on_dc_seconds:      this.basic.on_charger_auto_dim_time,
+            ping_site0:                           this.basic.ping_site0,
+            ping_site1:                           this.basic.ping_site1,
+            screen_max_brightness:                this.basic.screen_max_brightness,
+            screen_min_brightness:                this.basic.screen_min_brightness,
+            screen_off_from:                       this.basic.screen_off_from,
+            screen_off_to:                         this.basic.screen_off_to,
+            sms_limit_for_screen:                 this.basic.sms_limit_for_screen,
+          };
+
+          // update the JSON editor with merged values
+          this.editor = JSON.stringify(merged, null, 2);
+
+          // save using the existing saveEditor method
+          await this.saveEditor(false);
+          
+          // Also save SMS limit to shared user config
+          if (this.basic.sms_limit_for_screen !== undefined) {
+            try {
+              await fetch("/api/v1/sms_limit_for_screen.json", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ sms_limit_for_screen: this.basic.sms_limit_for_screen }),
+              });
+            } catch (e) {
+              console.error("Failed to save SMS limit:", e);
+            }
+          }
+          
+          // Show success message
+          this.showNotification("{{locales['config_saved']}}", "配置已保存", 'success');
+        } catch (e) {
+          console.error("Save settings failed", e);
+          this.showNotification("Error saving settings.", "保存设置错误", 'error');
+        } finally {
+          this.loading.saveSettings = false;
+        }
+      },
+
+      async loadEditor() {
+        try {
+          let res = await fetch("/api/v1/screen/user_config.json");
+          let txt = await res.text();
+          this.editor = JSON.stringify(JSON.parse(txt), null, 2);
+          this.savedEditor = this.editor;
+        } catch (e) {
+          console.error("Failed loading JSON", e);
+          this.editor = "{}";
+          this.savedEditor = "{}";
+        }
+      },
+
+      async loadSmsLimit() {
+        try {
+          let res = await fetch("/api/v1/sms_limit_for_screen.json");
+          let data = await res.json();
+          this.basic.sms_limit_for_screen = data.sms_limit_for_screen || 5;
+        } catch (e) {
+          console.error("Failed loading SMS limit", e);
+          this.basic.sms_limit_for_screen = 5;
+        }
+      },
+
+      loadDefault() {
+        this.editor = "{}";
+      },
+
+      // True when the editor text differs from the last loaded/saved config.
+      editorChanged() {
+        return this.editor !== this.savedEditor;
+      },
+
+      // Line-by-line diff between the saved config and the current editor text.
+      // Returns [{kind:'same'|'add'|'del', text}] using a simple LCS so unchanged
+      // context lines stay aligned with the added/removed lines.
+      diffLines() {
+        let a = (this.savedEditor || "").split("\n");
+        let b = (this.editor || "").split("\n");
+        let n = a.length, m = b.length;
+        // LCS length table
+        let dp = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+        for (let i = n - 1; i >= 0; i--) {
+          for (let j = m - 1; j >= 0; j--) {
+            dp[i][j] = a[i] === b[j]
+              ? dp[i + 1][j + 1] + 1
+              : Math.max(dp[i + 1][j], dp[i][j + 1]);
+          }
+        }
+        let out = [];
+        let i = 0, j = 0;
+        while (i < n && j < m) {
+          if (a[i] === b[j]) {
+            out.push({ kind: "same", text: a[i] }); i++; j++;
+          } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+            out.push({ kind: "del", text: a[i] }); i++;
+          } else {
+            out.push({ kind: "add", text: b[j] }); j++;
+          }
+        }
+        while (i < n) { out.push({ kind: "del", text: a[i] }); i++; }
+        while (j < m) { out.push({ kind: "add", text: b[j] }); j++; }
+        return out;
+      },
+
+      async saveEditor(showAlert = true) {
+        if (showAlert) {
+          this.loading.saveEditor = true;
+        }
+        try {
+          let obj = JSON.parse(this.editor);
+          await fetch("/api/v1/screen/user_config.json", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(obj),
+          });
+          // re-normalize and update the diff baseline now that it's persisted
+          this.editor = JSON.stringify(obj, null, 2);
+          this.savedEditor = this.editor;
+          if (showAlert) {
+            this.showNotification("JSON saved.", "JSON 已保存", 'success');
+          }
+        } catch (e) {
+          console.error("Save JSON failed", e);
+          if (showAlert) {
+            this.showNotification("Invalid JSON or save error.", "无效的 JSON 或保存错误", 'error');
+          }
+          throw e; // Re-throw to ensure calling functions handle the error
+        } finally {
+          if (showAlert) {
+            this.loading.saveEditor = false;
+          }
+        }
+      },
+
+      async restartScreen() {
+        this.loading.restartScreen = true;
+        try {
+          const response = await fetch("/api/v1/screen/restart", {
+            method: "GET"
+          });
+          const result = await response.json();
+          
+          if (result.status === "success") {
+            this.showNotification("Screen restarted successfully.", "屏幕重启成功", 'success');
+          } else {
+            console.error("Error: " + result.message);
+            this.showNotification("Error restarting screen.", "屏幕重启错误", 'error');
+          }
+        } catch (e) {
+          console.error("Restart screen failed", e);
+          this.showNotification("Error restarting screen.", "屏幕重启错误", 'error');
+        } finally {
+          this.loading.restartScreen = false;
+        }
+      },
+
+      async shortClick() {
+        // Ultra-responsive: Set loading state
+        this.loading.shortClick = true;
+        
+        // Immediate visual feedback - refresh screen instantly
+        this.bumpFrame();
+        
+        // Reset loading state quickly for immediate responsiveness
+        setTimeout(() => {
+          this.loading.shortClick = false;
+        }, 150);
+        
+        // Wait 200ms then make HTTP request
+        setTimeout(() => {
+          try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 1000); // 1 second timeout
+            
+            fetch("/api/v1/screen/short_click", {
+              method: "GET",
+              signal: controller.signal
+            }).then(response => {
+              clearTimeout(timeoutId);
+              return response.json();
+            }).then(result => {
+              if (result.status === "success") {
+                // Queue additional screen refresh after short delay
+                setTimeout(() => {
+                  this.bumpFrame();
+                }, 200);
+              } else {
+                console.error("Error: " + result.message);
+              }
+            }).catch(e => {
+              if (e.name !== 'AbortError') {
+                console.error("Short click failed", e);
+              }
+            });
+          } catch (e) {
+            console.error("Short click setup failed", e);
+          }
+        }, 200);
+      },
+
+      async checkAndRefreshScreen() {
+        // Get current image source for comparison
+        const img = document.querySelector('img[alt="Screen frame"]');
+        if (!img) return;
+        
+        const originalSrc = img.src;
+        let retryCount = 0;
+        const maxRetries = 20;
+        
+        const attemptRefresh = () => {
+          retryCount++;
+          this.bumpFrame();
+          
+          // Wait for image to potentially load new content
+          setTimeout(() => {
+            try {
+              // Check if the image source actually changed (different timestamp)
+              const newSrc = img.src;
+              
+              if ((originalSrc === newSrc || !img.complete) && retryCount < maxRetries) {
+                setTimeout(attemptRefresh, 100);
+              } else if (retryCount >= maxRetries) {
+                // Max retries reached, stopping refresh attempts
+              } else {
+                // Screen successfully updated
+              }
+            } catch (e) {
+              if (retryCount < maxRetries) {
+                setTimeout(attemptRefresh, 100);
+              }
+            }
+          }, 100);
+        };
+        
+        // Start first attempt after 50ms
+        setTimeout(attemptRefresh, 50);
+      },
+
+      showNotification(message_en, message_cn = '', type = 'info') {
+        this.notification.message_en = message_en;
+        this.notification.message_cn = message_cn;
+        this.notification.message = message_en; // Fallback
+        this.notification.type = type;
+        this.notification.show = true;
+        
+        // Auto-hide after 4 seconds for success and info messages
+        if (type !== 'error') {
+          setTimeout(() => {
+            this.notification.show = false;
+          }, 4000);
+        }
+        
+        // Also log to console for debugging
+        console.log(type.toUpperCase() + ': ' + message_en);
+      },
+
+      hideNotification() {
+        this.notification.show = false;
+      },
+
+      // ===================== VISUAL EDITOR =====================
+
+      // Load the merged (default + user) config so the editor reflects what the
+      // device actually renders, then keep only the display_template.elements.
+      async loadVisual() {
+        try {
+          let [defRes, usrRes] = await Promise.all([
+            fetch("/api/v1/screen/default_config.json"),
+            fetch("/api/v1/screen/user_config.json"),
+          ]);
+          let def = await defRes.json().catch(() => ({}));
+          let usr = await usrRes.json().catch(() => ({}));
+          // user display_template fully overrides default when present
+          let dt = (usr.display_template && usr.display_template.elements)
+                   ? usr.display_template
+                   : (def.display_template || { elements: {} });
+          let elements = dt.elements || {};
+          // normalize: ensure all 4 pages exist as arrays
+          for (let p = 0; p < 4; p++) {
+            let key = "page" + p;
+            if (!Array.isArray(elements[key])) elements[key] = [];
+          }
+          this.display_template = { elements: elements };
+          // custom_metrics: user overrides default; normalize to {sources, global_settings}
+          let cm = (usr.custom_metrics && typeof usr.custom_metrics === "object")
+                   ? usr.custom_metrics
+                   : (def.custom_metrics || {});
+          this.custom_metrics = {
+            sources: Array.isArray(cm.sources) ? cm.sources : [],
+            global_settings: (cm.global_settings && typeof cm.global_settings === "object") ? cm.global_settings : {},
+          };
+          this.selectedIdx = null;
+          this.resetHistory();
+          this.loadSourceStatus();
+          this.loadSourceValues();
+          // collapse all existing sources by default so the list stays compact
+          this.collapsedSources = {};
+          this.custom_metrics.sources.forEach((_, i) => { this.collapsedSources[i] = true; });
+        } catch (e) {
+          console.error("Failed loading visual config", e);
+          this.display_template = { elements: { page0: [], page1: [], page2: [], page3: [] } };
+          this.custom_metrics = { sources: [], global_settings: {} };
+          this.resetHistory();
+        }
+      },
+
+      // ---- undo/redo history ----
+      // Snapshot is a JSON string of display_template so undo/redo is a clean
+      // deep-restore (no shared references with the live, watched object).
+      snapshot() {
+        return JSON.stringify(this.display_template);
+      },
+
+      // Discard history and start fresh with the current layout as the baseline.
+      resetHistory() {
+        this.history = [this.snapshot()];
+        this.histIdx = 0;
+      },
+
+      // Record the current layout as a new history entry. Truncates any redo
+      // tail (we just branched), and coalesces no-op pushes. Call AFTER a
+      // mutation completes (e.g. on mouseup, or right after add/delete/nudge).
+      pushHistory() {
+        let snap = this.snapshot();
+        if (this.history[this.histIdx] === snap) return; // nothing changed
+        this.history = this.history.slice(0, this.histIdx + 1);
+        this.history.push(snap);
+        // cap history to keep memory bounded
+        if (this.history.length > 100) this.history.shift();
+        this.histIdx = this.history.length - 1;
+      },
+
+      canUndo() { return this.histIdx > 0; },
+      canRedo() { return this.histIdx < this.history.length - 1; },
+
+      // Restore the layout at history[histIdx] without recording a new entry.
+      restoreHistory() {
+        let snap = this.history[this.histIdx];
+        if (!snap) return;
+        this.display_template = JSON.parse(snap);
+        // keep selection valid for the restored page
+        if (this.selectedIdx !== null && !this.pageElements()[this.selectedIdx]) {
+          this.selectedIdx = null;
+        }
+        this.syncEditorFromVisual();
+      },
+
+      undo() {
+        if (!this.canUndo()) return;
+        this.histIdx--;
+        this.restoreHistory();
+      },
+
+      redo() {
+        if (!this.canRedo()) return;
+        this.histIdx++;
+        this.restoreHistory();
+      },
+
+      // Figma-style keyboard shortcuts. Only active on the editor tab, and only
+      // when focus is NOT inside a form field (so typing in the property panel or
+      // JSON editor keeps native behavior like text undo).
+      onVisualKeydown(ev) {
+        if (this.tab_page !== "screen_editor") return;
+        let t = ev.target;
+        let typing = t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" ||
+                           t.tagName === "SELECT" || t.isContentEditable);
+        let mod = ev.ctrlKey || ev.metaKey;
+
+        // Undo / redo work even while typing in a field? No — let the field handle
+        // its own text undo. Outside fields we drive layout undo/redo.
+        if (mod && (ev.key === "z" || ev.key === "Z")) {
+          if (typing) return;
+          ev.preventDefault();
+          if (ev.shiftKey) this.redo(); else this.undo();
+          return;
+        }
+        if (mod && (ev.key === "y" || ev.key === "Y")) {
+          if (typing) return;
+          ev.preventDefault();
+          this.redo();
+          return;
+        }
+        if (mod && (ev.key === "s" || ev.key === "S")) {
+          // Ctrl/Cmd+S saves the layout from anywhere on this tab.
+          ev.preventDefault();
+          this.saveVisual();
+          return;
+        }
+
+        if (typing) return; // remaining shortcuts only when not editing a field
+
+        if (mod && (ev.key === "d" || ev.key === "D")) {
+          ev.preventDefault();
+          this.duplicateElement();
+          return;
+        }
+        if (mod && (ev.key === "c" || ev.key === "C")) {
+          ev.preventDefault();
+          this.copyElement();
+          return;
+        }
+        if (mod && (ev.key === "v" || ev.key === "V")) {
+          ev.preventDefault();
+          this.pasteElement();
+          return;
+        }
+        if (ev.key === "Delete" || ev.key === "Backspace") {
+          if (this.selectedIdx === null) return;
+          ev.preventDefault();
+          this.deleteElement();
+          return;
+        }
+        if (ev.key === "Escape") {
+          this.selectedIdx = null;
+          return;
+        }
+        // Arrow keys nudge the selected element: 1px, or 10px with Shift.
+        let step = ev.shiftKey ? 10 : 1;
+        let dx = 0, dy = 0;
+        if (ev.key === "ArrowLeft")  dx = -step;
+        else if (ev.key === "ArrowRight") dx = step;
+        else if (ev.key === "ArrowUp")    dy = -step;
+        else if (ev.key === "ArrowDown")  dy = step;
+        if (dx || dy) {
+          if (this.selectedIdx === null) return;
+          ev.preventDefault();
+          this.nudgeSelected(dx, dy);
+          // coalesce a burst of arrow presses into the history on key-up via a
+          // short debounce so holding an arrow doesn't flood the undo stack.
+          this._scheduleNudgeCommit();
+        }
+      },
+
+      // Debounced history commit for arrow-key nudging.
+      _nudgeTimer: null,
+      _scheduleNudgeCommit() {
+        if (this._nudgeTimer) clearTimeout(this._nudgeTimer);
+        this._nudgeTimer = setTimeout(() => {
+          this._nudgeTimer = null;
+          this.pushHistory();
+        }, 350);
+      },
+
+      pageElements() {
+        return this.display_template.elements["page" + this.vpage] || [];
+      },
+
+      selectedEl() {
+        if (this.selectedIdx === null) return null;
+        return this.pageElements()[this.selectedIdx] || null;
+      },
+
+      // CSS positioning for an element on the scaled canvas. Mirrors how the
+      // firmware (draw.go renderMiddle) lays out each element so the preview is
+      // pixel-faithful: position.(x,y) is the top-left of the text ASCENT box.
+      elementStyle(el) {
+        let s = this.SCALE;
+        // position is content-region relative; shift down by the top bar so it
+        // lands in the editable middle band exactly like the device renders it.
+        let x = (el.position?.x || 0) * s;
+        let y = (this.TOP_BAR + (el.position?.y || 0)) * s;
+        let css = `left:${x}px;top:${y}px;`;
+        let rgb = el.color || [255, 229, 0];
+        css += `color:rgb(${rgb[0]},${rgb[1]},${rgb[2]});`;
+        if (el.size) {
+          // graph/icon: position+size is an explicit box, drawn as-is.
+          css += `width:${el.size.width * s}px;height:${el.size.height * s}px;`;
+          css += `border:1px dashed rgba(255,255,255,0.4);`;
+        }
+        if (el.type === "icon") {
+          css += `font-size:${10 * s}px;line-height:1;opacity:0.85;`;
+        } else {
+          // Text: font-size in device px (×scale). Set line-height to the full
+          // font line (ascent+descent) so the glyph baseline lands at ascent
+          // below `top` — exactly where the device draws it — and the box height
+          // equals the real glyph extent (no overflow up into the top bar).
+          let fpx = (this.fontPx[el.font] || 12) * s;
+          let lh = fpx * (this.FONT_ASC + this.FONT_DESC);
+          let fw = this.fontWeight[el.font] || 700;
+          css += `font-size:${fpx}px;line-height:${lh}px;height:${lh}px;`;
+          css += `font-family:Orbitron,sans-serif;font-weight:${fw};`;
+        }
+        if (el.enable === 0) css += "opacity:0.35;";
+        return css;
+      },
+
+      // What to show inside the box on the canvas (a preview, not the live value).
+      // labelMode === "label" shows the human label; "key" shows the data_key token.
+      elementLabel(el) {
+        if (el.type === "icon") {
+          let p = (el.icon_path || "").split("/").pop().replace(".svg", "");
+          return "⬚ " + (p || "icon");
+        }
+        if (el.type === "graph") return "▤ graph";
+        if (el.type === "text") {
+          let units = el.units ? (" " + el.units) : "";
+          if (this.labelMode === "key") {
+            let key = el.data_key || el.label || "value";
+            return "{" + key + "}" + units;
+          }
+          // label mode: prefer the human label, fall back to the key
+          return (el.label || el.data_key || "value") + units;
+        }
+        return el.label || "text";
+      },
+
+      onElementDown(ev, idx, mode) {
+        this.selectedIdx = idx;
+        let el = this.pageElements()[idx];
+        this.drag.active = true;
+        this.drag.mode = mode;
+        this.drag.idx = idx;
+        this.drag.startX = ev.clientX;
+        this.drag.startY = ev.clientY;
+        this.drag.origX = el.position?.x || 0;
+        this.drag.origY = el.position?.y || 0;
+        this.drag.origW = el.size?.width || 0;
+        this.drag.origH = el.size?.height || 0;
+        ev.preventDefault();
+      },
+
+      onCanvasMove(ev) {
+        if (!this.drag.active) return;
+        let el = this.pageElements()[this.drag.idx];
+        if (!el) return;
+        // convert on-screen mouse delta to LCD pixels using the REAL rendered
+        // scale (accounts for the responsive canvas shrink), not the nominal 1.5
+        let s = this.effScale();
+        let dx = (ev.clientX - this.drag.startX) / s;
+        let dy = (ev.clientY - this.drag.startY) / s;
+        if (this.drag.mode === "move") {
+          if (!el.position) el.position = { x: 0, y: 0 };
+          el.position.x = Math.max(0, Math.min(this.LCD_W - 1, Math.round(this.drag.origX + dx)));
+          el.position.y = Math.max(0, Math.min(this.CONTENT_H - 1, Math.round(this.drag.origY + dy)));
+        } else if (this.drag.mode === "resize" && el.size) {
+          el.size.width = Math.max(4, Math.round(this.drag.origW + dx));
+          el.size.height = Math.max(4, Math.round(this.drag.origH + dy));
+        }
+      },
+
+      onCanvasUp() {
+        let wasDragging = this.drag.active;
+        this.drag.active = false;
+        this.drag.mode = null;
+        this.drag.idx = null;
+        // record the move/resize as one undoable step
+        if (wasDragging) this.pushHistory();
+      },
+
+      addElement() {
+        let el = {
+          type: "text",
+          label: "New",
+          position: { x: 10, y: 10 },
+          font: "reg",
+          color: [255, 229, 0],
+          units: "",
+          data_key: "",
+          units_font: "unit",
+          enable: 1,
+        };
+        this.pageElements().push(el);
+        this.selectedIdx = this.pageElements().length - 1;
+        this.pushHistory();
+      },
+
+      deleteElement() {
+        if (this.selectedIdx === null) return;
+        this.pageElements().splice(this.selectedIdx, 1);
+        this.selectedIdx = null;
+        this.pushHistory();
+      },
+
+      // Duplicate the selected element, offset slightly so it's visible (Ctrl+D).
+      duplicateElement() {
+        let el = this.selectedEl();
+        if (!el) return;
+        let copy = JSON.parse(JSON.stringify(el));
+        if (!copy.position) copy.position = { x: 0, y: 0 };
+        copy.position.x = Math.min(this.LCD_W - 1, (copy.position.x || 0) + 6);
+        copy.position.y = Math.min(this.CONTENT_H - 1, (copy.position.y || 0) + 6);
+        this.pageElements().push(copy);
+        this.selectedIdx = this.pageElements().length - 1;
+        this.pushHistory();
+      },
+
+      // Copy/paste selected element across pages (Ctrl+C / Ctrl+V).
+      copyElement() {
+        let el = this.selectedEl();
+        if (el) this.clipboard = JSON.parse(JSON.stringify(el));
+      },
+
+      pasteElement() {
+        if (!this.clipboard) return;
+        let copy = JSON.parse(JSON.stringify(this.clipboard));
+        if (!copy.position) copy.position = { x: 10, y: 10 };
+        copy.position.x = Math.min(this.LCD_W - 1, (copy.position.x || 0) + 6);
+        copy.position.y = Math.min(this.CONTENT_H - 1, (copy.position.y || 0) + 6);
+        this.pageElements().push(copy);
+        this.selectedIdx = this.pageElements().length - 1;
+        this.pushHistory();
+      },
+
+      // Nudge the selected element by (dx,dy) px, clamped to the LCD (arrow keys).
+      nudgeSelected(dx, dy) {
+        let el = this.selectedEl();
+        if (!el) return;
+        if (!el.position) el.position = { x: 0, y: 0 };
+        el.position.x = Math.max(0, Math.min(this.LCD_W - 1, (el.position.x || 0) + dx));
+        el.position.y = Math.max(0, Math.min(this.CONTENT_H - 1, (el.position.y || 0) + dy));
+      },
+
+      rgbToHex(rgb) {
+        let a = rgb || [255, 229, 0];
+        let h = (n) => ("0" + Math.max(0, Math.min(255, n | 0)).toString(16)).slice(-2);
+        return "#" + h(a[0]) + h(a[1]) + h(a[2]);
+      },
+
+      setColor(hex) {
+        let el = this.selectedEl();
+        if (!el) return;
+        el.color = [
+          parseInt(hex.slice(1, 3), 16),
+          parseInt(hex.slice(3, 5), 16),
+          parseInt(hex.slice(5, 7), 16),
+        ];
+        this.pushHistory();
+      },
+
+      // Persist display_template into user_config, preserving the rest of it.
+      async saveVisual() {
+        this.loading.saveVisual = true;
+        try {
+          let res = await fetch("/api/v1/screen/user_config.json");
+          let usr = await res.json().catch(() => ({}));
+          if (typeof usr !== "object" || usr === null) usr = {};
+          usr.display_template = { elements: this.display_template.elements };
+          usr.custom_metrics = this.normalizedCustomMetrics();
+          await fetch("/api/v1/screen/user_config.json", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(usr),
+          });
+          // keep the raw-JSON editor tab in sync and reset the diff baseline
+          this.editor = JSON.stringify(usr, null, 2);
+          this.savedEditor = this.editor;
+          this.bumpFrame();
+          this.showNotification("Layout saved.", "布局已保存", 'success');
+          return true;
+        } catch (e) {
+          console.error("Save visual failed", e);
+          this.showNotification("Error saving layout.", "保存布局错误", 'error');
+          return false;
+        } finally {
+          this.loading.saveVisual = false;
+        }
+      },
+
+      // Save the layout (which also persists custom_metrics data sources) and
+      // then restart the display so newly added/edited sources are loaded and
+      // actually fetch. This is the one action a user needs after adding a
+      // source — exposed in the Data Sources panel so they don't have to find
+      // the "Save Layout" button in the visual-editor toolbar separately.
+      async saveAndRestartSources() {
+        if (this.loading.saveRestartSources) return;
+        this.loading.saveRestartSources = true;
+        try {
+          let ok = await this.saveVisual();
+          if (!ok) return; // saveVisual already showed an error
+          // Restart so the display reloads its config and starts the sources.
+          await this.restartScreen();
+        } finally {
+          this.loading.saveRestartSources = false;
+        }
+      },
+
+      // Upstream reference config from the photonicat2_mini_display (Go) repo.
+      // This is the canonical default the device firmware ships with.
+      UPSTREAM_DEFAULT_URL: "https://raw.githubusercontent.com/photonicat/photonicat2_mini_display/refs/heads/main/config.json",
+
+      // Reset every page's layout to the upstream photonicat repo default.
+      // Falls back to the device's local default_config if the repo is
+      // unreachable (e.g. no internet on the device / CORS blocked).
+      async resetVisualDefault() {
+        if (!confirm('{{ locales["visual_reset_confirm"] }}')) return;
+        try {
+          let def = null;
+          let fromUpstream = false;
+          try {
+            let res = await fetch(this.UPSTREAM_DEFAULT_URL, { cache: "no-store" });
+            if (res.ok) {
+              def = await res.json();
+              fromUpstream = true;
+            }
+          } catch (e) {
+            console.warn("Upstream default fetch failed, falling back to local default", e);
+          }
+          if (!def) {
+            let res = await fetch("/api/v1/screen/default_config.json");
+            def = await res.json().catch(() => ({}));
+          }
+
+          let elements = (def && def.display_template && def.display_template.elements) || {};
+          for (let p = 0; p < 4; p++) {
+            let key = "page" + p;
+            if (!Array.isArray(elements[key])) elements[key] = [];
+          }
+          // deep copy so later edits don't mutate the fetched default
+          this.display_template = { elements: JSON.parse(JSON.stringify(elements)) };
+          this.selectedIdx = null;
+          this.pushHistory();
+          this.syncEditorFromVisual();
+          if (fromUpstream) {
+            this.showNotification("Layout reset to photonicat repo default (not yet saved).", "布局已重置为 photonicat 仓库默认值（尚未保存）", 'info');
+          } else {
+            this.showNotification("Repo unreachable; reset to local default (not yet saved).", "无法访问仓库，已重置为本地默认值（尚未保存）", 'info');
+          }
+        } catch (e) {
+          console.error("Reset to default failed", e);
+          this.showNotification("Error loading default layout.", "加载默认布局错误", 'error');
+        }
+      },
+
+      // Discard unsaved visual changes by reloading the saved layout.
+      async revertVisual() {
+        if (this.editorChanged() && !confirm('{{ locales["visual_revert_confirm"] }}')) return;
+        await this.loadVisual();
+        this.syncEditorFromVisual();
+      },
+
+      // Mirror the current visual layout into the raw-JSON editor text so the diff
+      // view and the Editor tab reflect in-progress visual changes.
+      syncEditorFromVisual() {
+        let base;
+        try { base = JSON.parse(this.savedEditor || "{}"); }
+        catch (e) { base = {}; }
+        if (typeof base !== "object" || base === null) base = {};
+        base.display_template = { elements: this.display_template.elements };
+        base.custom_metrics = this.normalizedCustomMetrics();
+        this.editor = JSON.stringify(base, null, 2);
+      },
+
+      // ---- custom data sources ----
+      // Strip empty/default fields so the written config stays clean, and drop
+      // the UI-only "uci" pseudo-type back into a real command source.
+      normalizedCustomMetrics() {
+        let sources = (this.custom_metrics.sources || []).map((s) => {
+          let out = { type: s.type, name: s.name || "", enabled: s.enabled ? 1 : 0, config: {} };
+          let c = s.config || {};
+          if (s.type === "uci") {
+            // convenience preset -> command source running `uci get <path>`
+            out.type = "command";
+            out.config = {
+              command: "uci get " + (c.uci_path || ""),
+              interval: Number(c.interval) || 60,
+              timeout: Number(c.timeout) || 5,
+              parser: "stdout",
+              data_key: c.data_key || "",
+            };
+          } else if (s.type === "command") {
+            out.config = {
+              command: c.command || "",
+              interval: Number(c.interval) || 5,
+              timeout: Number(c.timeout) || 5,
+              parser: c.parser || "stdout",
+              data_key: c.data_key || "",
+            };
+          } else if (s.type === "http_poll") {
+            out.config = {
+              url: c.url || "",
+              method: c.method || "GET",
+              interval: Number(c.interval) || 60,
+              timeout: Number(c.timeout) || 10,
+              parser: c.parser || "stdout",
+              data_key: c.data_key || "",
+            };
+            if (c.headers && typeof c.headers === "object" && Object.keys(c.headers).length) out.config.headers = c.headers;
+          } else {
+            // env / json_file / http_endpoint: pass config through untouched
+            out.config = c;
+          }
+          return out;
+        });
+        let cm = { sources: sources };
+        if (this.custom_metrics.global_settings && Object.keys(this.custom_metrics.global_settings).length) {
+          cm.global_settings = this.custom_metrics.global_settings;
+        }
+        return cm;
+      },
+
+      // What's actually referenceable: a source's data_key.
+      sourceDataKey(s) {
+        let c = s.config || {};
+        return c.data_key || "";
+      },
+
+      // ---- data_key guidance (linking a text element to a value) ----
+      // Every value the device can show lives in globalData under a key. The
+      // keys come from two places: built-in device metrics (BatterySoc,
+      // CpuTemp, …, read live from data.json) and the data_keys of the custom
+      // sources defined in this editor. These helpers let the text-element
+      // property panel offer a typeahead of real keys and show, live, whether
+      // the key the user typed actually resolves to a value.
+
+      // data_keys defined by the editor's own custom sources (enabled or not).
+      customSourceKeys() {
+        let out = [];
+        for (let s of this.custom_metrics.sources) {
+          let k = (s.config || {}).data_key;
+          if (k && out.indexOf(k) === -1) out.push(k);
+        }
+        return out;
+      },
+
+      // All keys offered in the data_key dropdown: this editor's custom-source
+      // keys first (what the user just made), then the live built-in metric
+      // keys from the device, minus any already listed. Sorted within groups.
+      availableDataKeys() {
+        let custom = this.customSourceKeys().slice().sort();
+        let live = Object.keys(this.sourceValues || {}).sort();
+        let builtins = live.filter((k) => custom.indexOf(k) === -1);
+        return custom.concat(builtins);
+      },
+
+      // Live value for a data_key (from globalData), or "" when not present yet.
+      dataKeyValue(key) {
+        if (!key) return "";
+        let v = (this.sourceValues || {})[key];
+        return (v === undefined || v === null) ? "" : String(v);
+      },
+
+      // Classify the key the user typed, for the inline hint under the field:
+      //  "custom"  – matched by one of this editor's custom sources
+      //  "builtin" – a live built-in device metric
+      //  "empty"   – nothing typed yet
+      //  "unknown" – typed, but no source defines it and the device has no
+      //              such value (likely a typo, or a source not yet saved)
+      dataKeyStatus(key) {
+        if (!key) return "empty";
+        if (this.customSourceKeys().indexOf(key) !== -1) return "custom";
+        if (Object.prototype.hasOwnProperty.call(this.sourceValues || {}, key)) return "builtin";
+        return "unknown";
+      },
+
+      addSource(type) {
+        let defaults = {
+          command:    { command: "", interval: 5,  timeout: 5,  parser: "stdout", data_key: "" },
+          uci:        { uci_path: "", interval: 60, timeout: 5, data_key: "" },
+          http_poll:  { url: "", method: "GET", interval: 60, timeout: 10, parser: "stdout", data_key: "" },
+          env:        { variables: [] },
+          json_file:  { path: "", interval: 60, mappings: [] },
+        };
+        this.custom_metrics.sources.push({
+          type: type,
+          name: "source" + (this.custom_metrics.sources.length + 1),
+          enabled: 1,
+          config: JSON.parse(JSON.stringify(defaults[type] || {})),
+        });
+      },
+
+      // Ready-made, working HTTPS examples (free, no API key). One click inserts
+      // a fully-filled source so a non-technical user never has to type a URL or
+      // figure out a parser. Values were verified live; weather/IP use the
+      // plain-text response (parser "stdout"), price/time use a json: path.
+      httpsExamples: [
+        { id: "ip",      icon: "🌐", label: "Public IP",
+          url: "https://api.ipify.org", parser: "stdout",
+          data_key: "MyPublicIP", interval: 300, name: "PublicIP" },
+        { id: "weather", icon: "🌡", label: "Weather °C",
+          url: "https://wttr.in/Shanghai?format=%t", parser: "stdout",
+          data_key: "WeatherTemp", interval: 1800, name: "Weather" },
+        { id: "btc",     icon: "₿", label: "BTC price",
+          url: "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",
+          parser: "json:bitcoin.usd", data_key: "BtcUsd", interval: 600, name: "BtcPrice" },
+        { id: "time",    icon: "🕒", label: "Time",
+          url: "https://timeapi.io/api/Time/current/zone?timeZone=Asia/Shanghai",
+          parser: "json:time", data_key: "NetTime", interval: 60, name: "NetTime" },
+        // Official Photonicat market API (pchat.photonicat.com, see device-guide):
+        // clean single-value JSON, device-friendly. Gold complements BTC; the
+        // stock quote also demonstrates the array-index parser (quotes.0.price).
+        { id: "gold",    icon: "🥇", label: "Gold $/oz",
+          url: "https://pchat.photonicat.com/metals",
+          parser: "json:gold_usd_oz", data_key: "GoldUsd", interval: 600, name: "GoldPrice" },
+        { id: "aapl",    icon: "📈", label: "AAPL price",
+          url: "https://pchat.photonicat.com/q?syms=AAPL",
+          parser: "json:quotes.0.price", data_key: "AaplPrice", interval: 300, name: "AaplPrice" },
+      ],
+
+      // Insert a ready-made HTTPS example as a new http_poll source. If its data_key
+      // is already taken, suffix a number so multiple examples don't collide.
+      addExample(ex) {
+        let key = ex.data_key, name = ex.name, n = 1;
+        let keys = this.custom_metrics.sources.map((s) => (s.config || {}).data_key);
+        let names = this.custom_metrics.sources.map((s) => s.name);
+        while (keys.includes(key)) { key = ex.data_key + (++n); }
+        while (names.includes(name)) { name = ex.name + n; }
+        this.custom_metrics.sources.push({
+          type: "http_poll",
+          name: name,
+          enabled: 1,
+          config: {
+            url: ex.url, method: "GET", interval: ex.interval, timeout: 10,
+            parser: ex.parser, data_key: key,
+          },
+        });
+      },
+
+      // Ready-made DEVICE-LOCAL examples (no internet needed): command, uci,
+      // env and json_file sources. Each was verified live on the device. These
+      // demonstrate every source type beyond HTTP — handy because env/json_file
+      // have no inline editor fields, so an example is the easiest way to add
+      // one. `build` returns the full source object for the given (deduped) key.
+      localExamples: [
+        { id: "loadavg", icon: "📈", group: "command", label: "CPU load",
+          data_key: "LoadAvg1", name: "LoadAvg",
+          build: (key, name) => ({ type: "command", name: name, enabled: 1,
+            config: { command: "cut -d' ' -f1 /proc/loadavg", interval: 10, timeout: 5, parser: "stdout", data_key: key } }) },
+        { id: "memfree", icon: "🧠", group: "command", label: "Free RAM (MB)",
+          data_key: "FreeMemMB", name: "FreeMem",
+          build: (key, name) => ({ type: "command", name: name, enabled: 1,
+            config: { command: "awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo", interval: 15, timeout: 5, parser: "stdout", data_key: key } }) },
+        { id: "hostname", icon: "🏷", group: "uci", label: "Hostname",
+          data_key: "Hostname", name: "Hostname",
+          build: (key, name) => ({ type: "uci", name: name, enabled: 1,
+            config: { uci_path: "system.@system[0].hostname", interval: 60, timeout: 5, data_key: key } }) },
+        { id: "lanip", icon: "🌐", group: "uci", label: "LAN IP",
+          data_key: "LanIp", name: "LanIp",
+          build: (key, name) => ({ type: "uci", name: name, enabled: 1,
+            config: { uci_path: "network.lan.ipaddr", interval: 60, timeout: 5, data_key: key } }) },
+        { id: "ssid", icon: "📶", group: "uci", label: "WiFi SSID",
+          data_key: "WifiSsid", name: "WifiSsid",
+          build: (key, name) => ({ type: "uci", name: name, enabled: 1,
+            config: { uci_path: "wireless.@wifi-iface[0].ssid", interval: 300, timeout: 5, data_key: key } }) },
+        { id: "envhome", icon: "🔑", group: "env", label: "Env var (HOME)",
+          data_key: "EnvHome", name: "EnvHome",
+          build: (key, name) => ({ type: "env", name: name, enabled: 1,
+            config: { variables: [{ env_var: "HOME", data_key: key, default: "n/a" }] } }) },
+        { id: "boardname", icon: "📄", group: "json_file", label: "JSON file (board)",
+          data_key: "BoardName", name: "BoardName",
+          build: (key, name) => ({ type: "json_file", name: name, enabled: 1,
+            config: { path: "/tmp/board.json", interval: 300, mappings: [{ json_path: "model.name", data_key: key }] } }) },
+      ],
+
+      // Insert a device-local example, de-duplicating its data_key and name the
+      // same way addExample does, so clicking twice doesn't collide.
+      addLocalExample(ex) {
+        let key = ex.data_key, name = ex.name, n = 1;
+        let keys = this.custom_metrics.sources.map((s) => (s.config || {}).data_key);
+        let names = this.custom_metrics.sources.map((s) => s.name);
+        while (keys.includes(key)) { key = ex.data_key + (++n); }
+        while (names.includes(name)) { name = ex.name + n; }
+        this.custom_metrics.sources.push(ex.build(key, name));
+      },
+
+      removeSource(i) {
+        this.custom_metrics.sources.splice(i, 1);
+      },
+
+      // Trigger an immediate fetch/execute on the device, then POLL for the
+      // result. An http_poll fetch can take up to its `timeout` seconds before
+      // the firmware writes a value (or a TIMEOUT/ERROR sentinel), so we can't
+      // read once at 900ms — we keep checking until the value changes or the
+      // source reports an error, bounded by the source's own timeout + margin.
+      async refreshSource(s) {
+        if (!s.name) return;
+        let key = (s.config || {}).data_key;
+        // remember what was shown before so we can detect a fresh value
+        let prev = (key && this.sourceValues[key] !== undefined) ? String(this.sourceValues[key]) : null;
+        if (key) { this.refreshing[key] = true; }
+        // The firmware can only execute sources it loaded at startup. A source
+        // just added/edited in the editor (or edited while the display was
+        // already running) is unknown to it, so /execute returns an error like
+        // "source 'X' not found" or "custom metrics manager not initialized".
+        // Surface that instead of silently polling for a value that never
+        // arrives — the user needs to Save Layout, then Restart screen.
+        let execErr = null;
+        try {
+          let res = await fetch("/api/v1/screen/custom_metrics/" + encodeURIComponent(s.name) + "/execute", { method: "POST" });
+          let body = await res.json().catch(() => null);
+          if (!res.ok || (body && body.error) || (body && body.status === "error")) {
+            execErr = (body && body.error) || (body && body.message) || ("HTTP " + res.status);
+          }
+        } catch (e) {
+          console.error("refresh source failed", e);
+          execErr = String(e && e.message ? e.message : e);
+        }
+        if (execErr) {
+          if (key) { this.refreshing[key] = false; }
+          console.error("refresh source rejected by firmware:", execErr);
+          // The "source not found" / "manager not initialized" errors just mean
+          // this source hasn't been saved to the device and loaded yet — the one
+          // fix is Save and Restart. Do it automatically (clicking Refresh on an
+          // unsaved source clearly means "apply and test this"), showing progress
+          // in the notification, then re-test once the display is back.
+          let notLoaded = /not found|not initialized/i.test(execErr);
+          if (notLoaded) {
+            // guard against a re-test loop: only auto-save on the first attempt
+            if (!s._refreshSaveTried) {
+              s._refreshSaveTried = true;
+              this.showNotification(
+                "Applying this source (Save and Restart). Please wait while the screen restarts…",
+                "正在应用此数据源（保存并重启）。请稍候，屏幕正在重启…",
+                "info");
+              await this.saveAndRestartSources();
+              // The display's HTTP server and its custom-metrics manager need a
+              // few seconds after restart before a source can be executed —
+              // testing too soon just gives "source not found" again. Block on a
+              // generous fixed delay (saveAndRestartSources already spent the
+              // stop+sleep+start cycle), THEN re-test once.
+              await new Promise((r) => setTimeout(r, 7000));
+              s._refreshSaveTried = false;
+              this.refreshSource(s);
+            } else {
+              s._refreshSaveTried = false;
+              this.showNotification(
+                "Still couldn’t test this source after restarting: " + execErr + ".",
+                "重启后仍无法测试此数据源：" + execErr + "。",
+                "error");
+            }
+            return;
+          }
+          // env / json_file sources can't be triggered on demand by the firmware
+          // (they're polled). The Refresh button isn't shown for them, but guard
+          // anyway with a clear message instead of the generic save-and-restart one.
+          if (/does not support immediate execution/i.test(execErr)) {
+            this.showNotification(
+              s.name + ": this source type can’t be tested on demand; its value updates on its own interval.",
+              s.name + "：此类数据源不支持手动测试，其值会按设定的间隔自动更新。",
+              "info");
+            return;
+          }
+          this.showNotification(
+            "Couldn’t test this source: " + execErr + ". New or edited sources take effect only after you Save and Restart.",
+            "无法测试此数据源：" + execErr + "。新增或修改的数据源需先“保存并重启”后才生效。",
+            "error");
+          return;
+        }
+        // poll window: a bit longer than the source's timeout (default 10s)
+        let timeoutS = Number((s.config || {}).timeout) || 10;
+        let deadline = (timeoutS + 3) * 1000;
+        let waited = 0, step = 800;
+        const tick = async () => {
+          await this.loadSourceValues();
+          await this.loadSourceStatus();
+          let now = (key && this.sourceValues[key] !== undefined) ? String(this.sourceValues[key]) : null;
+          let st = this.sourceStatus[s.name];
+          // done when: a NEW value arrived, OR the firmware reported an error
+          // for this run, OR we exhausted the poll window.
+          let gotFresh = now !== null && now !== "…" && now !== prev;
+          let gotError = st && st.last_error;
+          if (gotFresh || gotError || waited >= deadline) {
+            if (key) { this.refreshing[key] = false; }
+            // Surface the result so the user clearly sees the data (or the
+            // failure) — not just the small value chip next to the button.
+            if (gotError) {
+              this.showNotification(
+                s.name + ": " + st.last_error,
+                s.name + "：" + st.last_error,
+                "error");
+            } else if (gotFresh) {
+              this.showNotification(
+                s.name + " = " + now,
+                s.name + " = " + now,
+                "success");
+            } else {
+              // exhausted the window without a fresh value or an error
+              this.showNotification(
+                "No value yet for " + s.name + ". Check the source config and that the device can reach it.",
+                "暂未获取到 " + s.name + " 的值。请检查数据源配置以及设备的网络连通性。",
+                "info");
+            }
+            return;
+          }
+          waited += step;
+          setTimeout(tick, step);
+        };
+        setTimeout(tick, step);
+      },
+
+      // Read live globalData (data_key -> value) so the editor can show the
+      // actual fetched value for each source.
+      async loadSourceValues() {
+        try {
+          let res = await fetch("/api/v1/screen/data.json");
+          if (!res.ok) return;
+          let data = await res.json().catch(() => null);
+          if (data && typeof data === "object") this.sourceValues = data;
+        } catch (e) {
+          // display backend may be down — leave values as-is
+        }
+      },
+
+      // The current value for a source (by its data_key), for display next to
+      // the Refresh button. Returns "" when unknown.
+      sourceValue(s) {
+        let key = (s.config || {}).data_key;
+        if (!key) return "";
+        let v = this.sourceValues[key];
+        return (v === undefined || v === null) ? "" : String(v);
+      },
+
+      // The firmware writes these sentinel strings into globalData when a
+      // source's fetch/command fails (see customMetrics.go). Show them in red.
+      isErrorValue(v) {
+        return v === "ERROR" || v === "TIMEOUT" || v === "PARSE_ERROR" ||
+               v === "FILE_ERROR" || v === "EXTRACT_ERROR";
+      },
+
+      // data_keys used by more than one ENABLED source — these collide in
+      // globalData (last writer wins), so we warn the user.
+      duplicateKeys() {
+        let counts = {};
+        for (let s of this.custom_metrics.sources) {
+          if (!s.enabled) continue;
+          let k = (s.config || {}).data_key;
+          if (k) counts[k] = (counts[k] || 0) + 1;
+        }
+        return Object.keys(counts).filter((k) => counts[k] > 1);
+      },
+
+      // Is THIS source's data_key duplicated by another enabled source?
+      isDupKey(s) {
+        let k = (s.config || {}).data_key;
+        return !!k && this.duplicateKeys().includes(k);
+      },
+
+      toggleCollapsed(i) {
+        this.collapsedSources[i] = !this.collapsedSources[i];
+      },
+
+      allCollapsed() {
+        return this.custom_metrics.sources.every((_, i) => this.collapsedSources[i]);
+      },
+
+      toggleAllCollapsed() {
+        let target = !this.allCollapsed();
+        this.custom_metrics.sources.forEach((_, i) => { this.collapsedSources[i] = target; });
+      },
+
+      collapseAllLabel() {
+        return this.allCollapsed() ? this.collapseLabels.expandAll : this.collapseLabels.collapseAll;
+      },
+
+      // Poll the firmware for per-source status (current value + last error).
+      async loadSourceStatus() {
+        try {
+          let res = await fetch("/api/v1/screen/custom_metrics/status");
+          if (!res.ok) return;
+          let data = await res.json().catch(() => null);
+          let list = Array.isArray(data) ? data : (data && data.sources) || [];
+          let map = {};
+          for (let st of list) { if (st && st.name) map[st.name] = st; }
+          this.sourceStatus = map;
+        } catch (e) {
+          // firmware may not expose status (older build) — fail quietly
+        }
+      },
+
+      getSaveVisualButtonText() {
+        return this.loading.saveVisual ? '{{ locales["common_saving"] | default("Saving...") }}' : '{{ locales["visual_save"] }}';
+      },
+
+      getSaveSettingsButtonText() {
+        return this.loading.saveSettings ? '{{ locales["common_saving"] | default("Saving...") }}' : '{{ locales["save_settings"] }}';
+      },
+
+      getRestartScreenButtonText() {
+        return this.loading.restartScreen ? '{{ locales["common_restarting"] | default("Restarting...") }}' : '{{ locales["restart_screen"] }}';
+      },
+
+      getShortClickButtonText() {
+        return this.loading.shortClick ? '{{ locales["common_processing"] | default("Processing...") }}' : '{{ locales["short_click"] }}';
+      },
+
+      getSaveEditorButtonText() {
+        return this.loading.saveEditor ? '{{ locales["common_saving"] | default("Saving...") }}' : '{{ locales["save_json"] }}';
+      },
+    }));
+  });
+</script>
+{% endblock %}

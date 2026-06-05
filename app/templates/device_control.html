@@ -1,0 +1,1618 @@
+{% extends '_base.html' %}
+{% block content %}
+<div class="container mx-auto w-full pt-14 pb-6 sm:pt-24 sm:pb-8 md:pt-28 lg:px-4" x-data="adv_settings" x-init="init()">
+  <div class="flex items-center justify-between">
+    <h1 class="px-3 py-4 font-bold uppercase text-gray-600">{{locales["nav_settings"]}}</h1>
+  </div>
+
+  {% include '_notification.html' %}
+
+  <div class="mb-4 flex w-full leading-normal text-gray-800">
+    <div class="grow">
+      <div class="border bg-white">
+        <!--Settings navbar -->
+        <div class="border-b">
+          <ul class="flex justify-between">
+            {% if stm32_firmware_exist %}
+            <li class="basis-1/4 cursor-pointer border border-b-2 border-b-pcatblue text-center font-semibold hover:font-semibold">
+              <a href="/device_control" class="block p-1 sm:p-3">{{locales["tab_device_control"]}}</a>
+            </li>
+            <li class="basis-1/4 cursor-pointer border text-center hover:font-semibold">
+              <a href="/general_settings" class="block p-1 sm:p-3">{{locales["tab_general_settings"]}}</a>
+            </li>
+            <li class="basis-1/4 cursor-pointer border text-center hover:font-semibold">
+              <a href="/settings" class="block p-1 sm:p-3">Wi-Fi</a>
+            </li>
+            <li class="basis-1/4 cursor-pointer border text-center hover:font-semibold">
+              <a href="/timer" class="block p-1 sm:p-3">{{locales["tab_timers"]}}</a>
+            </li>
+            {% else %}
+            <li class="basis-1/3 cursor-pointer border border-b-2 border-b-pcatblue text-center font-semibold hover:font-semibold">
+              <a href="/device_control" class="block p-1 sm:p-3">{{locales["tab_device_control"]}}</a>
+            </li>
+            <li class="basis-1/3 cursor-pointer border text-center hover:font-semibold">
+              <a href="/general_settings" class="block p-1 sm:p-3">{{locales["tab_general_settings"]}}</a>
+            </li>
+            <li class="basis-1/3 cursor-pointer border text-center hover:font-semibold">
+              <a href="/settings" class="block p-1 sm:p-3">Wi-Fi</a>
+            </li>
+            {% endif %}
+          </ul>
+        </div>
+        <!--/ Settings navbar -->
+      </div>
+    </div>
+    <!--/grow -->
+  </div>
+  <!--/w-full-->
+
+  <!-- start of network_mode and apn_setup -->
+  <div class="mb-4 grid w-full grid-cols-1 gap-4 px-2 leading-normal text-gray-800 md:grid-cols-2 md:items-start sm:px-0">
+    <div class="grow rounded border bg-white shadow flex flex-col">
+      <div class="flex justify-between border-b">
+        <h5 class="flex font-bold text-gray-600">
+          <div class="flex items-stretch">
+            <button @click="switch_tab('network_mode')" :class="tab_page === 'network_mode' ? 'border-b-2 border-b-pcatblue' : '' " class="flex items-center border-x px-4 hover:bg-gray-100 py-3" >{{locales["card_network_mode"]}}</button>
+          </div>
+          <div class="flex items-stretch">
+            <button @click="switch_tab('apn_setup')" :class="tab_page === 'apn_setup' ? 'border-b-2 border-b-pcatblue' : '' " class="flex items-center border-x px-4 hover:bg-gray-100 py-3" >{{locales["apn_setup"]}}</button>
+          </div>
+        </h5>
+      </div>
+      <div class="p-5 flex-1 flex flex-col" x-show="tab_page === 'network_mode'" >
+        <div>
+        <div class="mb-4 flex flex-col space-y-4">
+          <div class="flex items-center text-gray-700">
+            <img src="/static/inapp/Multi-WAN.svg" class="mr-2 h-6 w-6" />
+            <span class="font-medium">{{locales["card_network_mode"]}}</span>
+          </div>
+          
+          <!-- 4-Button Network Mode Selection -->
+          <div class="flex items-center space-x-4">
+            <div class="flex space-x-3">
+              <!-- Auto Button -->
+              <button 
+                type="button"
+                @click="network_mode = 'auto'"
+                :class="network_mode === 'auto' ? 'bg-green-100 border-green-300 text-green-700' : 'bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100'"
+                class="flex flex-col items-center justify-center w-20 h-16 rounded-lg border-2 transition-all duration-200 cursor-pointer">
+                <img src="/static/inapp/Multi-WAN.svg" class="w-5 h-5 mb-1" />
+                <span class="text-xs font-medium">{{locales["network_mode_auto_short"]}}</span>
+              </button>
+              
+              <!-- Eth Only Button -->
+              <button 
+                type="button"
+                @click="network_mode = 'eth_only'"
+                :class="network_mode === 'eth_only' ? 'bg-blue-100 border-blue-300 text-blue-700' : 'bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100'"
+                class="flex flex-col items-center justify-center w-20 h-16 rounded-lg border-2 transition-all duration-200 cursor-pointer">
+                <img src="/static/eth_active.svg" class="w-5 h-5 mb-1" />
+                <span class="text-xs font-medium">{{locales["network_mode_eth_only_short"]}}</span>
+              </button>
+              
+              <!-- Cell Only Button -->
+              <button 
+                type="button"
+                @click="network_mode = 'cell_only'"
+                :class="network_mode === 'cell_only' ? 'bg-orange-100 border-orange-300 text-orange-700' : 'bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100'"
+                class="flex flex-col items-center justify-center w-20 h-16 rounded-lg border-2 transition-all duration-200 cursor-pointer">
+                <img src="{% if is_em05_modem %}/static/inapp/4G.svg{% else %}/static/inapp/5G.svg{% endif %}" class="w-5 h-5 mb-1" />
+                <span class="text-xs font-medium">{{locales["network_mode_cell_only_short"]}}</span>
+              </button>
+              
+              <!-- All Off Button -->
+              <button 
+                type="button"
+                @click="network_mode = 'all_off'"
+                :class="network_mode === 'all_off' ? 'bg-gray-800 border-gray-600 text-white' : 'bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100'"
+                class="flex flex-col items-center justify-center w-20 h-16 rounded-lg border-2 transition-all duration-200 cursor-pointer">
+                <img src="/static/airplane.svg" class="w-5 h-5 mb-1" />
+                <span class="text-xs font-medium">{{locales["network_mode_all_off_short"]}}</span>
+              </button>
+            </div>
+          </div>
+          
+          <!-- Help text -->
+          <div class="text-left text-sm text-gray-400">
+            <span x-show="network_mode === 'auto'">{{locales["network_mode_auto_help"]}}</span>
+            <span x-show="network_mode === 'eth_only'">{{locales["network_mode_eth_only_help"]}}</span>
+            <span x-show="network_mode === 'cell_only'">{{locales["network_mode_cell_only_help"]}}</span>
+            <span x-show="network_mode === 'all_off'">{{locales["network_mode_all_off_short_help"]}}</span>
+          </div>
+        </div>
+      </div>
+      <!--end of network_mode-->
+
+      <!-- start of nic,wifi control -->
+      <div>
+        <!-- DON'T DELETE: WAN NIC Control -->
+        <!-- <div class="mb-6 flex space-x-2 items-center sm:space-x-4">
+          <div class="flex flex-col flex-wrap">
+            <div class="flex items-center w-40 text-gray-700 mb-2"><img :src="wan_enabled ? '/static/eth_active.svg' : '/static/eth_inactive.svg'" class="mr-2 h-6 w-6"/>{{locales["wan_interface"]}}</div>
+            <label class="relative flex cursor-pointer items-center">
+              <input class="peer sr-only" type="checkbox" x-model="wan_enabled" />
+              <div
+                class="h-6 w-11 rounded-full border-2 border-gray-200 bg-gray-200 after:absolute after:top-0.5 after:left-0.5 after:h-5 after:w-5 after:rounded-full after:border after:border-gray-300 after:bg-white after:shadow-sm after:transition-all after:duration-300 peer-checked:border-blue-600 peer-checked:bg-blue-600 peer-checked:after:translate-x-full peer-checked:after:border-white"
+              ></div>
+              <span class="ml-2 select-none text-base text-gray-400" x-text="wan_enabled ? '{{locales['common_enable']}}' : '{{locales['common_disable']}}'"></span>
+            </label>
+          </div>
+          <div class="ml-4 flex-1 text-left text-sm text-gray-400">{{locales["wan_toggle_help_text"]}}</div>
+        </div> -->
+
+        <div class="mb-6">
+          <div class="flex items-start space-x-2 sm:space-x-4">
+            <div class="flex flex-col flex-wrap">
+              <div class="flex items-center w-40 text-gray-700 mb-2"><img src="{% if is_em05_modem %}/static/inapp/4G.svg{% else %}/static/inapp/5G.svg{% endif %}" class="mr-2 h-6 w-6"/>{{locales["wwan_power"]}}</div>
+              <label class="relative flex cursor-pointer items-center" :class="wwan_powered === 'unknown' ? 'opacity-60' : ''">
+                <input class="peer sr-only" type="checkbox" :checked="wwan_powered === true" @change="toggle_wwan_power($event.target.checked)" :disabled="wwan_powered === 'unknown' || wwan_power_saving" />
+                <div
+                  :class="wwan_powered === 'unknown' ? 'border-yellow-300 bg-yellow-100' : (wwan_powered ? 'border-blue-600 bg-blue-600' : 'border-gray-200 bg-gray-200')"
+                  class="h-6 w-11 rounded-full border-2 after:absolute after:top-0.5 after:left-0.5 after:h-5 after:w-5 after:rounded-full after:border after:border-gray-300 after:bg-white after:shadow-sm after:transition-all after:duration-300 peer-checked:after:translate-x-full peer-checked:after:border-white"
+                ></div>
+                <span class="ml-2 select-none text-base" :class="wwan_powered === 'unknown' ? 'text-yellow-600' : 'text-gray-400'" x-text="getInterfaceStateText(wwan_powered)"></span>
+                <svg x-show="wwan_power_saving" class="animate-spin ml-2 h-4 w-4 text-gray-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                  <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                  <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+              </label>
+            </div>
+            <div class="flex-1 text-left text-sm text-gray-400 pt-1">{{locales["wwan_power_help_text"]}}</div>
+          </div>
+        </div>
+
+        <div class="mb-6">
+          <div class="flex items-start space-x-2 sm:space-x-4">
+            <div class="flex flex-col flex-wrap">
+              <div class="flex items-center w-40 text-gray-700 mb-2"><img :src="getInterfaceIcon(lan_enabled, '/static/eth_active.svg', '/static/eth_inactive.svg')" class="mr-2 h-6 w-6"/>LAN NIC</div>
+              <label class="relative flex cursor-pointer items-center" :class="isInterfaceUnknown(lan_enabled) ? 'opacity-60' : ''">
+                <input class="peer sr-only" type="checkbox" :checked="isInterfaceChecked(lan_enabled)" @change="lan_enabled = $event.target.checked" :disabled="isInterfaceUnknown(lan_enabled)" />
+                <div
+                  :class="isInterfaceUnknown(lan_enabled) ? 'border-yellow-300 bg-yellow-100' : (lan_enabled ? 'border-blue-600 bg-blue-600' : 'border-gray-200 bg-gray-200')"
+                  class="h-6 w-11 rounded-full border-2 after:absolute after:top-0.5 after:left-0.5 after:h-5 after:w-5 after:rounded-full after:border after:border-gray-300 after:bg-white after:shadow-sm after:transition-all after:duration-300 peer-checked:after:translate-x-full peer-checked:after:border-white"
+                ></div>
+                <span class="ml-2 select-none text-base" :class="isInterfaceUnknown(lan_enabled) ? 'text-yellow-600' : 'text-gray-400'" x-text="getInterfaceStateText(lan_enabled)"></span>
+              </label>
+            </div>
+            <div class="flex-1 text-left text-sm text-gray-400 pt-1">{{locales["lan_interface_toggle_help_text"]}}</div>
+          </div>
+        </div>
+
+        <div class="mb-6">
+          <div class="flex items-start space-x-2 sm:space-x-4">
+            <div class="flex flex-col flex-wrap">
+              <div class="flex items-center w-40 text-gray-700 mb-2"><img :src="getInterfaceIcon(onboard_wifi_enabled, '/static/wifi_active.svg', '/static/wifi_inactive.svg')" class="mr-2 h-6 w-6"/>Onboard WiFi</div>
+              <label class="relative flex cursor-pointer items-center" :class="isInterfaceUnknown(onboard_wifi_enabled) ? 'opacity-60' : ''">
+                <input class="peer sr-only" type="checkbox" :checked="isInterfaceChecked(onboard_wifi_enabled)" @change="onboard_wifi_enabled = $event.target.checked" :disabled="isInterfaceUnknown(onboard_wifi_enabled)" />
+                <div
+                  :class="isInterfaceUnknown(onboard_wifi_enabled) ? 'border-yellow-300 bg-yellow-100' : (onboard_wifi_enabled ? 'border-blue-600 bg-blue-600' : 'border-gray-200 bg-gray-200')"
+                  class="h-6 w-11 rounded-full border-2 after:absolute after:top-0.5 after:left-0.5 after:h-5 after:w-5 after:rounded-full after:border after:border-gray-300 after:bg-white after:shadow-sm after:transition-all after:duration-300 peer-checked:after:translate-x-full peer-checked:after:border-white"
+                ></div>
+                <span class="ml-2 select-none text-base" :class="isInterfaceUnknown(onboard_wifi_enabled) ? 'text-yellow-600' : 'text-gray-400'" x-text="getInterfaceStateText(onboard_wifi_enabled)"></span>
+              </label>
+            </div>
+            <div class="flex-1 text-left text-sm text-gray-400 pt-1">{{locales["onboard_wifi_toggle_help_text"]}}</div>
+          </div>
+        </div>
+
+        <div class="mb-6">
+          <div class="flex items-start space-x-2 sm:space-x-4">
+            <div class="flex flex-col flex-wrap">
+              <div class="flex items-center w-40 text-gray-700 mb-2"><img :src="getInterfaceIcon(pcie_wifi_enabled, '/static/wifi_active.svg', '/static/wifi_inactive.svg')" class="mr-2 h-6 w-6"/>PCIE WiFi</div>
+              <label class="relative flex cursor-pointer items-center" :class="isInterfaceUnknown(pcie_wifi_enabled) ? 'opacity-60' : ''">
+                <input class="peer sr-only" type="checkbox" :checked="isInterfaceChecked(pcie_wifi_enabled)" @change="pcie_wifi_enabled = $event.target.checked" :disabled="isInterfaceUnknown(pcie_wifi_enabled)" />
+                <div
+                  :class="isInterfaceUnknown(pcie_wifi_enabled) ? 'border-yellow-300 bg-yellow-100' : (pcie_wifi_enabled ? 'border-blue-600 bg-blue-600' : 'border-gray-200 bg-gray-200')"
+                  class="h-6 w-11 rounded-full border-2 after:absolute after:top-0.5 after:left-0.5 after:h-5 after:w-5 after:rounded-full after:border after:border-gray-300 after:bg-white after:shadow-sm after:transition-all after:duration-300 peer-checked:after:translate-x-full peer-checked:after:border-white"
+                ></div>
+                <span class="ml-2 select-none text-base" :class="isInterfaceUnknown(pcie_wifi_enabled) ? 'text-yellow-600' : 'text-gray-400'" x-text="getInterfaceStateText(pcie_wifi_enabled)"></span>
+              </label>
+            </div>
+            <div class="flex-1 text-left text-sm text-gray-400 pt-1">{{locales["pcie_wifi_toggle_help_text"]}}</div>
+          </div>
+        </div>
+
+        <!-- DON'T DELETE: Cellular Module Control -->
+        <!-- <div class="mb-6 flex space-x-2 items-center sm:space-x-4">
+          <div class="flex flex-col flex-wrap">
+            <div class="flex items-center w-40 text-gray-700 mb-2"><img src="{% if is_em05_modem %}/static/inapp/4G.svg{% else %}/static/inapp/5G.svg{% endif %}" class="mr-2 h-6 w-6"/>{{locales["cellular_network"]}}</div>
+            <label class="relative flex cursor-pointer items-center">
+              <input class="peer sr-only" type="checkbox" x-model="sim_enabled" />
+              <div
+                class="h-6 w-11 rounded-full border-2 border-gray-200 bg-gray-200 after:absolute after:top-0.5 after:left-0.5 after:h-5 after:w-5 after:rounded-full after:border after:border-gray-300 after:bg-white after:shadow-sm after:transition-all after:duration-300 peer-checked:border-blue-600 peer-checked:bg-blue-600 peer-checked:after:translate-x-full peer-checked:after:border-white"
+              ></div>
+              <span class="ml-2 select-none text-base text-gray-400" x-text="sim_enabled ? '{{locales['common_enable']}}' : '{{locales['common_disable']}}'"></span>
+            </label>
+          </div>
+          <div class="ml-4 flex-1 text-left text-sm text-gray-400">{{locales["cellular_network_toggle_help_text"]}}</div>
+        </div> -->
+        
+        <hr class="mb-4" />
+        <div class="flex justify-center mt-4">
+          <button type="button" 
+                  class="focus:ring-blue-300 w-full max-w-xs rounded-lg px-4 py-3 text-center text-sm font-medium text-white focus:ring-4 flex items-center justify-center transition-all duration-200 shadow-sm hover:shadow-md"
+                  :class="saving_network ? 'bg-gray-400 cursor-not-allowed' : 'bg-pcatblue hover:bg-pcatblue-400'"
+                  :disabled="saving_network"
+                  @click="request_set_network_mode">
+            <svg x-show="saving_network" class="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            <span x-text="saving_network ? getSavingText() : '{{locales['network_save']}}'"></span>
+          </button>
+        </div>
+      </div>
+    </div>
+    
+
+      <div class="p-5 relative flex-1 flex flex-col justify-between" x-show="tab_page === 'apn_setup'">
+        <div>
+        <div class="mb-6 flex justify-center space-x-4">
+          <label @click="mark_apn_auto_mode(true)" :class="apn_auto_mode == true ? 'border-blue-600' : ''" class="flex items-center space-x-4 rounded-lg border p-2"><span>{{locales["apn_auto_config"]}}</span></label>
+          <label @click="mark_apn_auto_mode(false)" :class="apn_auto_mode == false ? 'border-blue-600' : ''" class="flex items-center space-x-4 rounded-lg border p-2"><span>{{locales["apn_manu_config"]}}</span></label>
+        </div>
+
+        <div :class="apn_auto_mode == true ? 'opacity-25' : ''" >
+        <label class="block mb-4">
+          <span class="text-gray-700">{{locales["apn_address"]}} *</span>
+          <input type="text" class="mt-1 block w-full" maxlength="128" x-model="apn_info.apn_addr"  />
+          <span class="text-red-500"></span>
+        </label>
+
+        <label class="block mb-4">
+          <span class="text-gray-700">{{locales["apn_user_name"]}}</span>
+          <input type="text" class="mt-1 block w-full" maxlength="64" x-model="apn_info.user"  />
+          <span class="text-red-500"></span>
+        </label>
+
+        <label class="block mb-4">
+          <span class="text-gray-700">{{locales["apn_password"]}}</span>
+          <input type="text" class="mt-1 block w-full" maxlength="64" x-model="apn_info.password"  />
+          <span class="text-red-500"></span>
+        </label>
+
+        <label class="block mb-4">
+          <span class="text-gray-700">{{locales["apn_auth_way"]}}</span>
+          
+          <select class="mt-1 block w-full" x-model="apn_info.auth">
+            <template x-for="option in apn_auth_options" :key="option">
+              <option :value="option" x-text="option"></option>
+            </template>
+          </select>
+          <span class="text-red-500"></span>
+        </label>
+        </div>
+        </div>
+
+        <div>
+        <div class="flex justify-center mt-4">
+          <button type="button" 
+                  class="focus:ring-blue-300 w-full max-w-xs rounded-lg px-4 py-3 text-center text-sm font-medium text-white focus:ring-4 flex items-center justify-center transition-all duration-200 shadow-sm hover:shadow-md"
+                  :class="saving_apn_info ? 'bg-gray-400 cursor-not-allowed' : 'bg-pcatblue hover:bg-pcatblue-400'"
+                  :disabled="saving_apn_info"
+                  @click="request_apn_setup">
+            <svg x-show="saving_apn_info" class="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            <span x-text="saving_apn_info ? getSavingText() : '{{locales['common_save']}}'"></span>
+          </button>
+        </div>
+        </div>
+      </div>
+
+    </div>
+    <!--/grow bg-white -->
+
+    <div class="grow rounded border bg-white shadow flex flex-col">
+      <div class="flex justify-between border-b p-3">
+        <h5 class="font-bold text-gray-600">{{locales["card_device_reset"]}}</h5>
+      </div>
+      <div class="p-5 flex-1 flex flex-col justify-between">
+        <div>
+        <!-- Power LED Control -->
+        <div class="mb-6 flex space-x-2 items-start sm:space-x-4">
+          <div class="flex flex-col flex-wrap">
+            <div class="flex items-center w-40 text-gray-700 mb-3"><img src="/static/inapp/LED.svg" class="mr-2 h-6 w-6" />{{locales["power_led_control"]}}</div>
+            
+            <!-- 3-State Icon Buttons with Current Status -->
+            <div class="flex items-center space-x-4">
+              <div class="flex space-x-3">
+                <!-- On Button -->
+                <button 
+                  type="button"
+                  @click="power_led_mode = 'on'; save_power_led_settings()"
+                  :class="power_led_current_status === null ? 'bg-gray-50 border-gray-200 text-gray-400' : (power_led_mode === 'on' ? 'bg-green-100 border-green-300 text-green-700' : 'bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100')"
+                  class="flex flex-col items-center justify-center w-16 h-16 rounded-lg border-2 transition-all duration-200 cursor-pointer">
+                  <svg class="w-6 h-6 mb-1" fill="currentColor" viewBox="0 0 24 24">
+                    <circle cx="12" cy="12" r="10"/>
+                  </svg>
+                  <span class="text-xs font-medium">{{locales["control_on"]}}</span>
+                </button>
+                
+                <!-- Off Button -->
+                <button 
+                  type="button"
+                  @click="power_led_mode = 'off'; save_power_led_settings()"
+                  :class="power_led_current_status === null ? 'bg-gray-50 border-gray-200 text-gray-400' : (power_led_mode === 'off' ? 'bg-red-100 border-red-300 text-red-700' : 'bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100')"
+                  class="flex flex-col items-center justify-center w-16 h-16 rounded-lg border-2 transition-all duration-200 cursor-pointer">
+                  <svg class="w-6 h-6 mb-1" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                    <circle cx="12" cy="12" r="10"/>
+                    <line x1="8" y1="8" x2="16" y2="16"/>
+                    <line x1="16" y1="8" x2="8" y2="16"/>
+                  </svg>
+                  <span class="text-xs font-medium">{{locales["control_off"]}}</span>
+                </button>
+                
+                <!-- Timed Button -->
+                <button 
+                  type="button"
+                  @click="power_led_mode = 'timed'; save_power_led_settings()"
+                  :class="power_led_current_status === null ? 'bg-gray-50 border-gray-200 text-gray-400' : (power_led_mode === 'timed' ? 'bg-blue-100 border-blue-300 text-blue-700' : 'bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100')"
+                  class="flex flex-col items-center justify-center w-16 h-16 rounded-lg border-2 transition-all duration-200 cursor-pointer">
+                  <svg class="w-6 h-6 mb-1" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                    <circle cx="12" cy="12" r="10"/>
+                    <polyline points="12,6 12,12 16,14"/>
+                  </svg>
+                  <span class="text-xs font-medium">{{locales["control_timed"]}}</span>
+                </button>
+              </div>
+              
+              <!-- Current Status Indicator - Now on the right -->
+              <div class="flex items-center">
+                <span class="text-sm font-medium text-gray-600 mr-2">{{locales["control_current"]}}:</span>
+                <div x-show="power_led_current_status === null" class="flex items-center">
+                  <svg class="animate-spin h-4 w-4 text-gray-500 mr-1" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                  <span class="text-xs text-gray-500">Loading...</span>
+                </div>
+                <span 
+                  x-show="power_led_current_status !== null"
+                  class="px-2 py-1 rounded-full text-xs font-medium"
+                  :class="power_led_current_status ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'"
+                  x-text="power_led_current_status ? '{{locales["control_on"]}}' : '{{locales["control_off"]}}'">
+                </span>
+              </div>
+            </div>
+          </div>
+          <!--<div class="ml-4 flex-1 text-left text-sm text-gray-400">{{locales["power_led_help_text"]}}</div>-->
+        </div>
+        
+        <!-- Power LED Time Inputs (shown only when Timed is selected) -->
+        <div class="flex flex-col justify-between px-2" x-show="power_led_mode === 'timed'">
+          <div class="mb-4 flex items-center space-x-4">
+            <input
+              type="time"
+              x-model="power_led_start_time"
+              @input="debouncedSavePowerLedSettings()"
+              class="w-32 text-center border rounded px-2 py-1 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+            />
+            <div class="flex-1 text-sm text-gray-500">{{locales["power_led_on_start_time"]}}</div>
+          </div>
+          <div class="mb-4 flex items-center space-x-4">
+            <input
+              type="time"
+              x-model="power_led_end_time"
+              @input="debouncedSavePowerLedSettings()"
+              class="w-32 text-center border rounded px-2 py-1 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+            />
+            <div class="flex-1 text-sm text-gray-500">{{locales["power_led_on_end_time"]}}</div>
+          </div>
+        </div>
+        
+        <!-- Beeper Control -->
+        <div class="mb-6 flex space-x-2 items-start sm:space-x-4">
+          <div class="flex flex-col flex-wrap">
+            <div class="flex items-center w-40 text-gray-700 mb-3"><img src="/static/inapp/Beeper.svg" class="mr-2 h-6 w-6" />{{locales["beeper_control"]}}</div>
+            
+            <!-- 3-State Icon Buttons with Current Status -->
+            <div class="flex items-center space-x-4">
+              <div class="flex space-x-3">
+                <!-- On Button -->
+                <button 
+                  type="button"
+                  @click="beeper_mode = 'on'; save_beeper_settings()"
+                  :class="beeper_current_status === null ? 'bg-gray-50 border-gray-200 text-gray-400' : (beeper_mode === 'on' ? 'bg-green-100 border-green-300 text-green-700' : 'bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100')"
+                  class="flex flex-col items-center justify-center w-16 h-16 rounded-lg border-2 transition-all duration-200 cursor-pointer">
+                  <svg class="w-6 h-6 mb-1" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                    <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+                    <path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/>
+                  </svg>
+                  <span class="text-xs font-medium">{{locales["control_on"]}}</span>
+                </button>
+                
+                <!-- Off Button -->
+                <button 
+                  type="button"
+                  @click="beeper_mode = 'off'; save_beeper_settings()"
+                  :class="beeper_current_status === null ? 'bg-gray-50 border-gray-200 text-gray-400' : (beeper_mode === 'off' ? 'bg-red-100 border-red-300 text-red-700' : 'bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100')"
+                  class="flex flex-col items-center justify-center w-16 h-16 rounded-lg border-2 transition-all duration-200 cursor-pointer">
+                  <svg class="w-6 h-6 mb-1" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                    <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+                    <line x1="22" y1="9" x2="16" y2="15"/>
+                    <line x1="16" y1="9" x2="22" y2="15"/>
+                  </svg>
+                  <span class="text-xs font-medium">{{locales["control_off"]}}</span>
+                </button>
+                
+                <!-- Timed Button -->
+                <button 
+                  type="button"
+                  @click="beeper_mode = 'timed'; save_beeper_settings()"
+                  :class="beeper_current_status === null ? 'bg-gray-50 border-gray-200 text-gray-400' : (beeper_mode === 'timed' ? 'bg-blue-100 border-blue-300 text-blue-700' : 'bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100')"
+                  class="flex flex-col items-center justify-center w-16 h-16 rounded-lg border-2 transition-all duration-200 cursor-pointer">
+                  <svg class="w-6 h-6 mb-1" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                    <polygon points="9 5 5 8 2 8 2 16 5 16 9 19 9 5"/>
+                    <circle cx="17" cy="12" r="5"/>
+                    <polyline points="17,9 17,12 19,13"/>
+                  </svg>
+                  <span class="text-xs font-medium">{{locales["control_timed"]}}</span>
+                </button>
+              </div>
+              
+              <!-- Current Status Indicator - Now on the right -->
+              <div class="flex items-center">
+                <span class="text-sm font-medium text-gray-600 mr-2">{{locales["control_current"]}}:</span>
+                <div x-show="beeper_current_status === null" class="flex items-center">
+                  <svg class="animate-spin h-4 w-4 text-gray-500 mr-1" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                  <span class="text-xs text-gray-500">Loading...</span>
+                </div>
+                <span 
+                  x-show="beeper_current_status !== null"
+                  class="px-2 py-1 rounded-full text-xs font-medium"
+                  :class="beeper_current_status ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'"
+                  x-text="beeper_current_status ? '{{locales["control_on"]}}' : '{{locales["control_off"]}}'">
+                </span>
+              </div>
+            </div>
+          </div>
+          <!--<div class="ml-4 flex-1 text-left text-sm text-gray-400">{{locales["beeper_help_text"]}}</div>-->
+        </div>
+        
+        <!-- Beeper Time Inputs (shown only when Timed is selected) -->
+        <div class="flex flex-col justify-between px-2" x-show="beeper_mode === 'timed'">
+          <div class="mb-4 flex items-center space-x-4">
+            <input
+              type="time"
+              x-model="beeper_start_time"
+              @input="debouncedSaveBeeperSettings()"
+              class="w-32 text-center border rounded px-2 py-1 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+            />
+            <div class="flex-1 text-sm text-gray-500">{{locales["beeper_on_start_time"]}}</div>
+          </div>
+          <div class="mb-4 flex items-center space-x-4">
+            <input
+              type="time"
+              x-model="beeper_end_time"
+              @input="debouncedSaveBeeperSettings()"
+              class="w-32 text-center border rounded px-2 py-1 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+            />
+            <div class="flex-1 text-sm text-gray-500">{{locales["beeper_on_end_time"]}}</div>
+          </div>
+        </div>
+        <div class="mb-6 flex space-x-2 items-center sm:space-x-4" x-show="cpu_data_loaded">
+          <div class="flex flex-col flex-wrap">
+            <div class="flex items-center w-40 text-gray-700 mb-2"><img src="/static/inapp/Eco.svg" class="mr-2 h-6 w-6" />{{locales["cpu_powersave"]}}</div>
+            <label class="relative flex cursor-pointer items-center">
+              <input class="peer sr-only" type="checkbox" x-model="cpu_scheduling_enabled" @change="save_cpu_scheduling()" />
+              <div class="h-6 w-11 rounded-full border-2 border-gray-200 bg-gray-200 after:absolute after:top-0.5 after:left-0.5 after:h-5 after:w-5 after:rounded-full after:border after:border-gray-300 after:bg-white after:shadow-sm after:transition-all after:duration-300 peer-checked:border-blue-600 peer-checked:bg-blue-600 peer-checked:after:translate-x-full peer-checked:after:border-white"></div>
+              <span class="ml-2 select-none text-base text-gray-400" x-text="cpu_scheduling_enabled ? '{{locales['common_enable']}}' : '{{locales['common_disable']}}'"></span>
+            </label>
+          </div>
+          <div class="ml-4 flex-1 text-left text-sm text-gray-400">{{locales["cpu_powersave_help_text"]}}</div>
+        </div>
+        {% if locales["oem_name"] and locales["oem_name"]|length > 2 and "photonicat 2" in locales["oem_name"]|lower %}
+        <!-- Fan Control -->
+        <div class="mb-6 flex space-x-2 items-start sm:space-x-4" x-show="fan_data_loaded">
+          <div class="flex flex-col w-full">
+            <!-- Header: Title + RPM + Mode Buttons -->
+            <div class="flex items-center space-x-4 mb-3">
+              <div class="flex items-center text-gray-700">
+                <img src="/static/inapp/Fan.svg" class="mr-2 h-6 w-6" />
+                <span class="font-medium">{{locales["fan_settings"]}}</span>
+              </div>
+
+              <!-- RPM Badge -->
+              <span class="text-xs text-blue-600 bg-blue-50 px-2 py-1 rounded border border-blue-200 whitespace-nowrap">
+                <span x-text="actual_fan_speed"></span> RPM
+              </span>
+
+              <!-- 3-State Fan Mode Buttons -->
+              <div class="flex items-center space-x-3">
+                <!-- Manual Button -->
+                <button
+                  type="button"
+                  @click="fan_mode = 'manual'; save_fan_mode(); save_fan_speed()"
+                  :class="fan_mode === 'manual' ? 'bg-blue-100 border-blue-300 text-blue-700' : 'bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100'"
+                  class="flex flex-col items-center justify-center w-20 h-16 rounded-lg border-2 transition-all duration-200 cursor-pointer">
+                  <svg class="w-6 h-6 mb-1" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+                    <path d="M18 11V6a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v0"/>
+                    <path d="M14 10V4a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v2"/>
+                    <path d="M10 10.5V6a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v8"/>
+                    <path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15"/>
+                  </svg>
+                  <span class="text-xs font-medium">{{locales["fan_mode_manual"]}}</span>
+                </button>
+
+                <!-- Smart Quiet Button -->
+                <button
+                  type="button"
+                  @click="fan_mode = 'smart_quiet'; save_fan_mode()"
+                  :class="fan_mode === 'smart_quiet' ? 'bg-green-100 border-green-300 text-green-700' : 'bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100'"
+                  class="flex flex-col items-center justify-center w-20 h-16 rounded-lg border-2 transition-all duration-200 cursor-pointer">
+                  <svg class="w-6 h-6 mb-1" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+                    <path d="M6 8.5a6.5 6.5 0 1 1 13 0c0 6-6 6-6 10a3.5 3.5 0 1 1-7 0"/>
+                    <path d="M15 8.5a2 2 0 0 0-4 0"/>
+                  </svg>
+                  <span class="text-xs font-medium">{{locales["fan_mode_smart_quiet"]}}</span>
+                </button>
+
+                <!-- Smart Cool Button -->
+                <button
+                  type="button"
+                  @click="fan_mode = 'smart_cool'; save_fan_mode()"
+                  :class="fan_mode === 'smart_cool' ? 'bg-orange-100 border-orange-300 text-orange-700' : 'bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100'"
+                  class="flex flex-col items-center justify-center w-20 h-16 rounded-lg border-2 transition-all duration-200 cursor-pointer">
+                  <svg class="w-6 h-6 mb-1" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                    <path d="M14 14.76V3.5a2.5 2.5 0 0 0-5 0v11.26a4.5 4.5 0 1 0 5 0z"/>
+                  </svg>
+                  <span class="text-xs font-medium">{{locales["fan_mode_smart_cool"]}}</span>
+                </button>
+              </div>
+            </div>
+
+            <!-- Fan Speed Slider and Help Text -->
+            <div class="flex items-center space-x-4">
+              <!-- Slider Section -->
+              <div class="flex items-center space-x-2">
+                <span class="text-sm text-gray-600 whitespace-nowrap" x-text="fan_mode === 'manual' ? '{{locales["fan_speed_label"]}}' : '{{locales["fan_max_speed_label"]}}'"></span>
+                <input
+                  type="range"
+                  min="0"
+                  max="9"
+                  x-model="fan_speed"
+                  @input="save_fan_speed()"
+                  class="fan-slider w-48"
+                />
+                <span class="text-sm text-gray-600 whitespace-nowrap" x-text="fan_speed + '/9'"></span>
+              </div>
+
+              <!-- Help text -->
+              <div class="text-sm text-gray-400 flex-1">
+                <span x-show="fan_mode === 'manual'">{{locales["fan_mode_manual_help"]}}</span>
+                <span x-show="fan_mode === 'smart_quiet'">{{locales["fan_mode_smart_quiet_help"]}}</span>
+                <span x-show="fan_mode === 'smart_cool'">{{locales["fan_mode_smart_cool_help"]}}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+
+        {% endif %}
+
+        <!-- Battery Charge Limit -->
+        <div class="mb-6 flex space-x-2 items-start sm:space-x-4" x-show="charge_limit_loaded">
+          <div class="flex flex-col w-full">
+            <div class="flex items-center text-gray-700 mb-3">
+              <svg xmlns="http://www.w3.org/2000/svg" class="mr-2 h-6 w-6 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                <rect x="2" y="7" width="16" height="10" rx="2" ry="2"/>
+                <path d="M20 10v4"/>
+                <rect x="4" y="9" :width="Math.max(1, charge_limit / 100 * 12)" height="6" rx="1" fill="currentColor" opacity="0.3"/>
+              </svg>
+              <span class="font-medium">{{locales["charge_limit"]}}</span>
+              <span class="ml-2 text-sm font-bold px-2 py-0.5 rounded-full" :class="charge_limit < 100 ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'" x-text="charge_limit + '%'"></span>
+            </div>
+            <div class="flex items-center space-x-3">
+              <span class="text-xs font-medium text-gray-500 w-8">80%</span>
+              <input
+                type="range"
+                min="80"
+                max="100"
+                step="5"
+                x-model="charge_limit"
+                @change="save_charge_limit()"
+                class="charge-limit-slider flex-1 h-2 rounded-lg appearance-none cursor-pointer"
+                :style="'background: linear-gradient(to right, #22c55e 0%, #22c55e ' + ((charge_limit - 80) * 5) + '%, #e5e7eb ' + ((charge_limit - 80) * 5) + '%, #e5e7eb 100%)'"
+              />
+              <span class="text-xs font-medium text-gray-500 w-10">100%</span>
+            </div>
+            <div class="flex justify-between mt-1 px-8">
+              <span class="text-xs text-green-600" x-show="charge_limit < 100">{{locales["charge_limit_help"]}}</span>
+              <span class="text-xs text-gray-400" x-show="charge_limit >= 100">{{locales["charge_limit_help"]}}</span>
+            </div>
+          </div>
+        </div>
+
+        </div>
+
+        <div>
+        <div class="w-full border-b border-gray-200"></div>
+        <div class="container w-full mx-auto mt-4">
+          <div class="flex flex-col space-y-3 sm:flex-row sm:space-y-0 sm:space-x-4 justify-center items-stretch">
+            <!-- Device Reset Button -->
+            <button type="button" 
+                    class="flex items-center justify-center w-full rounded-lg bg-pink-50 text-red-700 border border-pink-200 px-4 py-3 text-sm font-medium transition-all duration-200 hover:bg-pink-100 hover:border-pink-300 focus:ring-4 focus:ring-pink-100 active:bg-pink-200 shadow-sm hover:shadow-md sm:w-36" 
+                    @click="modal_open = true">
+              <img src="/static/factory_reset.svg" class="h-5 w-5 mr-2 flex-shrink-0" />
+              <span class="whitespace-nowrap">{{locales["device_reset"]}}</span>
+            </button>
+            
+            <!-- Device Restart Button -->
+            <button type="button" 
+                    class="flex items-center justify-center w-full rounded-lg bg-green-50 text-green-700 border border-green-200 px-4 py-3 text-sm font-medium transition-all duration-200 hover:bg-green-100 hover:border-green-300 focus:ring-4 focus:ring-green-100 active:bg-green-200 shadow-sm hover:shadow-md sm:w-36" 
+                    @click="restart_modal_open = true">
+              <img src="/static/restart.svg" class="h-5 w-5 mr-2 flex-shrink-0" />
+              <span class="whitespace-nowrap">{{locales["device_restart"]}}</span>
+            </button>
+            
+            <!-- Device Shutdown Button -->
+            <button type="button" 
+                    class="flex items-center justify-center w-full rounded-lg bg-gray-50 text-gray-700 border border-gray-200 px-4 py-3 text-sm font-medium transition-all duration-200 hover:bg-gray-100 hover:border-gray-300 focus:ring-4 focus:ring-gray-100 active:bg-gray-200 shadow-sm hover:shadow-md sm:w-36" 
+                    @click="shutdown_modal_open = true">
+              <img src="/static/shutdown.svg" class="h-5 w-5 mr-2 flex-shrink-0" />
+              <span class="whitespace-nowrap">{{locales["device_shutdown"]}}</span>
+            </button>
+          </div>
+        </div>
+        </div>
+
+        <!-- Reset Confirmation Modal -->
+        <div class="modal" x-cloak x-show="modal_open">
+          <section class="modal-main w-full sm:w-1/2" @click.outside="modal_open = false">
+            <div class="flex items-start justify-between rounded-t border-b p-3">
+              <h3 class="text-base font-semibold text-gray-900 lg:text-xl">{{locales["operation_tip"]}}</h3>
+              <button type="button" class="bg-transparent ml-auto inline-flex items-center rounded-lg p-1.5 text-sm text-gray-400 hover:bg-gray-200 hover:text-gray-900" @click="modal_open = false">
+                <svg class="h-5 w-5" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
+                  <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd"></path>
+                </svg>
+              </button>
+            </div>
+            <div class="space-y-6 p-6">
+              <p>{{locales["are_you_sure_reset"]}}</p>
+            </div>
+            <div class="flex items-center justify-end space-x-4 rounded-b border-t border-gray-200 p-4">
+              <button type="button" class="rounded-lg border border-gray-200 bg-white px-5 py-2.5 text-sm font-medium text-gray-500 hover:bg-gray-100 hover:text-gray-900 focus:z-10 focus:ring-4 focus:ring-gray-300" @click="modal_open = false">
+                {{locales["common_no"]}}
+              </button>
+              <button type="button" 
+                      class="hover:bg-blue-800 focus:ring-blue-300 rounded-lg px-5 py-2.5 text-center text-sm font-medium text-white focus:ring-4 flex items-center justify-center"
+                      :class="resetting ? 'bg-gray-400 cursor-not-allowed' : 'bg-blue-700'"
+                      :disabled="resetting"
+                      @click="request_reset">
+                <svg x-show="resetting" class="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                  <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                  <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                <span x-text="resetting ? 'Processing...' : '{{locales.common_yes}}'">
+                </span>
+              </button>
+            </div>
+          </section>
+        </div>
+
+        <!-- Reset Processing Modal -->
+        <div class="modal" x-cloak x-show="resetting">
+          <section class="modal-main w-full sm:w-1/2">
+            <div class="flex items-start justify-between rounded-t border-b p-3">
+              <h3 class="text-base font-semibold text-gray-900">{{locales["operation_tip"]}}</h3>
+              <button type="button" class="bg-transparent ml-auto inline-flex cursor-not-allowed items-center rounded-lg p-1.5 text-sm text-gray-400 hover:bg-gray-200 hover:text-gray-900">
+                <svg class="h-5 w-5" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
+                  <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd"></path>
+                </svg>
+              </button>
+            </div>
+            <div class="space-y-6 p-6">
+              <p>{{locales["resetting_device"]}}</p>
+            </div>
+            <div class="flex items-center justify-end space-x-4 rounded-b border-t border-gray-200 p-4">
+              <button data-modal-toggle="default-modal" type="button" class="cursor-not-allowed rounded-lg border border-gray-200 bg-white px-5 py-2.5 text-sm font-medium text-gray-500 hover:bg-gray-100 hover:text-gray-900 focus:z-10 focus:ring-4 focus:ring-gray-300">
+                OK
+              </button>
+            </div>
+          </section>
+        </div>
+
+        <!-- Restart Confirmation Modal -->
+        <div class="modal" x-cloak x-show="restart_modal_open">
+          <section class="modal-main w-full sm:w-1/2" @click.outside="restart_modal_open = true">
+            <div class="flex items-start justify-between rounded-t border-b p-3">
+              <h3 class="text-base font-semibold text-gray-900 lg:text-xl">{{locales["operation_tip"]}}</h3>
+              <button type="button" class="bg-transparent ml-auto inline-flex items-center rounded-lg p-1.5 text-sm text-gray-400 hover:bg-gray-200 hover:text-gray-900" @click="restart_modal_open = false">
+                <svg class="h-5 w-5" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
+                  <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd"></path>
+                </svg>
+              </button>
+            </div>
+            <div class="space-y-6 p-6">
+              <p>{{locales["restart_help_text"]}}</p>
+            </div>
+            <div class="flex items-center justify-end space-x-4 rounded-b border-t border-gray-200 p-4">
+              <button type="button" class="rounded-lg border border-gray-200 bg-white px-5 py-2.5 text-sm font-medium text-gray-500 hover:bg-gray-100 hover:text-gray-900 focus:z-10 focus:ring-4 focus:ring-gray-300" @click="restart_modal_open = false">
+                {{locales["common_no"]}}
+              </button>
+              <button type="button" 
+                      class="hover:bg-blue-800 focus:ring-blue-300 rounded-lg px-5 py-2.5 text-center text-sm font-medium text-white focus:ring-4 flex items-center justify-center"
+                      :class="restarting ? 'bg-gray-400 cursor-not-allowed' : 'bg-blue-700'"
+                      :disabled="restarting"
+                      @click="request_restart">
+                <svg x-show="restarting" class="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                  <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                  <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                <span x-text="restarting ? 'Processing...' : '{{locales.common_yes}}'">
+                </span>
+              </button>
+            </div>
+          </section>
+        </div>
+
+        <!-- Shutdown Processing Modal -->
+        <div class="modal" x-cloak x-show="shutdown_modal_open">
+          <section class="modal-main w-full sm:w-1/2">
+            <div class="flex items-start justify-between rounded-t border-b p-3">
+              <h3 class="text-base font-semibold text-gray-900">{{locales["operation_tip"]}}</h3>
+              <button type="button" class="bg-transparent ml-auto inline-flex cursor-not-allowed items-center rounded-lg p-1.5 text-sm text-gray-400 hover:bg-gray-200 hover:text-gray-900" @click="shutdown_modal_open = false">
+                <svg class="h-5 w-5" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
+                  <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd"></path>
+                </svg>
+              </button>
+            </div>
+            <div class="space-y-6 p-6">
+              <p>{{locales["shutdown_help_text"]}}</p>
+            </div>
+            <div class="flex items-center justify-end space-x-4 rounded-b border-t border-gray-200 p-4">
+                <button type="button" class="rounded-lg border border-gray-200 bg-white px-5 py-2.5 text-sm font-medium text-gray-500 hover:bg-gray-100 hover:text-gray-900 focus:z-10 focus:ring-4 focus:ring-gray-300" @click="shutdown_modal_open = false">
+                  {{locales["common_no"]}}
+                </button>
+                <button type="button" 
+                        class="hover:bg-blue-800 focus:ring-blue-300 rounded-lg px-5 py-2.5 text-center text-sm font-medium text-white focus:ring-4 flex items-center justify-center"
+                        :class="shutting_down ? 'bg-gray-400 cursor-not-allowed' : 'bg-blue-700'"
+                        :disabled="shutting_down"
+                        @click="request_shutdown">
+                  <svg x-show="shutting_down" class="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                  <span x-text="shutting_down ? 'Processing...' : '{{locales.common_yes}}'">
+                  </span>
+                </button>
+            </div>
+          </section>
+        </div>
+      </div>
+      <!--/p-5-->
+    </div>
+    <!--/grow bg-white -->
+  </div>
+  <!--/w-full grid -->
+</div>
+<!--/container.w-full-->
+{% endblock %}
+
+{% block bottom %}
+<script>
+  document.addEventListener("alpine:init", () => {
+    Alpine.store("app").set_page("settings");
+
+    Alpine.data("adv_settings", () => ({
+      init() {
+        this.fetch_network_mode();
+        this.fetch_wwan_power();
+        this.fetch_apn_settings();
+        this.fetch_cpu_scheduling();
+        this.fetch_fan_mode();
+        this.fetch_fan_speed();
+        this.fetch_actual_fan_speed();
+        this.fetch_power_led_settings();
+        this.fetch_beeper_settings();
+        this.fetch_power_led_status();
+        this.fetch_beeper_status();
+        this.fetch_charge_limit();
+        setInterval(() => {
+          this.fetch_cpu_scheduling();
+          this.fetch_actual_fan_speed();
+          this.fetch_power_led_status();
+          this.fetch_beeper_status();
+        }, 5000);
+      },
+      tab_page: (window.location.hash && ["network_mode", "apn_setup"].includes(window.location.hash.substring(1))) ? window.location.hash.substring(1) : "network_mode",
+      modal_open: false,
+      resetting: false,
+      restart_modal_open: false,
+      shutdown_modal_open: false,
+      restarting: false,
+      shutting_down: false,
+      saving_network: false,
+      cpu_scheduling_enabled: false,
+      cpu_data_loaded: false,
+      fan_mode: "smart_quiet",
+      fan_speed: 5,
+      actual_fan_speed: 0,
+      fan_data_loaded: false,
+      power_led_mode: "on",
+      power_led_current_status: null,
+      power_led_start_time: "08:00",
+      power_led_end_time: "22:00",
+      saving_power_led: false,
+      beeper_mode: "on",
+      beeper_current_status: null,
+      beeper_start_time: "08:00",
+      beeper_end_time: "22:00",
+      saving_beeper: false,
+      charge_limit: 100,
+      charge_limit_loaded: false,
+
+      // Timeout IDs for debounced saves
+      powerLedTimeoutId: null,
+      beeperTimeoutId: null,
+
+      // Notification state
+      notification: {
+        show: false,
+        message: '',
+        message_en: '',
+        message_cn: '',
+        type: 'info' // 'success', 'error', 'info'
+      },
+
+      network_mode: "auto", // "auto", "eth_only", "cell_only"
+      wan_enabled: "unknown",
+      sim_enabled: "unknown",
+      lan_enabled: "unknown",
+      onboard_wifi_enabled: "unknown",
+      pcie_wifi_enabled: "unknown",
+      wwan_powered: "unknown",
+      wwan_power_saving: false,
+
+      // Helper function to get display text for interface states
+      getInterfaceStateText(state) {
+        if (state === "unknown") return "{{locales['common_unknown']}}";
+        return state ? '{{locales["common_enable"]}}' : '{{locales["common_disable"]}}';
+      },
+      
+      // Helper function to get interface icon
+      getInterfaceIcon(state, activeIcon, inactiveIcon) {
+        if (state === "unknown") return inactiveIcon; // Use inactive icon for unknown state
+        return state ? activeIcon : inactiveIcon;
+      },
+      
+      // Helper function to determine if checkbox should be checked
+      isInterfaceChecked(state) {
+        return state === true;
+      },
+      
+      // Helper function to determine if interface is in unknown state
+      isInterfaceUnknown(state) {
+        return state === "unknown";
+      },
+
+      apn_auto_mode: true,
+      saving_apn_info: false,
+      apn_info: {
+        apn_addr: "",
+        user: "",
+        password: "",
+        auth: ""
+      },
+
+      apn_auth_options: ["", "pap", "chap", "MsChapV2"],
+
+      switch_tab(tab) {
+        this.tab_page = tab;
+        window.location.hash = tab;
+        if (tab === "network_mode") {
+          this.fetch_network_mode();
+        } else if (tab === "apn_setup") {
+          this.fetch_apn_settings();
+        }
+      },
+
+      request_reset() {
+        this.modal_open = false;
+        const requestOptions = {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ key: "" }),
+        };
+        this.resetting = true;
+        fetch("/system/reset", requestOptions)
+          .then((response) => response.json())
+          .then((data) => {
+            if (data.status === "ok") {
+              // Keep resetting state - modal will show
+            } else {
+              this.resetting = false;
+              this.showNotification(
+                data.message || 'Failed to reset device',
+                '设备重置失败',
+                'error'
+              );
+            }
+          })
+          .catch((error) => {
+            this.resetting = false;
+            this.showNotification(
+              'Error resetting device',
+              '设备重置出错',
+              'error'
+            );
+            console.error('Error resetting device:', error);
+          });
+      },
+
+      request_restart() {
+        this.restart_modal_open = false;
+        this.restarting = true;
+        fetch("/system/reboot", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({})
+        })
+          .then((response) => response.json())
+          .then((data) => {
+            if (data.status === "ok") {
+              // Keep restarting state - modal will show
+            } else {
+              this.restarting = false;
+              this.showNotification(
+                data.message || 'Failed to restart device',
+                '设备重启失败',
+                'error'
+              );
+            }
+          })
+          .catch((error) => {
+            this.restarting = false;
+            this.showNotification(
+              'Error restarting device',
+              '设备重启出错',
+              'error'
+            );
+            console.error('Error restarting device:', error);
+          });
+      },
+
+      request_shutdown() {
+        this.shutdown_modal_open = false;
+        this.shutting_down = true;
+        fetch("/system/shutdown", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({})
+        })
+          .then((response) => response.json())
+          .then((data) => {
+            if (data.status === "ok") {
+              // Keep shutting_down state - modal will show
+            } else {
+              this.shutting_down = false;
+              this.showNotification(
+                data.message || 'Failed to shutdown device',
+                '设备关机失败',
+                'error'
+              );
+            }
+          })
+          .catch((error) => {
+            this.shutting_down = false;
+            this.showNotification(
+              'Error shutting down device',
+              '设备关机出错',
+              'error'
+            );
+            console.error('Error shutting down device:', error);
+          });
+      },
+
+      request_set_network_mode() {
+        this.modal_open = false;
+        this.saving_network = true;
+        
+        // Set interface states based on network mode
+        let wan_state = this.wan_enabled;
+        let sim_state = this.sim_enabled;
+        
+        if (this.network_mode === 'eth_only') {
+          wan_state = true;
+          sim_state = false;
+        } else if (this.network_mode === 'cell_only') {
+          wan_state = false;
+          sim_state = true;
+        } else if (this.network_mode === 'all_off') {
+          wan_state = false;
+          sim_state = false;
+        } else {
+          // auto mode - keep current states
+          wan_state = this.wan_enabled;
+          sim_state = this.sim_enabled;
+        }
+        
+        post_data = {
+          network_mode: this.network_mode,
+          wan: wan_state,
+          sim: sim_state,
+          lan: this.lan_enabled === "unknown" ? false : this.lan_enabled,
+          onboard_wifi: this.onboard_wifi_enabled === "unknown" ? false : this.onboard_wifi_enabled,
+          pcie_wifi: this.pcie_wifi_enabled === "unknown" ? false : this.pcie_wifi_enabled,
+        };
+        const requestOptions = {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(post_data),
+        };
+        fetch("/api/v1/network_interfaces.json", requestOptions)
+          .then((response) => response.json())
+          .then((data) => {
+            if (data.status === "ok") {
+              // Keep loading for a few seconds as network changes take time
+              setTimeout(() => {
+                this.saving_network = false;
+                this.showNotification(
+                  "Network settings saved successfully",
+                  "网络设置保存成功",
+                  'success'
+                );
+              }, 6000);
+            } else {
+              this.saving_network = false;
+              this.showNotification(
+                '{{locales["network_settings_warning"]}}',
+                'warning'
+              );
+            }
+          })
+          .catch((error) => {
+            this.saving_network = false;
+            this.showNotification(
+              '{{locales["network_settings_warning"]}}',
+              'warning'
+            );
+            console.warn("Network settings saved with warnings:", error);
+          });
+      },
+
+      fetch_network_mode() {
+        fetch("/api/v1/network_interfaces.json")
+          .then((response) => response.json())
+          .then((data) => {
+            // Handle unknown states - if API doesn't return values, keep as unknown
+            this.wan_enabled = data.wan_enabled !== undefined ? data.wan_enabled : "unknown";
+            this.sim_enabled = data.sim_enabled !== undefined ? data.sim_enabled : "unknown";
+            this.lan_enabled = data.lan_enabled !== undefined ? data.lan_enabled : "unknown";
+            this.onboard_wifi_enabled = data.onboard_wifi_enabled !== undefined ? data.onboard_wifi_enabled : "unknown";
+            this.pcie_wifi_enabled = data.pcie_wifi_enabled !== undefined ? data.pcie_wifi_enabled : "unknown";
+            
+            // Set network_mode based on the response
+            if (data.network_mode) {
+              this.network_mode = data.network_mode;
+            } else {
+              // Default to auto if network_mode is not specified
+              this.network_mode = "auto";
+            }
+          });
+      },
+
+      fetch_wwan_power() {
+        fetch("/api/v1/wwan_power.json")
+          .then((response) => response.json())
+          .then((data) => {
+            this.wwan_powered = data.wwan_powered !== undefined ? data.wwan_powered : "unknown";
+          })
+          .catch(() => {
+            this.wwan_powered = "unknown";
+          });
+      },
+
+      toggle_wwan_power(powered) {
+        this.wwan_power_saving = true;
+        fetch("/api/v1/wwan_power.json", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ powered: powered }),
+        })
+          .then((response) => response.json())
+          .then((data) => {
+            this.wwan_power_saving = false;
+            if (data.status === "ok") {
+              this.wwan_powered = data.wwan_powered;
+            }
+          })
+          .catch(() => {
+            this.wwan_power_saving = false;
+          });
+      },
+
+      mark_apn_auto_mode(is_auto) {
+        this.apn_auto_mode = is_auto;
+      },
+
+      fetch_apn_settings() {
+        fetch("/api/v1/apn_settings.json")
+          .then((response) => response.json())
+          .then((data) => {
+            this.apn_info.apn_addr = data.apn;
+            this.apn_info.user = data.user;
+            this.apn_info.password = data.password;
+            this.apn_info.auth = data.auth;
+            if (this.apn_info.apn_addr === "") {
+              this.apn_auto_mode = true;
+            } else {
+              this.apn_auto_mode = false;
+            }
+          });
+      },
+
+      request_apn_setup() {
+        if (this.apn_auto_mode) {
+          this.apn_info = { apn_addr: "", user: "", password: "", auth: "" };
+        } else {
+          if (this.apn_info.apn_addr === "") {
+            this.showNotification(
+              "{{locales['please_input_apn_addr'] if locales['please_input_apn_addr'] else 'Please input APN!'}}",
+              "请输入 APN 地址！",
+              'error'
+            );
+            return false;
+          }
+        }
+        this.saving_apn_info = true;
+        const requestOptions = {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(this.apn_info),
+        };
+        fetch("/api/v1/apn_settings.json", requestOptions)
+          .then((response) => response.json())
+          .then((data) => {
+            setTimeout(() => {
+              this.saving_apn_info = false;
+              if (data.status == "ok") {
+                this.showNotification(
+                  "{{locales['save_action_success_and_reboot'] if locales['save_action_success_and_reboot'] else 'APN settings saved successfully! Device will reboot.'}}",
+                  "APN 设置保存成功！设备将重启。",
+                  'success'
+                );
+              } else {
+                this.showNotification(
+                  "{{locales['save_action_failed'] if locales['save_action_failed'] else 'Failed to save APN settings'}}",
+                  "APN 设置保存失败",
+                  'error'
+                );
+              }
+            }, 1000);
+
+            if (data.status == "ok") {
+              setTimeout(() => {
+                this.reboot_dlg_open = true;
+              }, 3000);
+            }
+          })
+          .catch((error) => {
+            this.saving_apn_info = false;
+            this.showNotification(
+              'Error saving APN settings',
+              'APN 设置保存出错',
+              'error'
+            );
+            console.error("Error saving APN settings:", error);
+          });
+      },
+
+      fetch_cpu_scheduling() {
+        fetch("/api/v1/cpu_scheduling.json")
+          .then((response) => response.json())
+          .then((data) => {
+            this.cpu_scheduling_enabled = data.cpu_scheduling_enabled;
+            this.cpu_data_loaded = true;
+          })
+          .catch((error) => {
+            console.error("Error fetching CPU scheduling:", error);
+            this.cpu_data_loaded = true;
+          });
+      },
+      
+      save_cpu_scheduling() { //enable is powersave
+        fetch("/api/v1/cpu_scheduling.json", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ cpu_scheduling_enabled: this.cpu_scheduling_enabled }),
+        })
+        .then((response) => response.json())
+        .then((data) => {
+          if (data.status === "ok") {
+            const status_text = this.cpu_scheduling_enabled ? "{{locales['common_enable'] if locales['common_enable'] else 'Enabled'}}" : "{{locales['common_disable'] if locales['common_disable'] else 'Disabled'}}";
+            this.showNotification(
+              `CPU Power Save ${status_text}`,
+              `CPU 节能模式已${this.cpu_scheduling_enabled ? '开启' : '关闭'}`,
+              'success'
+            );
+          } else {
+            this.showNotification(
+              'Failed to save CPU settings',
+              'CPU 设置保存失败',
+              'error'
+            );
+          }
+        })
+        .catch((error) => {
+          console.error("Error saving CPU scheduling:", error);
+          this.showNotification(
+            'Error saving CPU settings',
+            'CPU 设置保存出错',
+            'error'
+          );
+        });
+      },
+
+      fetch_power_led_settings() {
+        fetch("/api/v1/power_led_settings.json")
+          .then((response) => response.json())
+          .then((data) => {
+            this.power_led_mode = data.mode || "on";
+            this.power_led_start_time = data.start_time || "08:00";
+            this.power_led_end_time = data.end_time || "22:00";
+          })
+          .catch((error) => {
+            console.error("Error fetching power LED settings:", error);
+          });
+      },
+
+      fetch_power_led_status() {
+        fetch("/api/v1/power_led_status.json")
+          .then((response) => response.json())
+          .then((data) => {
+            this.power_led_current_status = data.current_enabled;
+          })
+          .catch((error) => {
+            console.error("Error fetching power LED status:", error);
+          });
+      },
+
+      save_power_led_settings(showNotification = true) {
+        const post_data = {
+          mode: this.power_led_mode,
+          start_time: this.power_led_start_time,
+          end_time: this.power_led_end_time,
+        };
+        const requestOptions = {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(post_data),
+        };
+        this.saving_power_led = true;
+        fetch("/api/v1/power_led_settings.json", requestOptions)
+          .then((response) => response.json())
+          .then((data) => {
+            setTimeout(() => {
+              this.saving_power_led = false;
+              if (data.status === "ok") {
+                if (showNotification) {
+                  const mode_text = this.power_led_mode === 'off' ? 'Off' : this.power_led_mode === 'on' ? 'On' : 'Timed';
+                  this.showNotification(
+                    `Power LED set to ${mode_text}`,
+                    `电源指示灯已设为${this.power_led_mode === 'off' ? '关闭' : this.power_led_mode === 'on' ? '开启' : '定时'}`,
+                    'success'
+                  );
+                }
+              } else {
+                this.showNotification(
+                  data.message || 'Failed to save power LED settings',
+                  '电源指示灯设置保存失败',
+                  'error'
+                );
+              }
+            }, 500);
+          })
+          .catch((error) => {
+            this.saving_power_led = false;
+            this.showNotification(
+              'Error saving power LED settings',
+              '电源指示灯设置保存出错',
+              'error'
+            );
+            console.error("Error saving power LED settings:", error);
+          });
+      },
+
+      fetch_beeper_settings() {
+        fetch("/api/v1/beeper_settings.json")
+          .then((response) => response.json())
+          .then((data) => {
+            this.beeper_mode = data.mode || "on";
+            this.beeper_start_time = data.start_time || "08:00";
+            this.beeper_end_time = data.end_time || "22:00";
+          })
+          .catch((error) => {
+            console.error("Error fetching beeper settings:", error);
+          });
+      },
+
+      fetch_beeper_status() {
+        fetch("/api/v1/beeper_status.json")
+          .then((response) => response.json())
+          .then((data) => {
+            this.beeper_current_status = data.current_enabled;
+          })
+          .catch((error) => {
+            console.error("Error fetching beeper status:", error);
+          });
+      },
+
+      save_beeper_settings(showNotification = true) {
+        const post_data = {
+          mode: this.beeper_mode,
+          start_time: this.beeper_start_time,
+          end_time: this.beeper_end_time,
+        };
+        const requestOptions = {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(post_data),
+        };
+        this.saving_beeper = true;
+        fetch("/api/v1/beeper_settings.json", requestOptions)
+          .then((response) => response.json())
+          .then((data) => {
+            setTimeout(() => {
+              this.saving_beeper = false;
+              if (data.status === "ok") {
+                if (showNotification) {
+                  const mode_text = this.beeper_mode === 'off' ? 'Off' : this.beeper_mode === 'on' ? 'On' : 'Timed';
+                  this.showNotification(
+                    `Beeper set to ${mode_text}`,
+                    `蜂鸣器已设为${this.beeper_mode === 'off' ? '关闭' : this.beeper_mode === 'on' ? '开启' : '定时'}`,
+                    'success'
+                  );
+                }
+              } else {
+                this.showNotification(
+                  data.message || 'Failed to save beeper settings',
+                  '蜂鸣器设置保存失败',
+                  'error'
+                );
+              }
+            }, 500);
+          })
+          .catch((error) => {
+            this.saving_beeper = false;
+            this.showNotification(
+              'Error saving beeper settings',
+              '蜂鸣器设置保存出错',
+              'error'
+            );
+            console.error("Error saving beeper settings:", error);
+          });
+      },
+
+    fetch_fan_mode() {
+      fetch("/api/v1/fan_mode.json")
+        .then((response) => response.json())
+        .then((data) => {
+          this.fan_mode = data.fan_mode || "smart_quiet";
+        })
+        .catch((error) => {
+          console.error("Error fetching fan mode:", error);
+        });
+    },
+
+    save_fan_mode() {
+      const post_data = {
+        fan_mode: this.fan_mode,
+      };
+      const requestOptions = {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(post_data),
+      };
+      fetch("/api/v1/fan_mode.json", requestOptions)
+        .then((response) => {
+          if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+          }
+          return response.json();
+        })
+        .then((data) => {
+          if (data.status === "ok") {
+            const mode_text_en = this.fan_mode === 'manual' ? '{{locales["fan_mode_manual"]}}' :
+                                this.fan_mode === 'smart_quiet' ? '{{locales["fan_mode_smart_quiet"]}}' : '{{locales["fan_mode_smart_cool"]}}';
+            const mode_text_zh = this.fan_mode === 'manual' ? '手动' :
+                                this.fan_mode === 'smart_quiet' ? '安静' : '冷却';
+            this.showNotification(
+              `{{locales["fan_mode_saved"]}}: ${mode_text_en}`,
+              `风扇模式已保存：${mode_text_zh}`,
+              'success'
+            );
+          } else {
+            const error_msg = data.message ? `: ${data.message}` : '';
+            this.showNotification(
+              `{{locales["fan_mode_save_failed"]}}${error_msg}`,
+              `风扇模式保存失败${error_msg}`,
+              'error'
+            );
+            console.error("Error saving fan mode:", data);
+          }
+        })
+        .catch((error) => {
+          this.showNotification(
+            `{{locales["fan_mode_save_error"]}}: ${error.message}`,
+            `风扇模式保存出错: ${error.message}`,
+            'error'
+          );
+          console.error("Error saving fan mode:", error);
+        });
+    },
+
+    fetch_fan_speed() {
+      fetch("/api/v1/fan_speed.json")
+        .then((response) => response.json())
+        .then((data) => {
+          this.fan_speed = data.fan_speed || 5;
+          this.fan_data_loaded = true;
+        })
+        .catch((error) => {
+          console.error("Error fetching fan speed:", error);
+          this.fan_data_loaded = true;
+        });
+    },
+
+    save_fan_speed() {
+      const post_data = {
+        fan_speed: this.fan_speed,
+      };
+      const requestOptions = {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(post_data),
+      };
+      fetch("/api/v1/fan_speed.json", requestOptions)
+        .then((response) => response.json())
+        .then((data) => {
+          if (data.status === "ok") {
+            this.showNotification(
+              `Fan Speed Set to ${this.fan_speed}/9`,
+              `风扇转速已设为 ${this.fan_speed}/9`,
+              'success'
+            );
+          } else {
+            this.showNotification(
+              'Failed to save fan speed',
+              '风扇转速设置保存失败',
+              'error'
+            );
+            console.error("Error saving fan speed:", data.message);
+          }
+        })
+        .catch((error) => {
+          this.showNotification(
+            'Error saving fan speed',
+            '风扇转速设置保存出错',
+            'error'
+          );
+          console.error("Error saving fan speed:", error);
+        });
+    },
+
+    fetch_actual_fan_speed() {
+      fetch("/api/v1/fan_speed_actual.json")
+        .then((response) => response.json())
+        .then((data) => {
+          this.actual_fan_speed = data.fan_speed_rpm || 0;
+        })
+        .catch((error) => {
+          console.error("Error fetching actual fan speed:", error);
+          this.actual_fan_speed = 0;
+        });
+    },
+
+    // Notification system
+    showNotification(message_en, message_cn_or_type = '', type = 'info') {
+      // Handle new single-language format: showNotification(message, type)
+      if (typeof message_cn_or_type === 'string' && ['info', 'success', 'error', 'warning'].includes(message_cn_or_type)) {
+        type = message_cn_or_type;
+        message_cn_or_type = '';
+      }
+
+      this.notification.message_en = message_en;
+      this.notification.message_cn = message_cn_or_type;
+      this.notification.message = message_en; // Fallback
+      this.notification.type = type;
+      this.notification.show = true;
+
+      // Auto-hide after 4 seconds for success and info messages
+      if (type !== 'error') {
+        setTimeout(() => {
+          this.notification.show = false;
+        }, 4000);
+      }
+
+      // Also log to console for debugging
+      console.log(type.toUpperCase() + ': ' + message_en);
+    },
+
+    hideNotification() {
+      this.notification.show = false;
+    },
+
+    // Debounced save functions for time inputs
+    debouncedSavePowerLedSettings() {
+      clearTimeout(this.powerLedTimeoutId);
+      this.powerLedTimeoutId = setTimeout(() => {
+        this.save_power_led_settings(false);
+        this.showNotification(
+          'Power LED schedule updated',
+          '电源指示灯时间计划已更新',
+          'success'
+        );
+      }, 3000);
+    },
+
+    debouncedSaveBeeperSettings() {
+      clearTimeout(this.beeperTimeoutId);
+      this.beeperTimeoutId = setTimeout(() => {
+        this.save_beeper_settings(false);
+        this.showNotification(
+          'Beeper schedule updated',
+          '蜂鸣器时间计划已更新',
+          'success'
+        );
+      }, 3000);
+    },
+    fetch_charge_limit() {
+      fetch("/api/v1/charge_threshold.json")
+        .then((response) => response.json())
+        .then((data) => {
+          // Default to 100% (no limit) when unset or out of the valid 80-100 range.
+          let v = parseInt(data.value, 10);
+          this.charge_limit = (v >= 80 && v <= 100) ? v : 100;
+          this.charge_limit_loaded = true;
+        })
+        .catch((error) => {
+          console.error("Error fetching charge limit:", error);
+          this.charge_limit_loaded = true;
+        });
+    },
+
+    save_charge_limit() {
+      fetch("/api/v1/charge_threshold.json", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ value: parseInt(this.charge_limit) }),
+      })
+        .then((response) => response.json())
+        .then((data) => {
+          if (data.status === "ok") {
+            this.showNotification(
+              `Charge limit set to ${this.charge_limit}%`,
+              `充电限制已设为 ${this.charge_limit}%`,
+              'success'
+            );
+          } else {
+            this.showNotification(
+              data.message || 'Failed to save charge limit',
+              '充电限制设置失败',
+              'error'
+            );
+          }
+        })
+        .catch((error) => {
+          this.showNotification(
+            'Error saving charge limit',
+            '充电限制设置出错',
+            'error'
+          );
+          console.error("Error saving charge limit:", error);
+        });
+    },
+
+    getSavingText() {
+      return "{{locales['saving'] if locales['saving'] else 'Saving...'}}";
+    },
+    }));
+  });
+</script>
+{% endblock %}

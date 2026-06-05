@@ -1,0 +1,313 @@
+{% extends "_base.html" %}
+
+{% block title %}Performance Monitoring{% endblock %}
+
+{% block content %}
+<script>
+  document.addEventListener("alpine:init", () => {
+    Alpine.store("app").set_page("performance");
+  });
+</script>
+<div class="container mx-auto w-full pt-10 pb-12 sm:pt-24 sm:pb-12 md:pt-28 lg:px-4">
+    <div class="flex items-center justify-between">
+        <h1 class="px-1 py-4 font-bold uppercase text-gray-600">📊 Performance Monitoring</h1>
+    </div>
+    
+    <div class="bg-white rounded-lg shadow p-6">
+        <h2 class="text-xl font-bold text-pcatgray mb-6">API Performance Testing & Monitoring</h2>
+        
+        <!-- Control Buttons -->
+        <div class="flex flex-wrap gap-2 mb-6">
+            <button class="bg-pcatblue hover:bg-blue-600 text-white px-4 py-2 rounded transition-colors" onclick="runPerformanceTest()">
+                🚀 Dashboard Test
+            </button>
+            <button class="bg-pcatblue hover:bg-blue-600 text-white px-4 py-2 rounded transition-colors" onclick="runNetworkInterfacesTest()">
+                🌐 Network Interfaces Test
+            </button>
+            <button class="bg-pcatblue hover:bg-blue-600 text-white px-4 py-2 rounded transition-colors" onclick="runCacheTest()">
+                🔄 Cache Test
+            </button>
+            <button class="bg-pcatblue hover:bg-blue-600 text-white px-4 py-2 rounded transition-colors" onclick="getPerformanceMetrics()">
+                📊 Get Metrics
+            </button>
+            <button class="bg-pcatblue hover:bg-blue-600 text-white px-4 py-2 rounded transition-colors" onclick="runLoadTest()">
+                🔥 Load Test
+            </button>
+            <button class="bg-pcatyellow hover:bg-yellow-400 text-pcatgray px-4 py-2 rounded transition-colors font-semibold" onclick="runComprehensiveTest()">
+                🎯 Run All Tests
+            </button>
+        </div>
+
+        <!-- Performance Targets -->
+        <div class="bg-gray-50 rounded-lg p-4 mb-6">
+            <h3 class="text-lg font-semibold text-pcatgray mb-2">🎯 Performance Targets</h3>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                    <p class="text-sm"><strong>Dashboard API:</strong> &lt;50ms <span class="text-gray-500">(was 100ms+)</span></p>
+                    <p class="text-sm"><strong>Network Interfaces API:</strong> &lt;25ms <span class="text-gray-500">(was 50ms+)</span></p>
+                </div>
+                <div>
+                    <p class="text-sm"><strong>Cache Effectiveness:</strong> &gt;5ms improvement</p>
+                    <p class="text-sm"><strong>Load Test:</strong> Consistent performance under 10 concurrent requests</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Results Container -->
+        <div id="results" class="space-y-3">
+            <!-- Test results will appear here -->
+        </div>
+    </div>
+</div>
+
+<script>
+    function log(message, type = 'info') {
+        const div = document.createElement('div');
+        let bgColor = 'bg-blue-50 border-blue-200 text-blue-800';
+        let icon = 'ℹ️';
+        
+        if (type === 'success') {
+            bgColor = 'bg-green-50 border-green-200 text-green-800';
+            icon = '✅';
+        } else if (type === 'warning') {
+            bgColor = 'bg-yellow-50 border-yellow-200 text-yellow-800';
+            icon = '⚠️';
+        } else if (type === 'error') {
+            bgColor = 'bg-red-50 border-red-200 text-red-800';
+            icon = '❌';
+        }
+        
+        div.className = `border-l-4 p-3 rounded ${bgColor}`;
+        div.innerHTML = `<strong>${new Date().toLocaleTimeString()}</strong> ${icon} ${message}`;
+        document.getElementById('results').appendChild(div);
+        console.log(message);
+        
+        // Auto-scroll to bottom
+        div.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    }
+
+    async function measureRequestTime(url) {
+        const start = performance.now();
+        try {
+            const response = await fetch(url);
+            const data = await response.json();
+            const end = performance.now();
+            const duration = Math.round(end - start);
+            return { success: true, duration, data, size: JSON.stringify(data).length };
+        } catch (error) {
+            const end = performance.now();
+            const duration = Math.round(end - start);
+            return { success: false, duration, error: error.message };
+        }
+    }
+
+    async function runNetworkInterfacesTest() {
+        log('🌐 Starting Network Interfaces Performance Test...', 'info');
+        
+        // Test network interfaces endpoint
+        const result = await measureRequestTime('/api/v1/network_interfaces.json');
+        if (result.success) {
+            const status = result.duration > 50 ? 'error' : result.duration > 25 ? 'warning' : 'success';
+            log(`📡 Network Interfaces: ${result.duration}ms (${(result.size/1024).toFixed(1)}KB)`, status);
+            
+            // Show some key data
+            const data = result.data;
+            log(`   • WAN: ${data.wan_enabled ? '✅' : '❌'}, SIM: ${data.sim_enabled ? '✅' : '❌'}, WiFi: ${data.wifi_enabled ? '✅' : '❌'}`, 'info');
+            log(`   • LAN: ${data.lan_enabled ? '✅' : '❌'}, Network Mode: ${data.network_mode}`, 'info');
+        } else {
+            log(`❌ Network Interfaces failed: ${result.error}`, 'error');
+        }
+
+        // Test cache effectiveness
+        log('🔄 Testing Network Interfaces cache...', 'info');
+        const cachedResult = await measureRequestTime('/api/v1/network_interfaces.json');
+        if (cachedResult.success && result.success) {
+            const improvement = result.duration - cachedResult.duration;
+            if (improvement > 5) {
+                log(`🎯 Cached request: ${cachedResult.duration}ms (${improvement}ms faster)`, 'success');
+            } else {
+                log(`🔄 Cached request: ${cachedResult.duration}ms (minimal cache benefit)`, 'info');
+            }
+        }
+    }
+
+    async function runPerformanceTest() {
+        log('🚀 Starting Dashboard Performance Test...', 'info');
+        
+        // Test full dashboard endpoint
+        const fullResult = await measureRequestTime('/api/v1/dashboard.json');
+        if (fullResult.success) {
+            const status = fullResult.duration > 100 ? 'error' : fullResult.duration > 50 ? 'warning' : 'success';
+            log(`📊 Full Dashboard: ${fullResult.duration}ms (${(fullResult.size/1024).toFixed(1)}KB)`, status);
+        } else {
+            log(`❌ Full Dashboard failed: ${fullResult.error}`, 'error');
+        }
+
+        // Test header-only endpoint
+        const headerResult = await measureRequestTime('/api/v1/dashboard.json?type=header');
+        if (headerResult.success) {
+            const status = headerResult.duration > 50 ? 'warning' : 'success';
+            log(`🔝 Header Data: ${headerResult.duration}ms (${(headerResult.size/1024).toFixed(1)}KB)`, status);
+        }
+
+        // Test body-only endpoint
+        const bodyResult = await measureRequestTime('/api/v1/dashboard.json?type=body');
+        if (bodyResult.success) {
+            const status = bodyResult.duration > 100 ? 'error' : bodyResult.duration > 50 ? 'warning' : 'success';
+            log(`📋 Body Data: ${bodyResult.duration}ms (${(bodyResult.size/1024).toFixed(1)}KB)`, status);
+        }
+
+        // Performance summary
+        if (fullResult.success) {
+            const improvement = fullResult.duration < 50 ? '🎉 Excellent' : fullResult.duration < 100 ? '✅ Good' : '⚠️ Needs optimization';
+            log(`📈 Performance: ${improvement} (target: <50ms, acceptable: <100ms)`, 
+                 fullResult.duration < 50 ? 'success' : fullResult.duration < 100 ? 'warning' : 'error');
+        }
+    }
+
+    async function runCacheTest() {
+        log('🔄 Testing Cache Effectiveness...', 'info');
+        
+        // First request (should be uncached)
+        const first = await measureRequestTime('/api/v1/dashboard.json');
+        log(`📡 First request (uncached): ${first.duration}ms`, 'info');
+        
+        // Second request (should be cached)
+        const second = await measureRequestTime('/api/v1/dashboard.json');
+        const improvement = first.duration - second.duration;
+        const improvementPercent = Math.round((improvement / first.duration) * 100);
+        
+        if (improvement > 10) {
+            log(`🎯 Second request (cached): ${second.duration}ms (${improvement}ms faster, ${improvementPercent}% improvement)`, 'success');
+        } else {
+            log(`🔄 Second request: ${second.duration}ms (minimal cache benefit: ${improvement}ms)`, 'warning');
+        }
+        
+        // Wait for cache expiry
+        log('⏱️ Waiting 1.5 seconds for cache expiry...', 'info');
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        
+        // Third request (should be uncached again)
+        const third = await measureRequestTime('/api/v1/dashboard.json');
+        log(`🔄 After cache expiry: ${third.duration}ms`, 'info');
+    }
+
+    async function getPerformanceMetrics() {
+        log('📊 Fetching Performance Metrics...', 'info');
+        
+        try {
+            const response = await fetch('/api/v1/dashboard/performance.json');
+            const metrics = await response.json();
+            
+            const metricsDiv = document.createElement('div');
+            metricsDiv.className = 'bg-gray-50 border rounded-lg p-4 mt-4';
+            metricsDiv.innerHTML = `
+                <h3 class="text-lg font-semibold text-pcatgray mb-3">📊 Performance Metrics</h3>
+                
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div class="bg-white p-3 rounded">
+                        <h4 class="font-semibold text-pcatblue mb-2">🎛️ Dashboard Cache</h4>
+                        <p class="text-sm"><strong>Generation Time:</strong> ${metrics.dashboard_cache.last_generation_time_ms.toFixed(1)}ms</p>
+                        <p class="text-sm"><strong>Cache Age:</strong> ${metrics.dashboard_cache.cache_age_seconds.toFixed(1)}s</p>
+                        <p class="text-sm"><strong>Cache Valid:</strong> ${metrics.dashboard_cache.cache_valid ? '✅ Yes' : '❌ No'}</p>
+                    </div>
+                    
+                    <div class="bg-white p-3 rounded">
+                        <h4 class="font-semibold text-pcatblue mb-2">🌐 Network Interfaces Cache</h4>
+                        <p class="text-sm"><strong>Generation Time:</strong> ${metrics.network_interfaces_cache.last_generation_time_ms.toFixed(1)}ms</p>
+                        <p class="text-sm"><strong>Cache Age:</strong> ${metrics.network_interfaces_cache.cache_age_seconds.toFixed(1)}s</p>
+                        <p class="text-sm"><strong>Cache Valid:</strong> ${metrics.network_interfaces_cache.cache_valid ? '✅ Yes' : '❌ No'}</p>
+                    </div>
+                </div>
+                
+                <div class="mt-4 bg-white p-3 rounded">
+                    <h4 class="font-semibold text-pcatblue mb-2">⚙️ Cache Settings</h4>
+                    <p class="text-sm"><strong>Dashboard:</strong> ${metrics.cache_settings.dashboard_cache_duration}s</p>
+                    <p class="text-sm"><strong>Network Interfaces:</strong> ${metrics.cache_settings.network_interfaces_cache_duration}s</p>
+                    <p class="text-sm"><strong>Expensive Operations:</strong> ${metrics.cache_settings.expensive_ops_cache_duration}s</p>
+                </div>
+                
+                <div class="mt-4 bg-white p-3 rounded">
+                    <h4 class="font-semibold text-pcatblue mb-2">🔧 Expensive Operations Cache</h4>
+                    ${Object.entries(metrics.expensive_ops_cache).map(([op, data]) => 
+                        `<p class="text-sm"><strong>${op}:</strong> Age: ${data.cache_age_seconds.toFixed(1)}s, Valid: ${data.cache_valid ? '✅' : '❌'}</p>`
+                    ).join('')}
+                </div>
+            `;
+            document.getElementById('results').appendChild(metricsDiv);
+            
+        } catch (error) {
+            log(`❌ Failed to fetch metrics: ${error.message}`, 'error');
+        }
+    }
+
+    async function runLoadTest() {
+        log('🔥 Starting Load Test (10 concurrent requests)...', 'info');
+        
+        const startTime = performance.now();
+        const promises = Array(10).fill().map(() => measureRequestTime('/api/v1/dashboard.json'));
+        
+        try {
+            const results = await Promise.all(promises);
+            const endTime = performance.now();
+            
+            const successful = results.filter(r => r.success);
+            const avgTime = successful.reduce((sum, r) => sum + r.duration, 0) / successful.length;
+            const minTime = Math.min(...successful.map(r => r.duration));
+            const maxTime = Math.max(...successful.map(r => r.duration));
+            const totalTime = Math.round(endTime - startTime);
+            
+            log(`📈 Load Test Results:`, 'info');
+            log(`   • Total time: ${totalTime}ms for 10 requests`, 'info');
+            log(`   • Average response: ${avgTime.toFixed(1)}ms`, avgTime < 50 ? 'success' : avgTime < 100 ? 'warning' : 'error');
+            log(`   • Range: ${minTime}ms - ${maxTime}ms`, 'info');
+            log(`   • Success rate: ${successful.length}/10 (${(successful.length/10*100)}%)`, successful.length === 10 ? 'success' : 'warning');
+            
+            if (avgTime < 50) {
+                log('🎉 Excellent performance under load!', 'success');
+            } else if (avgTime < 100) {
+                log('✅ Good performance under load', 'warning');
+            } else {
+                log('⚠️ Performance degradation under load - optimization needed', 'error');
+            }
+            
+        } catch (error) {
+            log(`❌ Load test failed: ${error.message}`, 'error');
+        }
+    }
+
+    async function runComprehensiveTest() {
+        log('🎯 Starting Comprehensive Performance Test Suite...', 'info');
+        log('================================================', 'info');
+        
+        // Test all endpoints
+        await runPerformanceTest();
+        await new Promise(resolve => setTimeout(resolve, 500)); // Small delay
+        
+        await runNetworkInterfacesTest();
+        await new Promise(resolve => setTimeout(resolve, 500)); // Small delay
+        
+        await runCacheTest();
+        await new Promise(resolve => setTimeout(resolve, 500)); // Small delay
+        
+        await getPerformanceMetrics();
+        await new Promise(resolve => setTimeout(resolve, 500)); // Small delay
+        
+        log('================================================', 'info');
+        log('✅ Comprehensive test suite completed!', 'success');
+        
+        // Summary
+        log('📊 Performance Summary:', 'info');
+        log('   • Target: Dashboard <50ms, Network Interfaces <25ms', 'info');
+        log('   • Cache effectiveness: Should show >5ms improvement', 'info');
+        log('   • All tests should pass without errors', 'info');
+    }
+
+    // Auto-run basic performance test on page load
+    document.addEventListener('DOMContentLoaded', () => {
+        setTimeout(() => {
+            log('🏁 Performance monitoring page loaded. Click any test button to begin.', 'info');
+        }, 500);
+    });
+</script>
+{% endblock %}

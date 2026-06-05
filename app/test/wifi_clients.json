@@ -1,0 +1,71 @@
+{
+  "freq": 2457,
+  "clients": {
+    "7c:03:ab:48:31:6c": {
+      "auth": true,
+      "assoc": true,
+      "authorized": true,
+      "preauth": false,
+      "wds": false,
+      "wmm": true,
+      "ht": true,
+      "vht": false,
+      "he": false,
+      "wps": false,
+      "mfp": false,
+      "rrm": [0, 0, 0, 0, 0],
+      "aid": 2,
+      "bytes": {
+        "rx": 113075,
+        "tx": 204529
+      },
+      "airtime": {
+        "rx": 0,
+        "tx": 0
+      },
+      "packets": {
+        "rx": 529,
+        "tx": 474
+      },
+      "rate": {
+        "rx": 1000,
+        "tx": 1000
+      },
+      "signal": -53,
+      "capabilities": {}
+    },
+    "e4:42:a6:56:4e:e7": {
+      "auth": true,
+      "assoc": true,
+      "authorized": true,
+      "preauth": false,
+      "wds": false,
+      "wmm": true,
+      "ht": true,
+      "vht": false,
+      "he": false,
+      "wps": false,
+      "mfp": false,
+      "rrm": [0, 0, 0, 0, 0],
+      "aid": 1,
+      "bytes": {
+        "rx": 839631,
+        "tx": 2269645
+      },
+      "airtime": {
+        "rx": 0,
+        "tx": 0
+      },
+      "packets": {
+        "rx": 4835,
+        "tx": 4671
+      },
+      "rate": {
+        "rx": 1000,
+        "tx": 1000
+      },
+      "signal": -49,
+      "capabilities": {}
+    }
+  }
+}

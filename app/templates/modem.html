@@ -1,0 +1,2506 @@
+{% extends '_base.html' %} {% block content %}
+<div class="container mx-auto w-full pt-10 pb-12 sm:pt-24 sm:pb-12 md:pt-28 lg:px-4" x-data="adv_settings()" x-init="init()">
+  <div class="flex items-center justify-between">
+    <h1 class="px-1 py-4 font-bold uppercase text-gray-600">{{locales["nav_modem"]}}</h1>
+  </div>
+
+  {% include '_notification.html' %}
+
+  {% include "_select_message_modal.html" %} {% include "_send_message_modal.html" %} {% include "_modem_config_modal.html" %}
+
+  <!-- Hook History Detail Modal -->
+  <div x-data="hookHistoryModal()" class="modal" x-cloak x-show="modalOpen">
+    <section class="modal-main w-full max-w-4xl h-5/6" @click.outside="modalOpen = false">
+      <div class="flex items-start justify-between rounded-t border-b p-3">
+        <h3 class="text-base font-semibold text-gray-900 lg:text-xl">Hook Execution Details</h3>
+        <button type="button" class="bg-transparent ml-auto inline-flex items-center rounded-lg p-1.5 text-sm text-gray-400 hover:bg-gray-200 hover:text-gray-900" @click="modalOpen = false">
+          <svg class="h-5 w-5" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
+            <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd"></path>
+          </svg>
+        </button>
+      </div>
+      
+      <div class="p-6 overflow-y-auto max-h-full" x-show="detail">
+        <!-- Basic Information -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+          <div class="bg-gray-50 p-4 rounded-lg">
+            <h4 class="font-medium text-gray-900 mb-3">Execution Info</h4>
+            <dl class="space-y-2">
+              <div>
+                <dt class="text-sm font-medium text-gray-500">Execution ID</dt>
+                <dd class="text-sm text-gray-900" x-text="detail?.id"></dd>
+              </div>
+              <div>
+                <dt class="text-sm font-medium text-gray-500">Status</dt>
+                <dd class="text-sm">
+                  <span x-show="detail?.success" class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">Success</span>
+                  <span x-show="!detail?.success" class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800">Failed</span>
+                </dd>
+              </div>
+              <div>
+                <dt class="text-sm font-medium text-gray-500">Return Code</dt>
+                <dd class="text-sm text-gray-900" x-text="detail?.return_code"></dd>
+              </div>
+              <div>
+                <dt class="text-sm font-medium text-gray-500">Duration</dt>
+                <dd class="text-sm text-gray-900" x-text="detail?.execution_duration_formatted"></dd>
+              </div>
+              <div>
+                <dt class="text-sm font-medium text-gray-500">Start Time</dt>
+                <dd class="text-sm text-gray-900" x-text="detail?.execution_start"></dd>
+              </div>
+              <div>
+                <dt class="text-sm font-medium text-gray-500">End Time</dt>
+                <dd class="text-sm text-gray-900" x-text="detail?.execution_end"></dd>
+              </div>
+            </dl>
+          </div>
+          
+          <div class="bg-blue-50 p-4 rounded-lg">
+            <h4 class="font-medium text-gray-900 mb-3">SMS Message</h4>
+            <dl class="space-y-2">
+              <div>
+                <dt class="text-sm font-medium text-gray-500">SMS ID</dt>
+                <dd class="text-sm text-gray-900" x-text="detail?.sms_id || 'N/A'"></dd>
+              </div>
+              <div>
+                <dt class="text-sm font-medium text-gray-500">Sender</dt>
+                <dd class="text-sm text-gray-900" x-text="detail?.sender"></dd>
+              </div>
+              <div>
+                <dt class="text-sm font-medium text-gray-500">Message Timestamp</dt>
+                <dd class="text-sm text-gray-900" x-text="detail?.message_timestamp"></dd>
+              </div>
+              <div>
+                <dt class="text-sm font-medium text-gray-500">Message Content</dt>
+                <dd class="text-sm text-gray-900 bg-white p-2 rounded border" x-text="detail?.message_content"></dd>
+              </div>
+            </dl>
+          </div>
+        </div>
+
+        <!-- Hook Command -->
+        <div class="mb-6">
+          <h4 class="font-medium text-gray-900 mb-3">Hook Command</h4>
+          <div class="bg-gray-900 text-green-400 p-4 rounded-lg font-mono text-sm overflow-x-auto">
+            <pre x-text="detail?.hook_command"></pre>
+          </div>
+        </div>
+
+        <!-- Hook Script Content -->
+        <div class="mb-6">
+          <h4 class="font-medium text-gray-900 mb-3">Hook Script Content (at time of execution)</h4>
+          <div class="bg-gray-100 p-4 rounded-lg">
+            <pre class="text-sm text-gray-800 whitespace-pre-wrap overflow-x-auto" x-text="detail?.hook_script_content || 'No script content available'"></pre>
+          </div>
+        </div>
+
+        <!-- Output Sections -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+          <!-- STDOUT -->
+          <div>
+            <h4 class="font-medium text-gray-900 mb-3 flex items-center">
+              <svg class="w-5 h-5 text-green-600 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+              </svg>
+              STDOUT Output
+            </h4>
+            <div class="bg-green-50 border border-green-200 rounded-lg p-4 max-h-96 overflow-y-auto">
+              <pre class="text-sm text-gray-800 whitespace-pre-wrap" x-text="detail?.stdout || 'No stdout output'"></pre>
+            </div>
+          </div>
+
+          <!-- STDERR -->
+          <div>
+            <h4 class="font-medium text-gray-900 mb-3 flex items-center">
+              <svg class="w-5 h-5 text-red-600 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+              </svg>
+              STDERR Output
+            </h4>
+            <div class="bg-red-50 border border-red-200 rounded-lg p-4 max-h-96 overflow-y-auto">
+              <pre class="text-sm text-red-800 whitespace-pre-wrap" x-text="detail?.stderr || 'No stderr output'"></pre>
+            </div>
+          </div>
+        </div>
+
+        <!-- Error Message -->
+        <div x-show="detail?.error_message" class="mb-6">
+          <h4 class="font-medium text-gray-900 mb-3 flex items-center">
+            <svg class="w-5 h-5 text-red-600 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.732-.833-2.5 0L4.268 18.5c-.77.833.192 2.5 1.732 2.5z"></path>
+            </svg>
+            Error Message
+          </h4>
+          <div class="bg-red-100 border border-red-300 rounded-lg p-4">
+            <p class="text-sm text-red-800" x-text="detail?.error_message"></p>
+          </div>
+        </div>
+      </div>
+      
+      <div class="flex items-center justify-end space-x-4 rounded-b border-t border-gray-200 p-4">
+        <button type="button" class="rounded-lg border border-gray-200 bg-white px-5 py-2.5 text-sm font-medium text-gray-500 hover:bg-gray-100 hover:text-gray-900" @click="modalOpen = false">Close</button>
+      </div>
+    </section>
+  </div>
+
+  <!-- Clear All SMS Confirmation Modal -->
+  <div class="modal" x-cloak x-show="clear_sms_modal_open">
+    <section class="modal-main w-full sm:w-1/2" @click.outside="clear_sms_modal_open = false">
+      <div class="flex items-start justify-between rounded-t border-b p-3">
+        <h3 class="text-base font-semibold text-gray-900 lg:text-xl">{{locales["operation_tip"]}}</h3>
+        <button type="button" class="bg-transparent ml-auto inline-flex items-center rounded-lg p-1.5 text-sm text-gray-400 hover:bg-gray-200 hover:text-gray-900" @click="clear_sms_modal_open = false">
+          <svg class="h-5 w-5" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
+            <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd"></path>
+          </svg>
+        </button>
+      </div>
+      <div class="space-y-6 p-6">
+        <p>{{locales["sms_clear_all_confirm_title"]}}</p>
+        <p>{{locales["sms_clear_all_confirm_message"]}}</p>
+      </div>
+      <div class="flex items-center justify-end space-x-4 rounded-b border-t border-gray-200 p-4">
+        <button type="button" class="rounded-lg border border-gray-200 bg-white px-5 py-2.5 text-sm font-medium text-gray-500 hover:bg-gray-100 hover:text-gray-900 focus:z-10 focus:ring-4 focus:ring-gray-300" @click="clear_sms_modal_open = false">{{locales["common_no"]}}</button>
+        <button type="button" class="hover:bg-red-800 focus:ring-red-300 rounded-lg bg-red-700 px-5 py-2.5 text-center text-sm font-medium text-white focus:ring-4" @click="clear_all_sms(); clear_sms_modal_open = false">{{locales["common_yes"]}}</button>
+      </div>
+    </section>
+  </div>
+
+  <div class="mb-8 w-full flex flex-col md:flex-row gap-4 px-2 leading-normal text-gray-800 md:px-0">
+    <div class="grow rounded border bg-white shadow">
+      <div class="flex items-center justify-between border-b">
+        <h5 class="flex items-center font-bold text-gray-600">
+          <div class="flex items-stretch">
+            <button @click="switch_tab('sms_inbox')" :class="tab_page === 'sms_inbox' ? 'border-b-2 border-b-pcatblue' : '' " class="flex items-center border-x border-color-gray-200 px-4 hover:bg-gray-100 py-3"><img src="/static/sms2.svg" class="h-4 w-4 mr-1" />{{locales["tab_sms_box"]}}</button>
+            <button @click="switch_tab('modem_basic')" :class="tab_page === 'modem_basic' ? 'border-b-2 border-b-pcatblue' : '' " class="flex items-center border-x border-color-gray-200 px-4 hover:bg-gray-100 py-3">{{locales["tab_model_basic"]}}</button>
+            <button @click="switch_tab('modem_adv')" :class="tab_page === 'modem_adv' ? 'border-b-2 border-b-pcatblue' : '' " class="flex items-center border-x border-color-gray-200 px-4 hover:bg-gray-100 py-3">{{locales["tab_modem_adv"]}}</button>
+            <button @click="switch_tab('modem_hook')" :class="tab_page === 'modem_hook' ? 'border-b-2 border-b-pcatblue' : '' " class="flex items-center border-x border-color-gray-200 px-4 hover:bg-gray-100 py-3">
+              <img src="/static/script.svg" class="h-4 w-4 mr-1" />
+              {{locales["tab_modem_hook"]}}
+            </button>
+          </div>
+        </h5>
+
+        <div class="mr-4 flex items-center">
+          <div x-cloak x-show="querying">
+            <img src="/static/loading.gif" class="h-4 w-4" />
+          </div>
+          <!-- SMS Refresh Icon - Only show in SMS tab -->
+          <a @click.prevent="refresh_sms_data"
+             x-show="tab_page === 'sms_inbox' && sim_state === 'ready' && !sms_refreshing && modem_valid === true"
+             title="{{locales['sms_refresh_tooltip']}}"
+             class="group">
+            <svg class="h-4 w-4 text-gray-600 hover:text-blue-600 transition-all duration-200" 
+                 :class="sms_refreshing ? 'animate-spin' : 'group-hover:scale-110'" 
+                 fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+            </svg>
+          </a>
+          <!-- Show spinning icon during SMS refresh -->
+          <div x-show="sms_refreshing" title="{{locales['sms_refreshing_tooltip']}}">
+            <svg class="h-4 w-4 text-blue-600 animate-spin" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+            </svg>
+          </div>
+        </div>
+      </div>
+
+      <div x-cloak x-show="modem_valid === false && data_loaded && wwan_powered" class="rounded bg-red-50 text-gray-400 p-4">{{locales["modem_invalid"]}}</div>
+
+      <!-- WWAN Powered Off notice -->
+      <div x-cloak x-show="!wwan_powered && data_loaded" class="rounded bg-yellow-50 border border-yellow-200 text-yellow-700 p-4 flex items-center">
+        <svg class="h-5 w-5 mr-2 text-yellow-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18.364 5.636a9 9 0 11-12.728 0M12 9v4m0 4h.01" />
+        </svg>
+        {{locales["modem_wwan_powered_off"]}}
+      </div>
+
+      <!-- Loading state for modem status -->
+      <div x-cloak x-show="modem_valid === null && wwan_powered" class="rounded bg-blue-50 text-gray-500 p-4 flex items-center">
+        <img src="/static/loading.gif" class="h-4 w-4 mr-2" />
+        {{locales["modem_checking_status"]}}
+      </div>
+
+      <div class="relative px-3 pt-3" x-show="tab_page === 'sms_inbox'">
+        <!-- View Toggle -->
+        <div class="flex justify-between items-center mb-3" x-show="modem_valid === true">
+          <div class="flex gap-2">
+            <button @click="sms_view_mode = 'threads'" :class="(sms_view_mode === 'threads' || sms_view_mode === 'conversation') ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-700'" class="px-3 py-1 rounded-lg text-sm font-medium transition-colors">{{locales["sms_conversations"]}}</button>
+            <button @click="sms_view_mode = 'traditional'; fetch_sms_list()" :class="sms_view_mode === 'traditional' ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-700'" class="px-3 py-1 rounded-lg text-sm font-medium transition-colors">{{locales["sms_traditional"]}}</button>
+          </div>
+        </div>
+
+        <!-- Thread List View -->
+        <div x-show="sms_view_mode === 'threads'">
+          <div x-show="modem_valid === true">
+            <div class="text-gray-500 p-4" x-cloak x-show="sim_state === 'absent'">{{locales["modem_sim_absent"]}}</div>
+            <div class="text-gray-500 p-4" x-cloak x-show="sim_state === 'ready' && Object.keys(conversation_threads).length === 0 && data_loaded">{{locales["modem_no_data"]}}</div>
+            <!-- Thread List -->
+            <template x-for="[phoneNumber, thread] in Object.entries(conversation_threads)" :key="phoneNumber">
+              <div class="border-b p-3 cursor-pointer hover:bg-gray-50 flex items-center justify-between" @click="open_thread(phoneNumber)">
+                <div class="flex-1 min-w-0">
+                  <div class="flex items-center justify-between mb-1">
+                    <div class="font-semibold text-sm truncate" x-text="phoneNumber"></div>
+                    <div class="text-xs text-gray-500 flex-shrink-0 ml-2" x-text="format_time(thread.lastMessage.timestamp)"></div>
+                  </div>
+                  <div class="text-sm text-gray-600 truncate" x-text="thread.lastMessage.preview"></div>
+                  <div class="flex items-center justify-between mt-1">
+                    <div class="text-xs text-gray-400" x-text="thread.messageCount + (thread.messageCount === 1 ? ' message' : ' messages')"></div>
+                    <div x-show="thread.unreadCount > 0" class="bg-blue-500 text-white text-xs rounded-full px-2 py-1 min-w-[20px] text-center" x-text="thread.unreadCount"></div>
+                  </div>
+                </div>
+                <div class="ml-3 text-gray-400">
+                  <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+                    <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd"></path>
+                  </svg>
+                </div>
+              </div>
+            </template>
+          </div>
+          <!-- Action buttons -->
+          <div x-show="sim_state === 'ready'" class="mt-2 mb-2 flex justify-center gap-3">
+            <button @click="open_sendbox" class="inline-flex items-center gap-2 hover:bg-blue-800 focus:ring-blue-300 rounded-lg bg-blue-700 px-4 py-2 text-center text-sm font-medium text-white focus:ring-4 min-w-[120px]">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"></path>
+              </svg>
+              {{locales["sms_send_button"]}}
+            </button>
+            <button x-show="Object.keys(conversation_threads).length > 0" @click="confirm_clear_all_sms" class="inline-flex items-center gap-2 hover:bg-red-800 focus:ring-red-300 rounded-lg bg-red-700 px-4 py-2 text-center text-sm font-medium text-white focus:ring-4 min-w-[120px]">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+              </svg>
+              {{locales["sms_clear_all_button"]}}
+            </button>
+            <button x-show="Object.keys(conversation_threads).length > 0" @click="download_all_messages()" class="inline-flex items-center gap-2 hover:bg-green-700 focus:ring-green-300 rounded-lg bg-green-600 px-4 py-2 text-center text-sm font-medium text-white focus:ring-4 min-w-[120px]">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+              </svg>
+              {{locales["sms_download_all"]}}
+            </button>
+          </div>
+        </div>
+
+        <!-- Conversation View -->
+        <div x-show="sms_view_mode === 'conversation'">
+          <!-- Header with back button and contact name -->
+          <div class="flex items-center p-3 border-b bg-gray-50">
+            <button @click="back_to_threads()" class="mr-3 p-1 hover:bg-gray-200 rounded">
+              <svg class="w-5 h-5 text-gray-600" fill="currentColor" viewBox="0 0 20 20">
+                <path fill-rule="evenodd" d="M12.707 5.293a1 1 0 010 1.414L9.414 10l3.293 3.293a1 1 0 01-1.414 1.414l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 0z" clip-rule="evenodd"></path>
+              </svg>
+            </button>
+            <div class="flex-1">
+              <div class="font-semibold" x-text="current_thread_number"></div>
+            </div>
+            <div class="flex gap-2">
+              <button @click="download_thread()" class="p-1 hover:bg-blue-100 rounded text-blue-600" title="Download Messages">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                </svg>
+              </button>
+              <button @click="confirm_delete_conversation()" class="p-1 hover:bg-gray-100 rounded text-gray-500" title="删除对话 / Delete Conversation">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                </svg>
+              </button>
+            </div>
+          </div>
+
+          <!-- Messages in conversation -->
+          <div id="conversation-messages" class="conversation-messages px-3 py-2" style="min-height: 500px; max-height: 500px; overflow-y: auto;">
+            
+            <!-- Show collapse button if there are many messages -->
+            <div x-show="sorted_thread_messages.length > 10 && !show_all_messages" class="text-center py-2">
+              <button @click="show_all_messages = true; $nextTick(() => scroll_to_bottom())" 
+                      class="text-blue-500 text-sm hover:text-blue-700 bg-gray-100 hover:bg-gray-200 px-3 py-1 rounded-full transition-colors">
+                {{locales["sms_show_earlier"]}} (<span x-text="sorted_thread_messages.length - 10"></span> {{locales["sms_messages_count"]}})
+              </button>
+            </div>
+            
+            <template x-for="(message, index) in displayed_thread_messages" :key="message.id">
+              <div class="mb-3 group">
+                <!-- Sent messages (right aligned) -->
+                <div x-show="message.direction == 1" class="flex flex-col items-end">
+                  <div class="flex items-start gap-2">
+                    <button @click="delete_message(message)" class="mt-1 px-2 py-1 text-xs hover:bg-gray-100 rounded text-gray-400 hover:text-red-500 transition-colors">×</button>
+                    <div class="bg-green-500 rounded-lg px-3 py-2 max-w-xs mb-1">
+                      <div x-text="message.msg" class="text-white"></div>
+                    </div>
+                  </div>
+                  <div class="text-xs text-gray-500" x-text="format_date_time(message.timestamp)"></div>
+                </div>
+
+                <!-- Received messages (left aligned) -->
+                <div x-show="message.direction != 1" class="flex flex-col items-start">
+                  <div class="flex items-start gap-2">
+                    <div class="bg-gray-100 rounded-lg px-3 py-2 max-w-xs mb-1">
+                      <div x-text="message.msg"></div>
+                    </div>
+                    <button @click="delete_message(message)" class="mt-1 px-2 py-1 text-xs hover:bg-gray-100 rounded text-gray-400 hover:text-red-500 transition-colors">×</button>
+                  </div>
+                  <div class="text-xs text-gray-500" x-text="format_date_time(message.timestamp)"></div>
+                </div>
+              </div>
+            </template>
+          </div>
+
+          <!-- Reply Text Box and Send Button -->
+          <div class="border-t bg-gray-50 p-3">
+            <div class="flex gap-2 items-start">
+              <div class="flex-1 relative">
+                <textarea 
+                  x-model="thread_reply_text" 
+                  placeholder="{{locales['sms_type_message_placeholder']}}" 
+                  class="w-full p-2 pr-12 border border-gray-300 rounded-lg resize-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500" 
+                  rows="2" 
+                  @keydown.enter.prevent="thread_reply_text.trim() && send_thread_reply()"
+                  @input="if(thread_reply_text && smsCount(thread_reply_text).length > 140) { thread_reply_text = thread_reply_text.slice(0, -1); }"
+                ></textarea>
+                <div 
+                  class="absolute bottom-2 right-2 text-xs pointer-events-none"
+                  :class="thread_reply_text && smsCount(thread_reply_text).length > 140 ? 'text-red-500' : 'text-gray-400'"
+                  x-text="thread_reply_text ? (() => { const c = smsCount(thread_reply_text); return c.length + '/' + c.perPart + (c.parts > 1 ? ' (' + c.parts + ')' : ''); })() : '0/140'"
+                ></div>
+              </div>
+              <button @click="send_thread_reply()" :disabled="!thread_reply_text.trim()" :class="thread_reply_text.trim() ? 'bg-blue-600 hover:bg-blue-700 text-white' : 'bg-gray-300 text-gray-500 cursor-not-allowed'" class="px-4 py-2 h-12 rounded-lg font-medium focus:ring-2 focus:ring-blue-500 transition-colors flex items-center">{{locales["sms_send"]}}</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Traditional View -->
+        <div x-show="sms_view_mode === 'traditional'">
+          <div x-show="modem_valid === true">
+            <div class="text-gray-500 p-4" x-cloak x-show="sim_state === 'absent'">{{locales["modem_sim_absent"]}}</div>
+            <div class="text-gray-500 p-4" x-cloak x-show="sim_state === 'ready' && modem_messages.length === 0 && data_loaded">{{locales["modem_no_data"]}}</div>
+            <!-- Traditional SMS List -->
+            <template x-for="message in modem_messages" :key="message.id">
+              <div class="border-b p-3">
+                <!-- Sent messages (right aligned) -->
+                <div x-show="message.direction == 1" class="flex flex-col items-end">
+                  <div class="text-sm mb-2">
+                    <span class="font-medium text-gray-700">{{locales["sms_to"]}}: </span>
+                    <span class="text-blue-400" x-text="message.to"></span>
+                    <span class="text-gray-500 ml-2" x-text="format_date_time(message.timestamp)"></span>
+                    <button @click="delete_traditional_message(message)" class="ml-2 px-2 py-1 text-xs hover:bg-gray-100 rounded text-gray-400 hover:text-red-500 transition-colors">×</button>
+                  </div>
+                  <div class="bg-green-500 rounded-lg px-3 py-2 max-w-xs">
+                    <div x-text="message.msg" class="text-white"></div>
+                  </div>
+                </div>
+
+                <!-- Received messages (left aligned) -->
+                <div x-show="message.direction != 1" class="flex flex-col items-start">
+                  <div class="text-sm mb-2">
+                    <span class="font-medium text-gray-700">{{locales["sms_from"]}}: </span>
+                    <span class="text-blue-400" x-text="message.from"></span>
+                    <span class="text-gray-500 ml-2" x-text="format_date_time(message.timestamp)"></span>
+                    <button @click="delete_traditional_message(message)" class="ml-2 px-2 py-1 text-xs hover:bg-gray-100 rounded text-gray-400 hover:text-red-500 transition-colors">×</button>
+                  </div>
+                  <div class="bg-gray-200 rounded-lg px-3 py-2 max-w-xs">
+                    <div x-text="message.msg"></div>
+                  </div>
+                </div>
+              </div>
+            </template>
+            <!-- Action buttons -->
+            <div class="mt-2 mb-2 flex justify-center gap-3">
+              <button @click="open_sendbox" class="inline-flex items-center gap-2 hover:bg-blue-800 focus:ring-blue-300 rounded-lg bg-blue-700 px-4 py-2 text-center text-sm font-medium text-white focus:ring-4 min-w-[120px]">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"></path>
+                </svg>
+                {{locales["sms_send_button"]}}
+              </button>
+              <button x-show="modem_messages.length > 0" @click="confirm_clear_all_sms" class="inline-flex items-center gap-2 hover:bg-red-800 focus:ring-red-300 rounded-lg bg-red-700 px-4 py-2 text-center text-sm font-medium text-white focus:ring-4 min-w-[120px]">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+                </svg>
+                {{locales["sms_clear_all_button"]}}
+              </button>
+              <button x-show="modem_messages.length > 0" @click="download_all_messages()" class="inline-flex items-center gap-2 hover:bg-green-700 focus:ring-green-300 rounded-lg bg-green-600 px-4 py-2 text-center text-sm font-medium text-white focus:ring-4 min-w-[120px]">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                </svg>
+                {{locales["sms_download_all"]}}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="px-5 py-2" x-show="tab_page === 'modem_basic'">
+        <!-- Loading state for modem basic info -->
+        <div x-cloak x-show="modem_valid === null" class="rounded bg-blue-50 text-gray-500 p-4 flex items-center justify-center">
+          <img src="/static/loading.gif" class="h-4 w-4 mr-2" />
+          {{locales["modem_loading_info"]}}
+        </div>
+        
+        <div class="flex flex-col sm:flex-row" x-show="modem_valid !== null">
+          <table class="list-info w-full p-5 text-gray-700">
+            <tbody>
+              <tr>
+                <td>{{locales["modem_sim_number"]}}</td>
+                <td class="text-right font-semibold">
+                  <div class="flex items-center justify-end space-x-2">
+                    <!-- Display mode -->
+                    <div x-show="!editing_sim_number" class="flex items-center space-x-1">
+                      <span x-text="modem_sim_number"></span>
+                      <!-- Custom indicator badge -->
+                      <span x-show="localStorage.getItem(STORAGE_KEY_CUSTOM_SIM)" 
+                            class="inline-flex items-center px-1 py-0.5 rounded-full text-xs font-light bg-gray-100 text-gray-500"
+                            title="Custom SIM Number">
+                        {{locales["custom"]}}
+                      </span>
+                    </div>
+                    <!-- Edit mode -->
+                    <div x-show="editing_sim_number" class="flex items-center space-x-1">
+                      <input type="text" 
+                             x-model="temp_sim_number" 
+                             class="w-32 px-2 py-1 text-sm border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
+                             @keyup.enter="saveSimNumber()"
+                             @keyup.escape="cancelEditSimNumber()">
+                      <button @click="saveSimNumber()" 
+                              :disabled="loading.saveSimNumber"
+                              :class="loading.saveSimNumber ? 'p-1 text-gray-400 cursor-not-allowed rounded transition-colors duration-150' : 'p-1 text-green-600 hover:text-green-700 hover:bg-green-50 rounded transition-colors duration-150'"
+                              title="Save">
+                        <!-- Loading spinner -->
+                        <svg x-show="loading.saveSimNumber" class="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                        </svg>
+                        <!-- Save icon -->
+                        <svg x-show="!loading.saveSimNumber" class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
+                        </svg>
+                      </button>
+                      <button @click="cancelEditSimNumber()" 
+                              class="p-1 text-red-600 hover:text-red-700 hover:bg-red-50 rounded transition-colors duration-150"
+                              title="Cancel">
+                        <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                        </svg>
+                      </button>
+                    </div>
+                    <!-- Light pencil edit icon -->
+                    <button x-show="!editing_sim_number" 
+                            @click="startEditSimNumber()" 
+                            class="p-1 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded transition-colors duration-150"
+                            title="Edit SIM Number">
+                      <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path>
+                      </svg>
+                    </button>
+                    <!-- Reset to auto-detected button - only show if custom number exists -->
+                    <button x-show="!editing_sim_number && localStorage.getItem(STORAGE_KEY_CUSTOM_SIM)" 
+                            @click="resetToServerSimNumber()" 
+                            class="p-1 text-orange-400 hover:text-orange-600 hover:bg-orange-50 rounded transition-colors duration-150"
+                            title="Reset to Auto-detected Number">
+                      <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                      </svg>
+                    </button>
+                  </div>
+                </td>
+              </tr>
+              <tr>
+                <td>{{locales["modem_isp_details"]}}</td>
+                <td class="text-right font-semibold">
+                  <span class="" x-text="modem_isp_details"></span>
+                </td>
+              </tr>
+              <tr>
+                <td>{{locales["modem_network_info"]}}</td>
+                <td class="text-right font-semibold">
+                  <span class="" x-text="modem_network_info"></span>
+                </td>
+              </tr>
+              <tr>
+                <td>{{locales["cell_carrier_info"]}}</td>
+                <td class="text-right font-semibold">
+                  <span x-text="cell_carrier_info"></span>
+                </td>
+              </tr>
+              <tr>
+                <td>{{locales["modem_serving_info"]}}</td>
+                <td class="text-right font-semibold">
+                  <span class="" x-text="modem_serving_info"></span>
+                </td>
+              </tr>
+              <tr>
+                <td>{{locales["modem_cell_signals"]}}</td>
+                <td class="text-right font-semibold">
+                  <span class="" x-text="modem_cell_signals"></span>
+                </td>
+              </tr>
+              <tr>
+                <td>{{locales["modem_serving_quality"]}}</td>
+                <!-- db -->
+                <td class="text-right font-semibold">
+                  <span class="" x-text="modem_serving_quality"></span>
+                </td>
+              </tr>
+              <tr>
+                <td>{{locales["modem_imei_number"]}}</td>
+                <td class="text-right font-semibold">
+                  <span class="" x-text="modem_imei_number"></span>
+                </td>
+              </tr>
+              <tr>
+                <td>{{locales["modem_model"]}}</td>
+                <td class="text-right font-semibold">
+                  <span class="" x-text="modem_model"></span>
+                </td>
+              </tr>
+              <tr>
+                <td>{{locales["modem_firmware_version"]}}</td>
+                <td class="text-right font-semibold">
+                  <span class="" x-text="modem_firmware_version"></span>
+                </td>
+              </tr>
+              <tr>
+                <td>{{locales["modem_temperature"]}}</td>
+                <td class="text-right font-semibold">
+                  <span x-text="(modem_temperature_is_decimal && typeof modem_temperature === 'number' ? modem_temperature.toFixed(1) : modem_temperature) + '°C'"></span>
+                </td>
+              </tr>
+              <tr class="border-none">
+                <td>{{locales["modem_usbnet_mode"]}}</td>
+                <td class="text-right font-semibold">
+                  <span x-text="modem_usbnet_mode"></span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      
+      <!-- modem_adv -->
+      <div class="px-5 py-2" x-show="tab_page === 'modem_adv'">
+        <div class="flex flex-col sm:flex-row gap-4">
+          <table class="list-info w-full p-5 text-gray-700 mb-4">
+            <tbody>
+              <tr>
+                <td>{{ locales["modem_cpin"] }}</td>
+                <td class="text-right font-semibold">
+                  <div class="flex items-center justify-end space-x-4">
+                    <input x-model="modem_cpin" type="text" maxlength="4" inputmode="numeric" pattern="\d*" placeholder="NO PIN" class="w-20 text-center border rounded px-2 py-1" @input="modem_cpin = $event.target.value.replace(/[^0-9]/g, '').slice(0, 4)" />
+                  </div>
+                </td>
+              </tr>
+              <tr>
+                <td>{{locales["modem_tech_pref"]}}</td>
+                <td class="text-right font-semibold">
+                  <!-- EM05 modems: show only 4G text -->
+                  <div x-show="/EM05/i.test(modem_model)" class="flex items-center justify-end">
+                    <span class="text-gray-700">4G</span>
+                  </div>
+                  <!-- Other modems: show radio button options -->
+                  <div x-show="!/EM05/i.test(modem_model)" class="flex items-center justify-end space-x-4">
+                    <label class="inline-flex items-center">
+                      <input type="radio" x-model="modem_tech_pref" value="AUTO" onchange="onChange" />
+                      <span class="ml-1">{{locales["modem_tech_pref_auto"]}}</span>
+                    </label>
+                    <label class="inline-flex items-center">
+                      <input type="radio" x-model="modem_tech_pref" value="NR5G" onchange="onChange" />
+                      <span class="ml-1">{{locales["modem_5g_only"]}}</span>
+                    </label>
+                    <label class="inline-flex items-center">
+                      <input type="radio" x-model="modem_tech_pref" value="LTE" onchange="onChange" />
+                      <span class="ml-1">{{locales["modem_4g_only"]}}</span>
+                    </label>
+                  </div>
+                </td>
+              </tr>
+              <tr>
+                <td>{{locales["modem_roam_pref"]}}</td>
+                <td class="text-right font-semibold">
+                  <div class="flex items-center justify-end space-x-4">
+                    <label class="inline-flex items-center">
+                      <input type="radio" x-model="modem_roam_pref" value="any" />
+                      <span class="m-1">{{locales["modem_roam_pref_any"]}}</span>
+                    </label>
+                    <label class="inline-flex items-center">
+                      <input type="radio" x-model="modem_roam_pref" value="affiliated" />
+                      <span class="ml-1">{{locales["modem_roam_pref_affiliated"]}}</span>
+                    </label>
+                    <label class="inline-flex items-center" x-show="!/FM350/i.test(modem_model)">
+                      <input type="radio" x-model="modem_roam_pref" value="no" />
+                      <span class="ml-1">{{locales["modem_roam_pref_no"]}}</span>
+                    </label>
+                  </div>
+                </td>
+              </tr>
+              <tr x-show="/520|500q/i.test(modem_model)">
+                <td>Modem USB</td>
+                <td class="text-right font-semibold">
+                  <div class="flex items-center justify-end space-x-4">
+                    <label class="inline-flex items-center">
+                      <input type="radio" x-model="modem_usb_speed" value="311" />
+                      <span class="ml-1">USB 3.11 5Gbps</span>
+                    </label>
+                    <label class="inline-flex items-center">
+                      <input type="radio" x-model="modem_usb_speed" value="20" />
+                      <span class="ml-1">USB 2.0</span>
+                    </label>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <!-- 4G Bands -->
+        <div class="mt-2">
+          <div class="flex items-center justify-between mb-2">
+            <h3 class="text-gray-700">{{locales["modem_bands_pref"]}}: 4G</h3>
+
+            <!-- buttons only when data loaded and not N/A -->
+            <div x-show="policy_lte_bands.length > 0 && !policy_lte_bands.includes('N/A')" class="flex space-x-2 text-xs">
+              <button type="button" class="px-2 py-1 border rounded text-sm rounded-lg" @click="selected_lte_bands = [...policy_lte_bands]; bands_editing = true">{{locales["common_select_all"]}}</button>
+              <button type="button" class="px-2 py-1 border rounded text-sm rounded-lg" @click="selected_lte_bands = []; bands_editing = true">{{locales["common_unselect_all"]}}</button>
+            </div>
+
+            <!-- loading spinner when array empty and not N/A -->
+            <img x-show="policy_lte_bands.length === 0" src="/static/loading.gif" alt="Loading…" class="h-4 w-4" />
+          </div>
+
+          <div class="flex flex-wrap gap-2 text-xs">
+            <template x-for="band in policy_lte_bands" :key="band">
+              <label class="flex items-center space-x-1 px-2 py-1 whitespace-normal">
+                <input type="checkbox" x-model="selected_lte_bands" :value="band" x-show="band !== 'N/A'" @change="bands_editing = true" />
+                <span x-text="band" :class="band === 'N/A' ? 'text-gray-500 italic' : ''"></span>
+              </label>
+            </template>
+          </div>
+        </div>
+
+        <!-- 5G Bands -->
+        <div class="mt-6">
+          <div class="flex items-center justify-between mb-2">
+            <h3 class="text-gray-700">{{locales["modem_bands_pref"]}}: 5G</h3>
+
+            <!-- buttons only when data loaded and not N/A -->
+            <div x-show="policy_nr5g_bands.length > 0 && !policy_nr5g_bands.includes('N/A')" class="flex space-x-2 text-xs">
+              <button type="button" class="px-2 py-1 border rounded-lg text-sm" @click="selected_nr5g_bands = [...policy_nr5g_bands]; bands_editing = true">{{locales["common_select_all"]}}</button>
+              <button type="button" class="px-2 py-1 border rounded-lg text-sm" @click="selected_nr5g_bands = []; bands_editing = true">{{locales["common_unselect_all"]}}</button>
+            </div>
+
+            <!-- loading spinner when array empty and not N/A -->
+            <img x-show="policy_nr5g_bands.length === 0" src="/static/loading.gif" alt="Loading…" class="h-4 w-4" />
+          </div>
+
+          <div class="flex flex-wrap gap-2 text-xs">
+            <template x-for="band in policy_nr5g_bands" :key="band">
+              <label class="flex items-center space-x-1 px-2 py-1 whitespace-normal">
+                <input type="checkbox" x-model="selected_nr5g_bands" :value="band" x-show="band !== 'N/A'" @change="bands_editing = true" />
+                <span x-text="band" :class="band === 'N/A' ? 'text-gray-500 italic' : ''"></span>
+              </label>
+            </template>
+          </div>
+        </div>
+        <!-- Reset Confirmation Modal -->
+        <div class="modal" x-cloak x-show="modal_open">
+          <section class="modal-main w-full sm:w-1/2" @click.outside="modal_open = false">
+            <div class="flex items-start justify-between rounded-t border-b p-3">
+              <h3 class="text-base font-semibold text-gray-900 lg:text-xl">{{locales["operation_tip"]}}</h3>
+              <button type="button" class="bg-transparent ml-auto inline-flex items-center rounded-lg p-1.5 text-sm text-gray-400 hover:bg-gray-200 hover:text-gray-900" @click="modal_open = false">
+                <svg class="h-5 w-5" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
+                  <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd"></path>
+                </svg>
+              </button>
+            </div>
+            <div class="space-y-6 p-6">
+              <p>{{locales["are_you_sure_reset_modem"]}}</p>
+            </div>
+            <div class="flex items-center justify-end space-x-4 rounded-b border-t border-gray-200 p-4">
+              <button type="button" class="rounded-lg border border-gray-200 bg-white px-5 py-2.5 text-sm font-medium text-gray-500 hover:bg-gray-100 hover:text-gray-900 focus:z-10 focus:ring-4 focus:ring-gray-300" @click="modal_open = false">{{locales["common_no"]}}</button>
+              <button type="button" 
+                      :disabled="loading.resetModem"
+                      :class="loading.resetModem ? 'cursor-not-allowed bg-gray-400 rounded-lg px-5 py-2.5 text-center text-sm font-medium text-white focus:ring-4' : 'hover:bg-blue-800 focus:ring-blue-300 rounded-lg bg-blue-700 px-5 py-2.5 text-center text-sm font-medium text-white focus:ring-4'" 
+                      @click="request_reset_modem(); modal_open = false">
+                <!-- Loading spinner -->
+                <svg x-show="loading.resetModem" class="animate-spin inline h-4 w-4 mr-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                  <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                  <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                <span x-text="loading.resetModem ? 'Resetting...' : '{{locales['common_yes']}}'"></span>
+              </button>
+            </div>
+          </section>
+        </div>
+        <div class="text-right justify-end mt-6 flex flex-row gap-2">
+          <button type="button" class="bg-red-700 hover:bg-red-800 text-white px-4 py-2 rounded-lg font-semibold w-64" @click="modal_open = true">{{locales["modem_factory_reset_button"]}}</button>
+          <button type="button" 
+                  :disabled="loading.saveModemConfig"
+                  :class="loading.saveModemConfig ? 'bg-gray-400 cursor-not-allowed text-white px-4 py-2 rounded-lg font-semibold w-40' : 'bg-pcatblue hover:bg-pcatblue-400 text-white px-4 py-2 rounded-lg font-semibold w-40'"
+                  @click="request_set_modem_config">
+            <!-- Loading spinner -->
+            <svg x-show="loading.saveModemConfig" class="animate-spin inline h-4 w-4 mr-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            <span x-text="loading.saveModemConfig ? 'Saving...' : '{{locales['common_save']}}'"></span>
+          </button>
+        </div>
+      </div>
+      <!-- tab_modem_hook -->
+      <div class="px-5 py-3" x-show="tab_page === 'modem_hook'" x-data="combinedHookSettings()">
+        <!-- Sub-navigation within hook tab -->
+        <div class="mb-6">
+          <div class="border-b border-gray-200">
+            <nav class="mb-4 flex space-x-4">
+              <button @click="hookSubTab = 'script'" 
+                :class="hookSubTab === 'script' ? 'bg-pcatblue text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'" 
+                class="whitespace-nowrap py-2 px-3 rounded-xl font-medium text-sm flex items-center">
+                <img src="/static/script.svg" class="h-4 w-4 mr-2" />
+                {{locales["hook_script_tab"]}}
+              </button>
+              <button @click="hookSubTab = 'history'" 
+                :class="hookSubTab === 'history' ? 'bg-pcatblue text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'" 
+                class="whitespace-nowrap py-2 px-3 rounded-xl font-medium text-sm flex items-center">
+                <svg class="h-4 w-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                </svg>
+                {{locales["hook_history_tab"]}}
+              </button>
+            </nav>
+          </div>
+        </div>
+
+        <!-- Script Editor Section -->
+        <div x-show="hookSubTab === 'script'" class="flex flex-col gap-4">
+          <!-- Help / Warning -->
+          <p class="text-sm text-yellow-800 bg-yellow-100 p-3 rounded">{{locales["modem_hook_warning"]}}</p>
+
+          <!-- Responsibility checkbox -->
+          <label class="inline-flex items-center">
+            <input type="checkbox" x-model="hookConfirm" class="form-checkbox" />
+            <span class="ml-2 text-sm">{{locales["modem_hook_responsibility"]}}</span>
+          </label>
+
+          <!-- Enable toggle -->
+          <label class="inline-flex items-center">
+            <input type="checkbox" x-model="hookEnabled" :disabled="!hookConfirm" class="form-checkbox" />
+            <span class="ml-2 text-sm">{{locales["modem_hook_enabled"]}}</span>
+          </label>
+
+          <!-- Script editor -->
+          <textarea
+            rows="25"
+            x-model="hookScript"
+            :disabled="!hookConfirm"
+            placeholder="#!/bin/sh&#10;# Example: curl -X POST https://example.com/process.json -d 'sender=$1&amp;message=$2&amp;timestamp=$3'"
+            class="w-full p-3 font-mono text-gray-800 bg-gray-50 border border-gray-300 rounded-md text-xs placeholder-gray-400 placeholder-opacity-75 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:bg-white focus:text-black focus:placeholder-gray-300 disabled:bg-gray-100 disabled:text-gray-500 disabled:cursor-not-allowed"
+          ></textarea>
+
+          <!-- Save button -->
+          <div class="flex justify-end">
+            <button type="button" 
+                    :disabled="!hookConfirm || saveHookScriptLoading"
+                    :class="(!hookConfirm || saveHookScriptLoading) ? 'px-4 py-2 bg-gray-400 text-white rounded-lg cursor-not-allowed opacity-50' : 'px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700'"
+                    @click="saveHookScript">
+              <!-- Loading spinner -->
+              <svg x-show="saveHookScriptLoading" class="animate-spin inline h-4 w-4 mr-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+              </svg>
+              <span x-text="saveHookScriptLoading ? 'Saving...' : '{{locales['common_save']}}'"></span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Execution History Section -->
+        <div x-show="hookSubTab === 'history'">
+          <!-- Hook History Header -->
+          <div class="mb-4">
+            <h3 class="text-lg font-semibold text-gray-800 mb-2">{{locales["hook_history_title"]}}</h3>
+            <p class="text-sm text-gray-600">{{locales["hook_history_description"]}}</p>
+          </div>
+
+          <!-- Filters and Controls -->
+          <div class="bg-gray-50 p-4 rounded-lg mb-4">
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
+              <!-- Success Filter -->
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">{{locales["hook_filter_status"]}}</label>
+                <select x-model="filters.success" @change="loadHistory(1)" class="w-full p-2 border border-gray-300 rounded-md text-sm">
+                  <option value="">{{locales["hook_filter_all"]}}</option>
+                  <option value="true">{{locales["hook_filter_success_only"]}}</option>
+                  <option value="false">{{locales["hook_filter_failed_only"]}}</option>
+                </select>
+              </div>
+
+
+              <!-- Actions -->
+              <div class="flex gap-2">
+                <button @click="loadHistory(1)" class="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 text-sm flex items-center">
+                  <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                  </svg>
+                  Refresh
+                </button>
+                <button @click="testHookHistory()" class="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 text-sm">
+                  Test API
+                </button>
+                <button @click="createHookHistoryTable()" class="px-4 py-2 bg-purple-600 text-white rounded-md hover:bg-purple-700 text-sm">
+                  Create Table
+                </button>
+                <button @click="insertTestRecord()" class="px-4 py-2 bg-yellow-600 text-white rounded-md hover:bg-yellow-700 text-sm">
+                  Insert Test
+                </button>
+                <button @click="confirmCleanupHistory()" class="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 text-sm">
+                  Clean Up
+                </button>
+                <button @click="debugFilters()" class="px-4 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700 text-sm">
+                  Debug Info
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Loading State -->
+          <div x-show="loading" class="text-center py-8">
+            <img src="/static/loading.gif" class="h-8 w-8 mx-auto mb-2" />
+            <p class="text-gray-600">Loading hook history...</p>
+          </div>
+
+          <!-- Statistics Summary -->
+          <div x-show="!loading && historyData.length > 0" class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+            <div class="bg-green-50 p-4 rounded-lg">
+              <div class="text-2xl font-bold text-green-600" x-text="statistics.total"></div>
+              <div class="text-sm text-gray-600">Total Executions</div>
+            </div>
+            <div class="bg-emerald-50 p-4 rounded-lg">
+              <div class="text-2xl font-bold text-emerald-600" x-text="statistics.successful"></div>
+              <div class="text-sm text-gray-600">Successful</div>
+            </div>
+            <div class="bg-red-50 p-4 rounded-lg">
+              <div class="text-2xl font-bold text-red-600" x-text="statistics.failed"></div>
+              <div class="text-sm text-gray-600">Failed</div>
+            </div>
+            <div class="bg-blue-50 p-4 rounded-lg">
+              <div class="text-2xl font-bold text-blue-600" x-text="statistics.avgDuration + 'ms'"></div>
+              <div class="text-sm text-gray-600">Avg Duration</div>
+            </div>
+          </div>
+
+          <!-- History Table -->
+          <div x-show="!loading && historyData.length > 0" class="bg-white rounded-lg shadow overflow-hidden">
+            <div class="overflow-x-auto">
+              <table class="min-w-full divide-y divide-gray-200">
+                <thead class="bg-gray-50">
+                  <tr>
+                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Time</th>
+                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">SMS Info</th>
+                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Duration</th>
+                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Output</th>
+                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                  </tr>
+                </thead>
+                <tbody class="bg-white divide-y divide-gray-200">
+                  <template x-for="record in historyData" :key="record.id">
+                    <tr class="hover:bg-gray-50">
+                      <!-- Execution Time -->
+                      <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-900">
+                        <div x-text="formatDateTime(record.execution_start)"></div>
+                        <div class="text-xs text-gray-500" x-text="'ID: ' + record.id"></div>
+                      </td>
+
+                      <!-- Status -->
+                      <td class="px-4 py-3 whitespace-nowrap">
+                        <span x-show="record.success" class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
+                          <svg class="w-3 h-3 mr-1" fill="currentColor" viewBox="0 0 20 20">
+                            <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"></path>
+                          </svg>
+                          Success
+                        </span>
+                        <span x-show="!record.success" class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800">
+                          <svg class="w-3 h-3 mr-1" fill="currentColor" viewBox="0 0 20 20">
+                            <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd"></path>
+                          </svg>
+                          Failed
+                        </span>
+                        <div class="text-xs text-gray-500 mt-1" x-text="'Code: ' + record.return_code"></div>
+                      </td>
+
+                      <!-- SMS Info -->
+                      <td class="px-4 py-3 text-sm text-gray-900">
+                        <div class="font-medium" x-text="record.sender"></div>
+                        <div class="text-gray-500 truncate max-w-xs" x-text="record.message_content"></div>
+                        <div class="text-xs text-gray-400 mt-1" x-text="record.message_timestamp"></div>
+                      </td>
+
+                      <!-- Duration -->
+                      <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-900">
+                        <span class="font-mono" x-text="record.execution_duration_formatted"></span>
+                      </td>
+
+                      <!-- Output Preview -->
+                      <td class="px-4 py-3 text-sm text-gray-900">
+                        <div x-show="record.stdout_preview" class="mb-1">
+                          <span class="text-xs text-green-700 font-medium">STDOUT:</span>
+                          <div class="text-xs text-gray-600 font-mono bg-gray-100 p-1 rounded truncate" x-text="record.stdout_preview"></div>
+                        </div>
+                        <div x-show="record.stderr_preview" class="mb-1">
+                          <span class="text-xs text-red-700 font-medium">STDERR:</span>
+                          <div class="text-xs text-red-600 font-mono bg-red-50 p-1 rounded truncate" x-text="record.stderr_preview"></div>
+                        </div>
+                        <div x-show="record.error_message" class="text-xs text-red-600" x-text="record.error_message"></div>
+                      </td>
+
+                      <!-- Actions -->
+                      <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-900">
+                        <button @click="$dispatch('open-hook-detail', record.id)" class="text-blue-600 hover:text-blue-800 font-medium">
+                          View Details
+                        </button>
+                      </td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Pagination -->
+          <div x-show="!loading && pagination.total_pages > 1" class="mt-6 flex items-center justify-between">
+            <div class="text-sm text-gray-700">
+              Showing <span x-text="((pagination.page - 1) * pagination.limit + 1)"></span> to 
+              <span x-text="Math.min(pagination.page * pagination.limit, pagination.total)"></span> of 
+              <span x-text="pagination.total"></span> results
+            </div>
+            <div class="flex space-x-2">
+              <button @click="loadHistory(pagination.page - 1)" :disabled="!pagination.has_prev" 
+                class="px-3 py-2 border border-gray-300 rounded-md text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50">
+                Previous
+              </button>
+              <template x-for="page in getPaginationPages()" :key="page">
+                <button @click="loadHistory(page)" 
+                  :class="page === pagination.page ? 'bg-blue-600 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'"
+                  class="px-3 py-2 border border-gray-300 rounded-md text-sm font-medium">
+                  <span x-text="page"></span>
+                </button>
+              </template>
+              <button @click="loadHistory(pagination.page + 1)" :disabled="!pagination.has_next"
+                class="px-3 py-2 border border-gray-300 rounded-md text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50">
+                Next
+              </button>
+            </div>
+          </div>
+
+          <!-- No Data State -->
+          <div x-show="!loading && historyData.length === 0" class="text-center py-12">
+            <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+            </svg>
+            <h3 class="mt-2 text-sm font-medium text-gray-900">No hook execution records found</h3>
+            <p class="mt-1 text-sm text-gray-500">Hook executions will appear here after SMS messages trigger your hook script.</p>
+          </div>
+        </div>
+      </div>
+
+
+      <!--/p-5-->
+    </div>
+    <!--/grow bg-white -->
+  </div>
+  <!--/w-full grid -->
+</div>
+<!--/container.w-full-->
+
+{% endblock %} {% block bottom %}
+<script>
+  /**
+   * @param {Array<string|number>} bands
+   * @returns {string} e.g. [1,2,3] → "1:2:3"
+   */
+  function convert_bands_to_str(bands) {
+    if (!Array.isArray(bands)) return "";
+    // Handle N/A case
+    if (bands.length === 1 && bands[0] === "N/A") return "-";
+    return bands
+      .map((b) => String(b).trim()) // to string & trim
+      .filter((b) => b !== "" && b !== "N/A") // drop any empty entries and N/A
+      .join(":");
+  }
+
+  /**
+   * @param {string} str  e.g. "1:2:3"
+   * @returns {number[]} [1, 2, 3]
+   */
+  function convert_str_to_bands(str) {
+    if (typeof str !== "string" || !str) return [];
+    // Handle N/A case
+    if (str === "-") return ["N/A"];
+    return str
+      .split(":") // split on colon
+      .map((s) => s.trim()) // trim whitespace
+      .filter((s) => s !== "") // drop empties
+      .map((s) => {
+        const n = Number(s);
+        return Number.isNaN(n) ? s : n; // convert to number when valid
+      });
+  }
+
+  // SMS length calculation functions
+  const GSM7_BASIC =
+    "@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞÆæßÉ " +
+    "!\"#¤%&'()*+,-./0123456789:;<=>?¡" +
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§¿" +
+    "abcdefghijklmnopqrstuvwxyzäöñüà";
+
+  const GSM7_EXTENDED = "^{}\\[~]|€";
+  const BASIC_SET = new Set(GSM7_BASIC.split(""));
+  const EXT_SET = new Set(GSM7_EXTENDED.split(""));
+
+  function normalizeNewlines(s) {
+    return s.replace(/\r\n/g, "\r").replace(/\n/g, "\r");
+  }
+
+  function gsmSeptetLength(str) {
+    const s = normalizeNewlines(str);
+    let septets = 0;
+    for (const ch of s) {
+      if (BASIC_SET.has(ch)) {
+        septets += 1;
+      } else if (EXT_SET.has(ch)) {
+        septets += 2;
+      } else {
+        return Infinity;
+      }
+    }
+    return septets;
+  }
+
+  function ucs2UnitsLength(str) {
+    return normalizeNewlines(str).length;
+  }
+
+  function smsCount(str) {
+    // Always use GSM-7 style counting with 140 char limit
+    // GSM-7 chars = 1 unit, Extended GSM-7 chars = 2 units, Non-GSM chars = 2 units
+    const s = normalizeNewlines(str);
+    let units = 0;
+    
+    for (const ch of s) {
+      if (BASIC_SET.has(ch)) {
+        units += 1; // Regular GSM-7 character
+      } else if (EXT_SET.has(ch)) {
+        units += 2; // Extended GSM-7 character (ESC + char)
+      } else {
+        units += 2; // Non-GSM character (Chinese, emoji, etc.)
+      }
+    }
+    
+    const single = 140, concat = 134;
+    const parts = units <= single ? 1 : Math.ceil(units / concat);
+    const perPart = parts === 1 ? single : concat;
+    const usedInLast = units - (parts - 1) * perPart;
+    const remainingInPart = perPart - usedInLast;
+    
+    return { 
+      encoding: "GSM-7", 
+      length: units, 
+      parts, 
+      perPart, 
+      remainingInPart 
+    };
+  }
+
+  document.addEventListener("alpine:init", () => {
+    Alpine.data("modemSettings", (initialTech) => {
+      const norm = { AUTO: "auto", NR5G: "5g", LTE: "4g" };
+      const initial = norm[initialTech.toUpperCase()] || initialTech.toLowerCase();
+    });
+
+    Alpine.data("modemRoamPref", (initialRoamPref) => {
+      const norm = { any: "any", affiliated: "affiliated", no: "no" };
+      const initial = norm[initialRoamPref.toUpperCase()] || initialRoamPref.toLowerCase();
+    });
+
+    Alpine.data("modemUsbSpeed", (initialUsbSpeed) => {
+      const norm = { 312: "312", 311: "311", 20: "20" };
+      const initial = norm[initialUsbSpeed.toUpperCase()] || initialUsbSpeed.toLowerCase();
+    });
+
+    Alpine.data("combinedHookSettings", () => ({
+      // Sub-tab navigation
+      hookSubTab: 'script',
+      
+      // Hook script data
+      hookScript: "",
+      hookEnabled: "",
+      hookConfirm: false,
+      
+      // Hook history data
+      historyData: [],
+      loading: false,
+      saveHookScriptLoading: false,
+      pagination: { page: 1, limit: 50, total: 0, total_pages: 0, has_next: false, has_prev: false },
+      filters: { success: "" },
+      statistics: { total: 0, successful: 0, failed: 0, avgDuration: 0 },
+      debounceTimer: null,
+
+      init() {
+        // Load hook script settings
+        fetch("/api/v1/modem/hook_script.json")
+          .then((r) => r.json())
+          .then((data) => {
+            this.hookScript = data.script || "";
+            this.hookEnabled = !!data.enabled;
+          });
+        
+        // Listen for open-hook-detail events to trigger modal
+        this.$el.addEventListener('open-hook-detail', (e) => {
+          // Dispatch to the window so the modal can catch it
+          window.dispatchEvent(new CustomEvent('open-hook-detail', { detail: e.detail }));
+        });
+        
+        // Set up watcher for sub-tab changes
+        this.$watch('hookSubTab', (newTab) => {
+          console.log('hookSubTab changed to:', newTab);
+          if (newTab === 'history') {
+            console.log('Loading hook history...');
+            // Always reload history when switching to history tab
+            this.loadHistory(1);
+          }
+        });
+      },
+
+      saveHookScript() {
+        if (!this.hookConfirm) return;
+        this.saveHookScriptLoading = true;
+        fetch("/api/v1/modem/hook_script.json", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            script: this.hookScript,
+            enabled: this.hookEnabled,
+          }),
+        })
+          .then((r) => r.json())
+          .then((res) => {
+            if (res.status === "ok") {
+              this.showNotification("{{locales['alert_hook_save_success']}}", "Hook 脚本保存成功", 'success');
+            } else {
+              this.showNotification("{{locales['alert_hook_save_failed']}}: " + (res.message || "{{locales['message_unknown_error']}}"), "Hook 脚本保存失败: " + (res.message || "未知错误"), 'error');
+            }
+          })
+          .catch((error) => {
+            console.error('Error saving hook script:', error);
+            this.showNotification("{{locales['alert_hook_network_error']}}", "网络连接错误", 'error');
+          })
+          .finally(() => {
+            this.saveHookScriptLoading = false;
+          });
+      },
+      
+      // History functions
+      loadHistory(page = 1) {
+        console.log('loadHistory called with page:', page);
+        if (this.loading) {
+          console.log('Already loading, skipping...');
+          return;
+        }
+        this.loading = true;
+        
+        const params = new URLSearchParams({
+          page: page,
+          limit: this.pagination.limit,
+          success: this.filters.success || ""
+        });
+
+        const url = `/api/v1/modem/hook_history.json?${params}`;
+        console.log('Fetching hook history from:', url);
+
+        fetch(url)
+          .then(response => response.json())
+          .then(data => {
+            console.log('Hook history API response:', data);
+            if (data.status === "ok") {
+              this.historyData = data.data || [];
+              this.pagination = data.pagination || this.pagination;
+              this.calculateStatistics();
+              console.log('History data loaded:', this.historyData.length, 'records');
+            } else {
+              console.error("Failed to load hook history:", data.message);
+              this.historyData = [];
+            }
+          })
+          .catch(error => {
+            console.error("Error loading hook history:", error);
+            this.historyData = [];
+          })
+          .finally(() => {
+            this.loading = false;
+          });
+      },
+
+      debounceLoadHistory() {
+        clearTimeout(this.debounceTimer);
+        this.debounceTimer = setTimeout(() => {
+          this.loadHistory(1);
+        }, 500);
+      },
+
+      calculateStatistics() {
+        const total = this.historyData.length;
+        const successful = this.historyData.filter(item => item.success).length;
+        const failed = total - successful;
+        
+        // Calculate average duration from current page data
+        const totalDuration = this.historyData.reduce((sum, item) => {
+          return sum + (item.execution_duration_ms || 0);
+        }, 0);
+        const avgDuration = total > 0 ? Math.round(totalDuration / total) : 0;
+
+        this.statistics = { total, successful, failed, avgDuration };
+      },
+
+      getPaginationPages() {
+        const pages = [];
+        const currentPage = this.pagination.page;
+        const totalPages = this.pagination.total_pages;
+        
+        // Show up to 5 pages around current page
+        const start = Math.max(1, currentPage - 2);
+        const end = Math.min(totalPages, currentPage + 2);
+        
+        for (let i = start; i <= end; i++) {
+          pages.push(i);
+        }
+        
+        return pages;
+      },
+
+      formatDateTime(dateStr) {
+        if (!dateStr) return 'N/A';
+        try {
+          const date = new Date(dateStr);
+          return date.toLocaleDateString() + ' ' + date.toLocaleTimeString();
+        } catch (e) {
+          return dateStr;
+        }
+      },
+
+      confirmCleanupHistory() {
+        const days = prompt("Keep how many days of history? (default: 90)", "90");
+        if (days === null) return; // User cancelled
+        
+        const daysNum = parseInt(days) || 90;
+        if (confirm(`This will delete hook history older than ${daysNum} days. Are you sure?`)) {
+          this.cleanupHistory(daysNum);
+        }
+      },
+
+      cleanupHistory(days) {
+        this.loading = true;
+        fetch(`/api/v1/modem/hook_history.json?days=${days}`, {
+          method: "DELETE"
+        })
+          .then(response => response.json())
+          .then(data => {
+            if (data.status === "ok") {
+              this.showNotification(`Cleanup completed. ${data.remaining_records} records remaining.`, `清理完成。剩余 ${data.remaining_records} 条记录。`, 'success');
+              this.loadHistory(1); // Reload current page
+            } else {
+              this.showNotification("{{locales['alert_cleanup_failed']}}: " + data.message, "清理失败: " + data.message, 'error');
+            }
+          })
+          .catch(error => {
+            console.error("Error during cleanup:", error);
+            this.showNotification("{{locales['alert_cleanup_error']}}", "清理错误", 'error');
+          })
+          .finally(() => {
+            this.loading = false;
+          });
+      },
+      
+      testHookHistory() {
+        fetch('/api/v1/modem/hook_history_test.json')
+          .then(response => response.json())
+          .then(data => {
+            console.log('Hook History Test Result:', data);
+            const message = `Hook History Test Results:
+Database Path: ${data.db_path || 'N/A'}
+Total Records: ${data.total_records}
+Recent Records: ${JSON.stringify(data.recent_records, null, 2)}`;
+            this.showNotification(message, 'Hook 历史测试结果', 'info');
+          })
+          .catch(error => {
+            console.error('Test API Error:', error);
+            this.showNotification("{{locales['alert_test_api_error']}}: " + error.message, "测试 API 错误: " + error.message, 'error');
+          });
+      },
+      
+      createHookHistoryTable() {
+        if (confirm('Create the hook history database table? This is safe to run multiple times.')) {
+          fetch('/api/v1/modem/hook_history_create_table.json', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+          })
+            .then(response => response.json())
+            .then(data => {
+              if (data.status === 'ok') {
+                this.showNotification("{{locales['alert_table_create_success']}}", "数据表创建成功", 'success');
+              } else {
+                this.showNotification("{{locales['alert_table_create_failed']}}: " + data.message, "数据表创建失败: " + data.message, 'error');
+              }
+            })
+            .catch(error => {
+              console.error('Create Table Error:', error);
+              this.showNotification("{{locales['alert_table_create_error']}}: " + error.message, "数据表创建错误: " + error.message, 'error');
+            });
+        }
+      },
+      
+      insertTestRecord() {
+        fetch('/api/v1/modem/hook_history_insert_test.json', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' }
+        })
+          .then(response => response.json())
+          .then(data => {
+            if (data.status === 'ok') {
+              this.showNotification("{{locales['alert_test_record_success']}}", "测试记录插入成功", 'success');
+              this.loadHistory(1); // Auto-refresh
+            } else {
+              this.showNotification("{{locales['alert_test_record_failed']}}: " + data.message, "测试记录插入失败: " + data.message, 'error');
+            }
+          })
+          .catch(error => {
+            console.error('Insert Test Error:', error);
+            this.showNotification("{{locales['alert_test_record_error']}}: " + error.message, "测试记录错误: " + error.message, 'error');
+          });
+      },
+      
+      debugFilters() {
+        const debugInfo = `Current Debug Information:
+        
+Filter Status: "${this.filters.success}" (${typeof this.filters.success})
+History Data Length: ${this.historyData.length}
+Loading: ${this.loading}
+Pagination: ${JSON.stringify(this.pagination, null, 2)}
+
+Current Query URL would be:
+/api/v1/modem/hook_history.json?page=${this.pagination.page}&limit=${this.pagination.limit}&success=${this.filters.success || ""}
+
+Recent console logs should show more API details.`;
+        
+        console.log('=== HOOK HISTORY DEBUG INFO ===');
+        console.log('filters:', this.filters);
+        console.log('historyData.length:', this.historyData.length);
+        console.log('pagination:', this.pagination);
+        console.log('loading:', this.loading);
+        
+        this.showNotification(debugInfo, '调试信息', 'info');
+      }
+    }));
+
+    Alpine.data("hookHistoryModal", () => ({
+      modalOpen: false,
+      detail: null,
+      
+      init() {
+        // Listen for open-hook-detail events
+        this.$watch('$store.hookDetailToOpen', (historyId) => {
+          if (historyId) {
+            this.showDetail(historyId);
+            this.$store.hookDetailToOpen = null;
+          }
+        });
+        
+        // Also listen for direct events
+        window.addEventListener('open-hook-detail', (e) => {
+          this.showDetail(e.detail);
+        });
+      },
+      
+      showDetail(historyId) {
+        fetch(`/api/v1/modem/hook_history/${historyId}.json`)
+          .then(response => response.json())
+          .then(data => {
+            if (data.status === "ok") {
+              this.detail = data.data;
+              this.modalOpen = true;
+            } else {
+              this.showNotification("{{locales['alert_hook_detail_failed']}}: " + data.message, "Hook 详情加载失败: " + data.message, 'error');
+            }
+          })
+          .catch(error => {
+            console.error("Error loading hook history detail:", error);
+            this.showNotification("{{locales['alert_hook_detail_error']}}", "Hook 详情错误", 'error');
+          });
+      }
+    }));
+
+
+    Alpine.store("app").set_page("modem");
+
+    Alpine.data("adv_settings", () => ({
+      init() {
+        this.fetch_modem_basic();
+        this.fetch_sms_list();
+        
+        // Load custom SIM number from localStorage on init
+        this.loadCustomSimNumber();
+
+        setInterval(() => {
+          this.fetch_modem_basic();
+        }, 30000);
+
+        // Poll for SMS messages every 5 seconds regardless of active tab
+        setInterval(() => {
+          this.fetch_sms_list();
+        }, 5000); // Faster polling for new messages (5 seconds)
+      },
+      data_loaded: false,
+      tab_page: (function() {
+        var tabs = ["sms_inbox", "modem_basic", "modem_adv", "modem_hook"];
+        var h = window.location.hash ? window.location.hash.substring(1) : "";
+        if (tabs.includes(h)) return h;
+        try { var s = localStorage.getItem('modem_tab'); if (s && tabs.includes(s)) return s; } catch(e) {}
+        return "sms_inbox";
+      })(),
+      modal_open: false,
+      sendbox_open: false,
+      modem_config_open: false,
+      clear_sms_modal_open: false,
+      sms_check_interval: 30,
+      sms_forward: false,
+      sms_forward_to: "",
+
+      modem_valid: null, // null = checking, true = connected, false = disconnected
+      wwan_powered: true,
+      querying: false,
+      sim_state: "",
+      _fetchingBasic: false,
+      modem_sim_number: "",
+      editing_sim_number: false,
+      temp_sim_number: "",
+      
+      // localStorage constants
+      STORAGE_KEY_CUSTOM_SIM: 'pcat_custom_sim_number',
+      
+      // Notification system
+      notification: {
+        show: false,
+        message: '',
+        message_en: '',
+        message_cn: '',
+        type: 'info' // 'success', 'error', 'info'
+      },
+      
+      // Loading states for critical buttons
+      loading: {
+        saveSimNumber: false,
+        saveModemConfig: false,
+        resetModem: false,
+        saveHookScript: false
+      },
+      
+      modem_imei_number: "",
+      modem_model: "",
+      modem_firmware_version: "",
+      modem_messages: [],
+      topic_messages: [],
+      selected_message: null,
+
+      // Threading system
+      sms_view_mode: "threads", // "threads", "conversation", or "traditional"
+      sms_refreshing: false, // Track SMS refresh state for spinner animation
+      conversation_threads: {},
+      current_thread_number: "",
+      current_thread_messages: [],
+      show_all_messages: false, // Control message collapse/expand
+      thread_reply_text: "",
+
+      sms_target: "",
+      sms_text: "",
+      modem_temperature: "",
+      modem_temperature_is_decimal: false,
+      modem_isp_details: "",
+      modem_tech_pref: "",
+      modem_roam_pref: "",
+      modem_cpin: "",
+
+      modem_cell_id: "",
+      modem_network_info: "",
+      modem_cell_signals: "",
+      cell_carrier_info: "",
+      modem_usbnet_mode: "",
+      modem_usb_speed: "",
+      modem_serving_info: "",
+      modem_serving_quality: "",
+
+      policy_lte_bands: [],
+      policy_nr5g_bands: [],
+
+      selected_lte_bands: [],
+      selected_nr5g_bands: [],
+      bands_editing: false,
+
+
+      fetch_sms_list() {
+        fetch("/api/v2/sms/list.json")
+          .then((response) => response.json())
+          .then((data) => {
+            this.data_loaded = true;
+            const previousMessageCount = this.modem_messages.length;
+
+            this.modem_messages = data.msg
+              .filter((item) => {
+                // Filter out empty messages
+                const message = item.content || "";
+                return message.trim() !== "";
+              })
+              .map((item) => ({
+                // Handle both sent and received messages
+                from: item.sender || item.from, // received: sender, sent: from
+                to: item.to, // sent messages have 'to' field
+                send_at: item.timestamp || item.send_at, // received: timestamp, sent: send_at
+                msg: item.content, // both use content now
+                id: item.id, // Use database ID
+                db_id: item.id, // Store database ID explicitly
+                index: item.index, // Keep modem index for reference (received only)
+                storage: item.storage || "SM",
+                status: item.status || "",
+                direction: item.direction || 0, // sent: 1, received: 0/undefined
+                timestamp: item.timestamp || item.send_at, // unified timestamp field
+              }));
+
+            // Group messages into conversation threads
+            this.build_conversation_threads();
+
+            // If we're in a conversation view and new messages arrived, update the current thread
+            if (this.sms_view_mode === "conversation" && this.current_thread_number) {
+              if (this.conversation_threads[this.current_thread_number]) {
+                const previousThreadMessages = this.current_thread_messages.length;
+                this.current_thread_messages = this.conversation_threads[this.current_thread_number].messages;
+
+                // If new messages in current conversation, scroll to bottom
+                if (this.current_thread_messages.length > previousThreadMessages) {
+                  this.$nextTick(() => {
+                    const messagesContainer = document.querySelector(".conversation-messages");
+                    if (messagesContainer) {
+                      messagesContainer.scrollTop = messagesContainer.scrollHeight;
+                    }
+                  });
+                }
+              }
+            }
+
+            // If new messages arrived, log for debugging
+            const currentMessageCount = this.modem_messages.length;
+            if (currentMessageCount > previousMessageCount && previousMessageCount > 0) {
+              console.log("New SMS message(s) received - UI updated automatically");
+            }
+          });
+      },
+
+      build_conversation_threads() {
+        const threads = {};
+
+        this.modem_messages.forEach((message) => {
+          // Determine the phone number for threading
+          const phoneNumber = message.direction === 1 ? message.to : message.from;
+
+          if (!phoneNumber || phoneNumber === "me") return;
+
+          if (!threads[phoneNumber]) {
+            threads[phoneNumber] = {
+              phoneNumber: phoneNumber,
+              messages: [],
+              lastMessage: null,
+              messageCount: 0,
+              unreadCount: 0,
+            };
+          }
+
+          threads[phoneNumber].messages.push(message);
+          threads[phoneNumber].messageCount++;
+
+          // Count unread messages (received and unread)
+          if (message.direction !== 1 && message.status === "REC UNREAD") {
+            threads[phoneNumber].unreadCount++;
+          }
+        });
+
+        // Sort messages within each thread by timestamp and set last message
+        Object.keys(threads).forEach((phoneNumber) => {
+          const thread = threads[phoneNumber];
+
+          // Sort messages chronologically (newest first - latest on top)
+          thread.messages.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+
+          // Set last message for preview (now the first message since we're sorting newest first)
+          const lastMessage = thread.messages[0];
+          thread.lastMessage = {
+            timestamp: lastMessage.timestamp,
+            preview: (lastMessage.direction === 1 ? "You: " : "") + lastMessage.msg.substring(0, 60) + (lastMessage.msg.length > 60 ? "..." : ""),
+          };
+        });
+
+        // Sort threads by last message timestamp (newest first)
+        const sortedThreads = Object.fromEntries(Object.entries(threads).sort(([, a], [, b]) => new Date(b.lastMessage.timestamp) - new Date(a.lastMessage.timestamp)));
+
+        this.conversation_threads = sortedThreads;
+      },
+
+      // Navigation functions
+      open_thread(phoneNumber) {
+        this.current_thread_number = phoneNumber;
+        this.current_thread_messages = this.conversation_threads[phoneNumber].messages;
+        this.sms_view_mode = "conversation";
+        this.show_all_messages = false; // Reset collapse state for new conversation
+
+        // Mark messages as read when opening thread
+        this.mark_thread_as_read(phoneNumber);
+
+        // Auto-scroll to bottom after view is updated
+        this.$nextTick(() => {
+          this.scroll_to_bottom();
+        });
+      },
+
+      // Scroll conversation to bottom (like iPhone)
+      scroll_to_bottom() {
+        const messagesContainer = document.getElementById("conversation-messages");
+        if (messagesContainer) {
+          messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        }
+      },
+
+      back_to_threads() {
+        this.sms_view_mode = "threads";
+        this.current_thread_number = "";
+        this.current_thread_messages = [];
+        this.thread_reply_text = "";
+      },
+
+      confirm_delete_conversation() {
+        const confirmMsg = `确定要删除与 ${this.current_thread_number} 的所有对话吗？\n\nAre you sure you want to delete all conversations with ${this.current_thread_number}?`;
+        if (confirm(confirmMsg)) {
+          this.delete_conversation();
+        }
+      },
+
+      delete_conversation() {
+        // Delete ALL messages for the current phone number, not just visible ones
+        const phoneNumber = this.current_thread_number;
+        const allThreadMessages = this.modem_messages.filter((message) => {
+          const messagePhone = message.direction === 1 ? message.to : message.from;
+          return messagePhone === phoneNumber;
+        });
+        
+        const deletePromises = allThreadMessages.map((message) =>
+          fetch("/api/v1/sms/delete.json", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ msg_id: message.db_id || message.id }),
+          })
+        );
+
+        Promise.all(deletePromises)
+          .then(() => {
+            // Show success notification
+            this.showNotification('Conversation deleted successfully!', '对话删除成功！', 'success');
+            // Go back to threads view and refresh
+            this.back_to_threads();
+            setTimeout(() => {
+              this.fetch_sms_list();
+            }, 500);
+          })
+          .catch((error) => {
+            this.showNotification('Failed to delete conversation, please try again.', '删除对话失败，请重试。', 'error');
+          });
+      },
+
+      delete_message(message) {
+        if (confirm(`{{locales["sms_delete_confirm"]}}?`)) {
+          fetch("/api/v1/sms/delete.json", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ msg_id: message.db_id || message.id }),
+          })
+            .then((response) => response.json())
+            .then((data) => {
+              if (data.status === "ok") {
+                // Remove from current view instantly
+                const messageIndex = this.current_thread_messages.findIndex((m) => m.id === message.id);
+                if (messageIndex !== -1) {
+                  this.current_thread_messages.splice(messageIndex, 1);
+                }
+                // Refresh in background
+                setTimeout(() => {
+                  this.fetch_sms_list();
+                }, 500);
+              } else {
+                this.showNotification("{{locales['alert_delete_failed']}}", "删除失败", 'error');
+              }
+            })
+            .catch((error) => {
+              this.showNotification("{{locales['alert_network_error_delete']}}", "删除网络错误", 'error');
+            });
+        }
+      },
+
+      download_thread() {
+        // Create JSON data for the current thread
+        const threadData = {
+          phone_number: this.current_thread_number,
+          messages: this.current_thread_messages.map((msg) => ({
+            id: msg.id,
+            direction: msg.direction === 1 ? "sent" : "received",
+            from: msg.from,
+            to: msg.to,
+            content: msg.msg,
+            timestamp: msg.timestamp,
+            formatted_time: this.format_date_time ? this.format_date_time(msg.timestamp) : msg.timestamp,
+          })),
+          exported_at: new Date().toISOString(),
+          total_messages: this.current_thread_messages.length,
+        };
+
+        // Create and download the file
+        const jsonString = JSON.stringify(threadData, null, 2);
+        const blob = new Blob([jsonString], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `sms-thread-${this.current_thread_number}-${new Date().toISOString().split("T")[0]}.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      },
+
+      send_thread_reply() {
+        const message = this.thread_reply_text.trim();
+        if (!message) {
+          return; // Don't send empty messages
+        }
+
+        const smsInfo = smsCount(message);
+        if (smsInfo.parts > 1) {
+          this.showNotification(`Message too long (${smsInfo.parts} parts). Please keep to 1 SMS.`, `消息太长（${smsInfo.parts} 部分）。请保持 1 条短信。`, 'error');
+          return;
+        }
+
+        const send_message_data = JSON.stringify({
+          send_to: this.current_thread_number,
+          msg: message,
+        });
+
+        fetch("/api/v2/modem/sms/send.json", {
+          body: send_message_data,
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+        })
+          .then((response) => response.json())
+          .then((data) => {
+            if (data.status === "ok") {
+              // Create the sent message object to add instantly to UI
+              const sentMessage = {
+                id: Date.now(), // Temporary ID
+                msg: message,
+                from: "",
+                to: this.current_thread_number,
+                direction: 1, // Sent message
+                timestamp: new Date().toISOString(),
+              };
+
+              // Add the message instantly to current thread
+              this.current_thread_messages.push(sentMessage);
+
+              // Clear the reply text
+              this.thread_reply_text = "";
+
+              // Scroll to bottom after sending message (like iPhone)
+              this.$nextTick(() => {
+                this.scroll_to_bottom();
+              });
+
+              // Refresh SMS list in background to get proper server data
+              setTimeout(() => {
+                this.fetch_sms_list();
+                // Update current thread messages from refreshed data
+                if (this.current_thread_number && this.conversation_threads[this.current_thread_number]) {
+                  this.current_thread_messages = this.conversation_threads[this.current_thread_number].messages;
+                }
+              }, 1000);
+            } else {
+              this.showNotification("{{locales['alert_send_failed']}}: " + (data.message || "Unknown error"), "发送失败: " + (data.message || "未知错误"), 'error');
+            }
+          })
+          .catch((error) => {
+            this.showNotification("{{locales['alert_network_error_send']}}", "发送网络错误", 'error');
+          });
+      },
+
+      mark_thread_as_read(phoneNumber) {
+        if (this.conversation_threads[phoneNumber]) {
+          this.conversation_threads[phoneNumber].unreadCount = 0;
+          // Update message status in the original array
+          this.conversation_threads[phoneNumber].messages.forEach((message) => {
+            if (message.direction !== 1 && message.status === "REC UNREAD") {
+              message.status = "REC READ";
+            }
+          });
+        }
+      },
+
+      format_time(timestamp) {
+        if (!timestamp) return "";
+        const date = new Date(timestamp);
+        const now = new Date();
+        const diffTime = Math.abs(now - date);
+        const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+
+        if (diffDays === 0) {
+          return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        } else if (diffDays === 1) {
+          return "{{locales['yesterday']}}";
+        } else if (diffDays < 7) {
+          return date.toLocaleDateString([], { weekday: "short" });
+        } else {
+          return date.toLocaleDateString([], { month: "short", day: "numeric" });
+        }
+      },
+
+      format_date_time(timestamp) {
+        if (!timestamp) return "";
+        const date = new Date(timestamp);
+        const now = new Date();
+        const isToday = date.toDateString() === now.toDateString();
+
+        if (isToday) {
+          return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", hour12: true });
+        } else {
+          const year = date.getFullYear();
+          const month = String(date.getMonth() + 1).padStart(2, "0");
+          const day = String(date.getDate()).padStart(2, "0");
+          const time = date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", hour12: true });
+          return `${year}-${month}-${day} ${time}`;
+        }
+      },
+
+      switch_tab(tab) {
+        this.tab_page = tab;
+        this.bands_editing = false;
+        window.location.hash = tab;
+        try { localStorage.setItem('modem_tab', tab); } catch(e) {}
+      },
+
+      fetch_modem_basic() {
+        // Prevent concurrent API calls
+        if (this._fetchingBasic) {
+          return;
+        }
+        
+        this._fetchingBasic = true;
+        
+        fetch("/api/v1/modem/basic.json")
+          .then((response) => {
+            if (!response.ok) {
+              throw new Error(`HTTP ${response.status}`);
+            }
+            return response.json();
+          })
+          .then((data) => {
+            this.modem_valid = data.modem_valid;
+            this.wwan_powered = data.wwan_powered !== undefined ? data.wwan_powered : true;
+
+            // Check for locally stored custom SIM number first
+            const storedSimNumber = localStorage.getItem(this.STORAGE_KEY_CUSTOM_SIM);
+            if (storedSimNumber && storedSimNumber.trim() !== '') {
+              // Use locally stored custom SIM number
+              this.modem_sim_number = storedSimNumber;
+            } else {
+              // Use server-provided SIM number, format with + prefix and country code spacing
+              this.modem_sim_number = window.formatPhoneNumber(data.sim_number);
+            }
+
+            this.sim_state = data.sim_state;
+            this.modem_imei_number = data.imei_num;
+            this.modem_model = data.modem_model;
+            this.modem_firmware_version = data.firmware_version;
+            this.querying = data.querying;
+
+            // Prioritize decimal temperature (FM350), fall back to dict values (Qualcomm)
+            if (typeof data.modem_temperature_decimal === 'number') {
+              this.modem_temperature = data.modem_temperature_decimal;
+              this.modem_temperature_is_decimal = true;
+            } else if (typeof data.modem_temperature === 'object' && data.modem_temperature !== null) {
+              this.modem_temperature = data.modem_temperature["modem-ambient-usr"] || data.modem_temperature["board-thermal"] || "-";
+            } else {
+              this.modem_temperature = "-";
+            }
+
+            this.modem_isp_details = data.modem_isp_details;
+            this.modem_network_info = data.modem_network_info;
+            this.modem_cell_signals = data.modem_cell_signals;
+            this.modem_cell_id = data.modem_cell_id;
+            this.modem_serving_info = data.modem_serving_info;
+            this.modem_serving_quality = data.modem_serving_quality;
+            this.modem_cell_signal_details = data.modem_cell_signal_details;
+            this.cell_carrier_info = data.cell_carrier_info;
+            this.modem_usbnet_mode = data.modem_usbnet_mode;
+            this.modem_tech_pref = data.modem_tech_pref;
+            this.modem_roam_pref = data.modem_roam_pref;
+            this.modem_usb_speed = data.modem_usb_speed;
+            if (!this.bands_editing) {
+              this.policy_lte_bands = convert_str_to_bands(data.policy_lte_bands);
+              this.policy_nr5g_bands = convert_str_to_bands(data.policy_nr5g_bands);
+              this.selected_lte_bands = convert_str_to_bands(data.selected_lte_bands);
+              this.selected_nr5g_bands = convert_str_to_bands(data.selected_nr5g_bands);
+            }
+            this.modem_cpin = data.modem_cpin;
+          })
+          .catch((error) => {
+            console.error('Failed to fetch modem basic info:', error);
+            // Don't update modem_valid on error to avoid showing incorrect "未连接" state
+          })
+          .finally(() => {
+            this._fetchingBasic = false;
+          });
+      },
+
+      fetch_modem_config() {
+        fetch("/api/v1/modem/config.json")
+          .then((response) => response.json())
+          .then((data) => {
+            this.sms_check_interval = data.sms_check_interval;
+            this.sms_forward = data.sms_forward;
+            this.sms_forward_to = data.sms_forward_to;
+          });
+      },
+
+      refresh_modem_info() {
+        const requestOptions = {
+          body: JSON.stringify({ refresh: this.tab_page }),
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+        };
+        fetch("/api/v1/modem/basic.json", requestOptions)
+          .then((response) => response.json())
+          .then((data) => {});
+      },
+
+      refresh_sms_data() {
+        // Start spinning animation
+        this.sms_refreshing = true;
+        
+        // Force refresh SMS data directly from modem (bypass cache and throttling)
+        fetch("/api/v2/sms/list.json?force=true")
+          .then((response) => response.json())
+          .then((data) => {
+            this.data_loaded = true;
+            const previousMessageCount = this.modem_messages.length;
+            this.modem_messages = data.msg || [];
+            
+            // Process messages into conversation threads
+            this.process_sms_into_threads(this.modem_messages);
+            
+            const currentMessageCount = this.modem_messages.length;
+            
+            // If we're in a conversation view and new messages arrived, update the current thread
+            if (this.sms_view_mode === "conversation" && this.current_thread_number) {
+              if (this.conversation_threads[this.current_thread_number]) {
+                const previousThreadMessages = this.current_thread_messages.length;
+                this.current_thread_messages = this.conversation_threads[this.current_thread_number].messages;
+                
+                // If new messages in current thread, scroll to bottom
+                if (this.current_thread_messages.length > previousThreadMessages) {
+                  this.$nextTick(() => {
+                    this.scroll_to_bottom();
+                  });
+                }
+              }
+            }
+            
+            if (currentMessageCount > previousMessageCount && previousMessageCount > 0) {
+              console.log("Force refresh: New SMS message(s) fetched from modem");
+            }
+            
+            console.log("SMS force refresh completed - fetched directly from modem hardware");
+          })
+          .catch((error) => {
+            console.error("SMS force refresh failed:", error);
+          })
+          .finally(() => {
+            // Stop spinning after minimum visual feedback time
+            setTimeout(() => {
+              this.sms_refreshing = false;
+            }, 800);
+          });
+      },
+
+      open_sendbox() {
+        if (this.sim_state !== "ready") {
+          this.showNotification("{{locales['sim_not_available']}}", "SIM 卡不可用", 'error');
+          return;
+        }
+        this.sms_target = "";
+        this.sms_text = "";
+        this.sendbox_open = true;
+      },
+
+      open_config_modal() {
+        this.modem_config_open = true;
+        this.fetch_modem_config();
+      },
+
+      select_message(message) {
+        this.selected_message = message;
+        this.sms_target = message.from;
+        fetch("/api/v1/modem/sms/read.json", { body: JSON.stringify({ hash_id: message.hash_id, topic: message.topic }), method: "POST", headers: { "Content-Type": "application/json" } })
+          .then((response) => response.json())
+          .then((data) => {
+            this.topic_messages = data.topic_messages;
+          });
+      },
+
+      delete_sms(message) {
+        fetch("/api/v1/sms/delete.json", { body: JSON.stringify({ msg_id: message.id }), method: "POST", headers: { "Content-Type": "application/json" } })
+          .then((response) => response.json())
+          .then((data) => {
+            if (data.status === "ok") {
+              // Close the modal and refresh SMS list
+              this.selected_message = null;
+              // Refresh the SMS list to show updated data
+              this.fetch_sms_list();
+            } else {
+              console.error("Failed to delete SMS:", data.message);
+            }
+          })
+          .catch((error) => {
+            console.error("Error deleting SMS:", error);
+          });
+      },
+
+      confirm_clear_all_sms() {
+        this.clear_sms_modal_open = true;
+      },
+
+      clear_all_sms() {
+        fetch("/api/v2/sms/clear_all.json", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+        })
+          .then((response) => response.json())
+          .then((data) => {
+            if (data.status === "ok") {
+              // Clear local messages and threads
+              this.modem_messages = [];
+              this.conversation_threads = {};
+              this.selected_message = null;
+              // Return to threads view
+              this.sms_view_mode = "threads";
+              this.current_thread_number = "";
+              this.current_thread_messages = [];
+              // Refresh the SMS list from server
+              setTimeout(() => {
+                this.fetch_sms_list();
+              }, 2000);
+            } else {
+              this.showNotification('{{locales["alert_clear_sms_failed"]}}: ' + (data.message || "Unknown error"), "清除短信失败: " + (data.message || "未知错误"), 'error');
+            }
+          })
+          .catch((error) => {
+            this.showNotification('{{locales["alert_network_error_clear"]}}', "清除网络错误", 'error');
+          });
+      },
+
+      delete_traditional_message(message) {
+        if (confirm(`{{locales["sms_delete_confirm"]}}?`)) {
+          fetch("/api/v1/sms/delete.json", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ msg_id: message.db_id || message.id }),
+          })
+            .then((response) => response.json())
+            .then((data) => {
+              if (data.status === "ok") {
+                // Remove from traditional view instantly
+                const messageIndex = this.modem_messages.findIndex((m) => m.id === message.id);
+                if (messageIndex !== -1) {
+                  this.modem_messages.splice(messageIndex, 1);
+                }
+                // Rebuild conversation threads to keep them in sync
+                this.build_conversation_threads();
+              } else {
+                this.showNotification("{{locales['alert_delete_failed']}}", "删除失败", 'error');
+              }
+            })
+            .catch((error) => {
+              this.showNotification("{{locales['alert_network_error_delete']}}", "删除网络错误", 'error');
+            });
+        }
+      },
+
+      download_all_messages() {
+        // Create comprehensive JSON export of all messages
+        const exportData = {
+          export_info: {
+            exported_at: new Date().toISOString(),
+            total_messages: this.modem_messages.length,
+            total_threads: Object.keys(this.conversation_threads).length,
+            export_format: "SMS_BACKUP_v1.0",
+          },
+          all_messages: this.modem_messages.map((msg) => ({
+            id: msg.id,
+            direction: msg.direction === 1 ? "sent" : "received",
+            from: msg.from,
+            to: msg.to,
+            content: msg.msg,
+            timestamp: msg.timestamp,
+            formatted_time: this.format_date_time ? this.format_date_time(msg.timestamp) : msg.timestamp,
+            db_id: msg.db_id,
+          })),
+          conversation_threads: Object.entries(this.conversation_threads).map(([phoneNumber, thread]) => ({
+            phone_number: phoneNumber,
+            message_count: thread.messageCount,
+            unread_count: thread.unreadCount,
+            last_message: {
+              content: thread.lastMessage.preview,
+              timestamp: thread.lastMessage.timestamp,
+              formatted_time: this.format_time ? this.format_time(thread.lastMessage.timestamp) : thread.lastMessage.timestamp,
+            },
+            messages: thread.messages.map((msg) => ({
+              id: msg.id,
+              direction: msg.direction === 1 ? "sent" : "received",
+              content: msg.msg,
+              timestamp: msg.timestamp,
+              formatted_time: this.format_date_time ? this.format_date_time(msg.timestamp) : msg.timestamp,
+            })),
+          })),
+        };
+
+        // Create and download the file
+        const jsonString = JSON.stringify(exportData, null, 2);
+        const blob = new Blob([jsonString], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `sms-backup-all-${new Date().toISOString().split("T")[0]}.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      },
+
+      get sms_message_length_info() {
+        if (!this.sms_text) return "0 / 140";
+        const count = smsCount(this.sms_text);
+        return `${count.length} / ${count.perPart}${count.parts > 1 ? ` (${count.parts} parts)` : ''}`;
+      },
+
+      // iPhone-style message sorting (newest at bottom)
+      get sorted_thread_messages() {
+        return [...this.current_thread_messages].sort((a, b) => {
+          const timeA = new Date(a.timestamp || a.send_at || 0);
+          const timeB = new Date(b.timestamp || b.send_at || 0);
+          return timeA - timeB; // Ascending order (oldest first, newest at bottom)
+        });
+      },
+
+      // Messages to display (with collapse functionality)
+      get displayed_thread_messages() {
+        if (this.show_all_messages || this.sorted_thread_messages.length <= 10) {
+          return this.sorted_thread_messages;
+        }
+        // Show only last 10 messages when collapsed
+        return this.sorted_thread_messages.slice(-10);
+      },
+
+      send_sms() {
+        const reg = /^\+?[0-9]{3,20}$/;
+        if (!this.sms_target.match(reg)) {
+          this.showNotification("{{locales['alert_number_invalid']}}", "电话号码无效", 'error');
+          return;
+        }
+        this.sms_text = this.sms_text.trim();
+        const smsInfo = smsCount(this.sms_text);
+        if (smsInfo.parts > 1) {
+          this.showNotification(`Message too long (${smsInfo.parts} parts). Please keep to 1 SMS.`, `消息太长（${smsInfo.parts} 部分）。请保持 1 条短信。`, 'error');
+          return;
+        }
+        const send_message_data = JSON.stringify({ send_to: this.sms_target, msg: this.sms_text });
+        fetch("/api/v2/modem/sms/send.json", { body: send_message_data, method: "POST", headers: { "Content-Type": "application/json" } })
+          .then((response) => response.json())
+          .then((data) => {
+            if (data.status === "ok") {
+              setTimeout(() => {
+                this.sms_target = "";
+                this.sms_text = "";
+                this.sendbox_open = false;
+                this.selected_message = null;
+                // Refresh SMS list to include the sent message
+                this.fetch_sms_list();
+              }, 3000);
+            } else {
+              this.showNotification("{{locales['alert_send_failed_simple']}}", "发送失败", 'error');
+            }
+          });
+      },
+
+      save_modem_config() {
+        const reg = /^\+?[0-9]{3,20}$/;
+        if (this.sms_check_interval < 5) {
+          this.showNotification("{{locales['alert_check_interval_invalid']}}", "检查间隔无效", 'error');
+          return;
+        }
+        if (this.sms_forward) {
+          if (!this.sms_forward_to.match(reg)) {
+            this.showNotification("{{locales['alert_number_invalid']}}", "电话号码无效", 'error');
+            return;
+          }
+        }
+
+        let config = JSON.stringify({ sms_check_interval: this.sms_check_interval, sms_forward: this.sms_forward, sms_forward_to: this.sms_forward_to });
+        fetch("/api/v1/modem/config.json", { body: config, method: "POST", headers: { "Content-Type": "application/json" } })
+          .then((response) => response.json())
+          .then((data) => {
+            if (data.status === "ok") {
+              this.showNotification("{{locales['save_action_success']}}", "保存成功", 'success');
+              this.modem_config_open = false;
+            } else {
+              this.showNotification(data.message, data.message, 'error');
+            }
+          });
+      },
+
+      request_reset_modem() {
+        this.loading.resetModem = true;
+        fetch("/api/v2/modem/reset.json", { method: "POST", headers: { "Content-Type": "application/json" } })
+          .then((response) => response.json())
+          .then((data) => {
+            if (data.status === "ok") {
+              this.showNotification("{{locales['alert_modem_reset_success']}}", "调制解调器重置成功", 'success');
+            } else {
+              this.showNotification(`Modem reset failed: ${data.message}`, `调制解调器重置失败：${data.message}`, 'error');
+            }
+          })
+          .catch((error) => {
+            console.error('Error resetting modem:', error);
+            this.showNotification("{{locales['alert_modem_reset_failed']}}", "调制解调器重置失败", 'error');
+          })
+          .finally(() => {
+            this.loading.resetModem = false;
+          });
+      },
+
+      request_set_modem_config() {
+        this.modal_open = false;
+        this.bands_editing = false;
+        if (this.modem_cpin !== "" && !/^\d{1,4}$/.test(this.modem_cpin)) {
+          this.showNotification("{{locales['alert_cpin_invalid']}}", "CPIN 无效", 'error');
+          return;
+        }
+        this.loading.saveModemConfig = true;
+        post_data = {
+          modem_cpin: this.modem_cpin,
+          modem_tech_pref: this.modem_tech_pref,
+          modem_roam_pref: this.modem_roam_pref,
+          modem_usb_speed: this.modem_usb_speed,
+          desired_lte_bands: convert_bands_to_str(this.selected_lte_bands),
+          desired_nr5g_bands: convert_bands_to_str(this.selected_nr5g_bands),
+        };
+        const requestOptions = {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(post_data),
+        };
+        fetch("/api/v2/modem_advanced.json", requestOptions)
+          .then((response) => response.json())
+          .then((data) => {
+            if (data.status === "ok") {
+              this.saving_network = true;
+
+              setTimeout(() => {
+                this.saving_network = false;
+                this.loading.saveModemConfig = false;
+
+                setTimeout(() => {
+                  this.showNotification("{{locales['common_save_success']}}", "配置保存成功", 'success');
+                }, 1);
+              }, 6000);
+            } else {
+              this.loading.saveModemConfig = false;
+              this.showNotification(data.message, data.message, 'error');
+            }
+          })
+          .catch((error) => {
+            this.loading.saveModemConfig = false;
+            console.error('Error saving modem config:', error);
+            this.showNotification("{{locales['save_action_failed'] if locales['save_action_failed'] else 'Failed to save modem configuration'}}", "配置保存失败", 'error');
+          });
+      },
+
+      // localStorage helper functions for SIM number persistence
+      loadCustomSimNumber() {
+        try {
+          const storedSimNumber = localStorage.getItem(this.STORAGE_KEY_CUSTOM_SIM);
+          if (storedSimNumber && storedSimNumber.trim() !== '') {
+            // If we have a stored custom SIM number, use it immediately
+            this.modem_sim_number = window.formatPhoneNumber(storedSimNumber);
+          }
+        } catch (error) {
+          console.error('Error loading custom SIM number from localStorage:', error);
+        }
+      },
+
+      saveCustomSimNumberLocally(simNumber) {
+        try {
+          if (simNumber && simNumber.trim() !== '') {
+            localStorage.setItem(this.STORAGE_KEY_CUSTOM_SIM, simNumber.trim());
+            console.log('Saved custom SIM number to localStorage:', simNumber);
+          } else {
+            localStorage.removeItem(this.STORAGE_KEY_CUSTOM_SIM);
+            console.log('Removed custom SIM number from localStorage');
+          }
+        } catch (error) {
+          console.error('Error saving custom SIM number to localStorage:', error);
+        }
+      },
+
+      clearCustomSimNumberLocally() {
+        try {
+          localStorage.removeItem(this.STORAGE_KEY_CUSTOM_SIM);
+          console.log('Cleared custom SIM number from localStorage');
+        } catch (error) {
+          console.error('Error clearing custom SIM number from localStorage:', error);
+        }
+      },
+
+      // SIM Number editing functions
+      startEditSimNumber() {
+        this.editing_sim_number = true;
+        this.temp_sim_number = this.modem_sim_number;
+        // Focus the input field after Alpine updates the DOM
+        this.$nextTick(() => {
+          const input = document.querySelector('input[x-model="temp_sim_number"]');
+          if (input) {
+            input.focus();
+            input.select();
+          }
+        });
+      },
+
+      cancelEditSimNumber() {
+        this.editing_sim_number = false;
+        this.temp_sim_number = "";
+      },
+
+      async saveSimNumber() {
+        if (!this.temp_sim_number || this.temp_sim_number.trim() === "") {
+          this.showNotification("{{locales['alert_number_invalid'] if locales['alert_number_invalid'] else 'Invalid phone number'}}", "电话号码无效", 'error');
+          return;
+        }
+
+        // Basic phone number validation
+        const phoneRegex = /^\+?[0-9\s\-\(\)]{10,20}$/;
+        if (!phoneRegex.test(this.temp_sim_number.trim())) {
+          this.showNotification("{{locales['alert_number_invalid'] if locales['alert_number_invalid'] else 'Invalid phone number format'}}", "电话号码格式无效", 'error');
+          return;
+        }
+
+        this.loading.saveSimNumber = true;
+        try {
+          const response = await fetch('/api/v1/modem/sim_number.json', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              sim_number: this.temp_sim_number.trim()
+            })
+          });
+
+          const data = await response.json();
+          
+          if (data.status === 'ok' || data.success) {
+            const newSimNumber = this.temp_sim_number.trim();
+            this.modem_sim_number = window.formatPhoneNumber(newSimNumber);
+            this.editing_sim_number = false;
+            this.temp_sim_number = "";
+            
+            // Save to localStorage for local persistence
+            this.saveCustomSimNumberLocally(newSimNumber);
+            
+            // Show success message
+            this.showNotification("{{locales['save_action_success'] if locales['save_action_success'] else 'SIM number updated successfully'}}", "SIM 卡号更新成功", 'success');
+            
+            // Optionally refresh the modem basic info
+            this.fetch_modem_basic();
+          } else {
+            this.showNotification(data.message || data.error || "{{locales['save_action_failed'] if locales['save_action_failed'] else 'Failed to update SIM number'}}", "SIM 卡号更新失败", 'error');
+          }
+        } catch (error) {
+          console.error('Error updating SIM number:', error);
+          this.showNotification("{{locales['save_action_failed'] if locales['save_action_failed'] else 'Failed to update SIM number'}}", "SIM 卡号更新失败", 'error');
+        } finally {
+          this.loading.saveSimNumber = false;
+        }
+      },
+
+      // Reset SIM number to server-provided value
+      async resetToServerSimNumber() {
+        if (!confirm("Reset SIM number to auto-detected value? This will remove your custom number.")) {
+          return;
+        }
+
+        try {
+          // Clear localStorage
+          this.clearCustomSimNumberLocally();
+
+          // Refresh from server to get the auto-detected number
+          await this.fetch_modem_basic();
+
+          this.showNotification(
+            "SIM number reset to auto-detected value",
+            "SIM 卡号已重置为自动检测值",
+            'success'
+          );
+        } catch (error) {
+          console.error('Error resetting SIM number:', error);
+          this.showNotification(
+            "{{locales['save_action_failed'] if locales['save_action_failed'] else 'Failed to reset SIM number'}}",
+            "重置 SIM 卡号失败",
+            'error'
+          );
+        }
+      },
+
+      // Notification system functions
+      showNotification(message_en, message_cn = '', type = 'info') {
+        this.notification.message_en = message_en;
+        this.notification.message_cn = message_cn;
+        this.notification.message = message_en; // Fallback
+        this.notification.type = type;
+        this.notification.show = true;
+        
+        // Auto-hide after 4 seconds for success and info messages
+        if (type !== 'error') {
+          setTimeout(() => {
+            this.notification.show = false;
+          }, 4000);
+        }
+        
+        // Also log to console for debugging
+        console.log(type.toUpperCase() + ': ' + message_en);
+      },
+
+      hideNotification() {
+        this.notification.show = false;
+      },
+    }));
+  });
+</script>
+
+<script defer>
+  document.addEventListener("alpine:init", () => {
+  });
+</script>
+{% endblock %}

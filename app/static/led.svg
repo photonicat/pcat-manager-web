@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <!-- LED bulb body -->
+  <circle cx="12" cy="14" r="4" fill="#FDE021" stroke="#00274D" stroke-width="1.5"/>
+  <!-- LED base/socket -->
+  <rect x="10" y="18" width="4" height="3" fill="#666" stroke="#333" stroke-width="1"/>
+  <!-- LED pins -->
+  <line x1="9" y1="21" x2="7" y2="21" stroke="#666" stroke-width="1.5"/>
+  <line x1="15" y1="21" x2="17" y2="21" stroke="#666" stroke-width="1.5"/>
+  <!-- Light rays -->
+  <path d="M12 6 L12 2" stroke="#FDE021" stroke-width="2"/>
+  <path d="M18.36 8.64 L21.07 5.93" stroke="#FDE021" stroke-width="2"/>
+  <path d="M21 14 L17 14" stroke="#FDE021" stroke-width="2"/>
+  <path d="M18.36 19.36 L21.07 22.07" stroke="#FDE021" stroke-width="2"/>
+  <path d="M5.64 8.64 L2.93 5.93" stroke="#FDE021" stroke-width="2"/>
+  <path d="M3 14 L7 14" stroke="#FDE021" stroke-width="2"/>
+  <path d="M5.64 19.36 L2.93 22.07" stroke="#FDE021" stroke-width="2"/>
+</svg>

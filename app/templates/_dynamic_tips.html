@@ -1,0 +1,14 @@
+<!-- Dynamic tip from web -->
+<div class="mb-8 text-gray-400 text-sm h-5 relative">
+  <div x-cloak 
+       x-show="$store.app.tips !== ''" 
+       x-transition:enter="transition ease-out duration-300"
+       x-transition:enter-start="opacity-0"
+       x-transition:enter-end="opacity-100"
+       x-transition:leave="transition ease-in duration-200"
+       x-transition:leave-start="opacity-100"
+       x-transition:leave-end="opacity-0"
+       class="absolute inset-0">
+    💡 <span x-text="$store.app.tips"></span>
+  </div>
+</div>

@@ -1,0 +1,4 @@
+app/static/
+app/**/*.py
+*.json
+*.yml

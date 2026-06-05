@@ -1,0 +1,633 @@
+{% extends '_base.html' %} {% block content %}
+<div class="container mx-auto w-full pt-10 pb-12 sm:pt-24 sm:pb-12 md:pt-28 lg:px-4">
+  <div class="flex items-center justify-between">
+    <h1 class="px-1 py-4 font-bold uppercase text-gray-600">{{locales["nav_dashboard"]}}</h1>
+  </div>
+  
+  <div x-data="dashboard" class="mb-8 grid w-full grid-cols-1 gap-4 px-2 leading-normal text-gray-800 md:grid-cols-2 md:px-0">
+    <div class="grow rounded border bg-white shadow">
+      <div class="flex justify-between border-b py-2 px-3">
+        <h5 class="font-bold text-gray-600">{{locales["card_main_status"]}}</h5>
+      </div>
+      <div class="px-4 pt-1.5 pb-1">
+        <table class="list-info w-full text-gray-700">
+          <tbody>
+            <!--<tr>
+              <td width="120">{{locales["connection"]}}</td>
+              <td class="text-right font-semibold text-green-600" >
+                <span class="mr-2" x-text="connection_name"></span>
+                <span class="" x-text="carrier_name"></span>
+              </td>
+            </tr>-->
+            <!-- WAN rows: active connection shown first -->
+            <!-- Cellular WAN (shown first when mobile is active) -->
+            <template x-if="connection === 'mobile'">
+              <tr>
+                <td>
+                  {{locales["wan_cellular"]}}<span x-show="wwan_powered" class="ml-1 text-xs text-green-600">🟢</span>
+                </td>
+                <td class="text-right font-semibold" :class="wwan_powered ? 'text-green-600' : 'text-gray-500'">
+                  <span x-show="!wwan_powered" class="text-gray-500">{{locales["wwan_powered_off"]}}</span>
+                  <span x-show="wwan_powered && !sim_interface_enabled"></span>
+                  <span x-show="wwan_powered && sim_interface_enabled && (carrier === '' || carrier === 'none')" x-text="'{{locales['connected']}}'"></span>
+                  <span x-show="wwan_powered && sim_interface_enabled && carrier !== '' && carrier !== 'none'" :title="'{{locales['signal_strength_tooltip']}}'" class="cursor-help">
+                    <span x-text="carrier" class="mr-2"></span>
+                    <span x-text="enhanced_operator_name" class="mr-2" x-show="enhanced_operator_name"></span>
+                    <span x-text="modem_signal_strength + '%'" x-show="modem_signal_strength && modem_signal_strength > 0"></span>
+                  </span>
+                </td>
+              </tr>
+            </template>
+            <!-- Ethernet WAN -->
+            <tr>
+              <td>
+                {{locales["wan_ethernet"]}}
+                <span x-show="isWanEthernetConnected()" class="ml-1 text-xs text-green-600">🟢</span>
+              </td>
+              <td class="text-right font-semibold" :class="{'text-green-600': isWanEthernetConnected(), 'text-gray-500': !isWanEthernetConnected()}">
+                <span x-text="getWanEthernetStatus()"></span>
+              </td>
+            </tr>
+            <!-- Cellular WAN (shown after ethernet when not active) -->
+            <template x-if="connection !== 'mobile'">
+              <tr>
+                <td>{{locales["wan_cellular"]}}</td>
+                <td class="text-right font-semibold">
+                  <span x-show="!wwan_powered" class="text-gray-500">{{locales["wwan_powered_off"]}}</span>
+                  <span x-show="wwan_powered && !sim_interface_enabled"></span>
+                  <span x-show="wwan_powered" :title="'{{locales['signal_strength_tooltip']}}'" class="cursor-help">
+                    <span x-text="carrier" class="mr-2"></span>
+                    <span x-text="enhanced_operator_name" class="mr-2" x-show="enhanced_operator_name"></span>
+                    <span x-text="modem_signal_strength + '%'" x-show="modem_signal_strength && modem_signal_strength > 0"></span>
+                  </span>
+                </td>
+              </tr>
+            </template>
+            <!-- LAN Ethernet Interface -->
+            <tr x-show="lan_interface_enabled" class="order-3">
+              <td>
+                {{locales["lan_ethernet"]}}<span x-show="isLanEthernetConnected()" class="ml-1 text-xs text-green-600">🟢</span>
+              </td>
+              <td class="text-right font-semibold" :class="{'text-green-600': isLanEthernetConnected(), 'text-gray-500': !isLanEthernetConnected()}">
+                <span x-text="getLanEthernetStatus()"></span>
+              </td>
+            </tr>
+            <tr>
+              <td class="w-36 sm:w-40">{{locales["dl_up_speed"]}}</td>
+              <td class="text-right">
+                <div class="flex items-center justify-end gap-2 font-semibold">
+                  <span x-show="up_speed_value !== ''" class="text-red-600">▲</span>
+                  <span x-text="up_speed_value"></span>
+                  <span x-show="up_speed_value !== '' && down_speed_value !== ''"> / </span>
+                  <span x-show="down_speed_value !== ''" class="text-blue-700">▼</span>
+                  <span x-text="down_speed_value"></span>
+                </div>
+              </td>
+            </tr>
+            <tr class="border-white md:border-b md:border-gray-200">
+              <td>{{locales["uptime"]}}</td>
+              <td class="text-right font-semibold" x-text="uptime"></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="grow rounded border bg-white shadow">
+      <div class="flex justify-between border-b py-2 px-3">
+        <h5 class="font-bold text-gray-600">{{locales["card_system"]}}</h5>
+      </div>
+      <div class="px-4 pt-1.5 pb-1">
+        <table class="list-info w-full p-5 text-gray-700">
+          <tbody>
+            <tr>
+              <td width="100">{{locales["hostname"]}}</td>
+              <td class="text-right font-semibold" x-text="hostname"></td>
+            </tr>
+            <tr>
+              <td>{{locales["model"]}}</td>
+              <td class="text-right font-semibold" >
+                <div class="flex justify-end">
+                  <div x-text="model"></div>
+                  <div x-show="modem_model !== ''" class="ml-2">(<span x-text="modem_model"></span>)</div>
+                </div>
+              </td>
+            </tr>
+            <tr>
+              <td>{{locales["kernel_version"]}}</td>
+              <td class="text-right font-semibold" x-text="kernel"></td>
+            </tr>
+            <tr>
+              <td width="130">{{locales["openwrt_version"]}}</td>
+              <td class="text-right font-semibold" x-text="format_openwrt_version(openwrt_version)"></td>
+            </tr>
+            <tr>
+              <td>{{locales["firmware_version"]}}</td>
+              <td class="text-right font-semibold" x-text="firmware_version"></td>
+            </tr>
+            <tr class="border-none">
+              <td>{{locales["machine_sn"]}}</td>
+              <td class="text-right font-semibold">
+                <span x-text="machine_sn"></span>
+                <span x-show="machine_sn && machine_sn !== 'DEV-UNKNOWN' && machine_sn !== 'N/A'" x-cloak>
+                  <span x-show="machine_sn_verified" class="ml-1 text-xs text-green-600" title="Verified">&#10003;</span>
+                  <span x-show="!machine_sn_verified" class="ml-1 text-xs text-red-500" title="Invalid signature">(invalid)</span>
+                </span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="grow rounded border bg-white shadow">
+      <div class="flex justify-between border-b py-2 px-3">
+        <h5 class="font-bold text-gray-600">{{locales["card_connection"]}}</h5>
+      </div>
+      <div class="px-4 pt-1.5 pb-1">
+        <table class="list-info w-full p-5 text-gray-700">
+          <tbody>
+            <tr>
+              <td>{{locales["ip_address"]}}</td>
+              <td class="text-right font-semibold" x-text="wan_ip"></td>
+            </tr>
+            <tr x-show="wan_ipv6">
+              <td>{{locales["ipv6_address"]}}</td>
+              <td class="text-right font-semibold text-xs break-all" x-text="wan_ipv6"></td>
+            </tr>
+            <tr>
+              <td>{{locales["wan_ip"]}}</td>
+              <td class="text-right font-semibold" x-text="local_wan_ip"></td>
+            </tr>
+            <tr>
+              <td>{{locales["dhcp_clients"]}}</td>
+              <td class="text-right font-semibold" x-text="dhcp_clients_count"></td>
+            </tr>
+            <tr>
+              <td>{{locales["wifi_clients"]}}</td>
+              <td class="text-right font-semibold" x-text="wifi_clients_count"></td>
+            </tr>
+            <template x-for="(wifi_interface, wifi_idx) in wifi_interfaces">
+            <tr :class="{ '!border-b-0': wifi_idx === wifi_interfaces.length - 1 }">
+              <td><span x-text="getDeviceTypeTranslation(wifi_interface.device_type)"></span> {{locales["wifi"]}}</td>
+              <td class="text-right font-semibold text-gray-400">
+                <div class="flex items-center justify-end" >
+                  <span x-text="wifi_interface.ssid"></span>
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4 ml-2">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M12.75 19.5v-.75a7.5 7.5 0 00-7.5-7.5H4.5m0-6.75h.75c7.87 0 14.25 6.38 14.25 14.25v.75M6 18.75a.75.75 0 11-1.5 0 .75.75 0 011.5 0z" />
+                  </svg>
+                </div>
+              </td>
+            </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="grow rounded border bg-white shadow">
+      <div class="flex justify-between border-b py-2 px-3">
+        <h5 class="font-bold text-gray-600">{{locales["card_hardware"]}}</h5>
+      </div>
+      <div class="px-4 pt-1.5 pb-1">
+        <table class="list-info w-full p-5 text-gray-700">
+          <tbody>
+            <tr>
+              <td>{{locales["battery_status"]}}</td>
+              <td class="flex justify-end text-right font-semibold">
+                <div x-html="charge_percent_status"></div>
+                <div class="ml-2" x-html="battery_charging_status"></div>
+              </td>
+            </tr>
+            <tr>
+              <td>
+                {% if board_name == "photonicat2" %}
+                  {{ locales["battery_vcw"] }}
+                {% else %}
+                  {{ locales["battery_voltage"] }}
+                {% endif %}
+              </td>
+              <td x-cloak class="text-right font-semibold" x-text="voltage_status"></td>
+            </tr>
+            <tr>
+              <td>{{locales["charge_voltage"]}}</td>
+              <td x-cloak class="text-right font-semibold" x-text="charge_voltage_status"></td>
+            </tr>
+            {% if board_name == "photonicat2" %}
+            <tr>
+              <td x-text="on_charging ? '{{locales['battery_remaining_charge_time']}}' : '{{locales['battery_remaining_discharge_time']}}'"></td>
+              <td class="text-right font-semibold" x-text="battery_remaining_time == null ? '-' : battery_remaining_time"></td>
+            </tr>
+            {% endif %}
+            <tr>
+              <td>{{locales["board_temperature"]}}</td>
+              <td class="text-right font-semibold" x-text="board_temperature == null ? '-' : `${board_temperature} °C`"></td>
+            </tr>
+            <tr>
+              <td>{{locales["sd_card"]}}</td>
+              <td class="text-right font-semibold text-gray-400">
+                <div x-cloak x-show="sd_state === 0" class="flex justify-end">{{locales["sd_not_exist"]}}</div>
+                <div x-cloak x-show="sd_state === 1" class="flex justify-end">{{locales["sd_exist"]}}</div>
+              </td>
+            </tr>
+            <tr class="border-none">
+              <td>{{locales["sim_card"]}}</td>
+              <td class="text-right font-semibold text-gray-400">
+                <div x-cloak x-show="!sim_ccid && !sim_cimi" class="flex justify-end">{{locales["sim_not_available"]}}</div>
+                <div x-show="sim_ccid || sim_cimi" class="text-right font-semibold">
+                  <div x-text="formatPhoneNumber(sim_number)" x-show="sim_number"></div>
+                  <div x-show="!sim_number" class="text-gray-500">{{locales["sd_exist"]}}</div>
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %} {% block bottom %}
+<script>
+  document.addEventListener("alpine:init", () => {
+    Alpine.store("app").set_page("index");
+    Alpine.data("dashboard", () => ({
+      fetchStatus() {
+        // Use shared dashboard service
+        window.DashboardService.fetchDashboard()
+          .then((data) => {
+            this.connection = data.connection;
+            this.server_location = data.server_location;
+            this.down_speed = data.down_speed;
+            this.up_speed = data.up_speed;
+            this.uptime = data.uptime;
+            this.wan_interface_enabled = data.wan_interface_enabled;
+            this.wan_carrier = data.wan_carrier;
+            this.sim_interface_enabled = data.sim_interface_enabled;
+            this.wwan_powered = data.wwan_powered !== undefined ? data.wwan_powered : true;
+            this.wan_ethernet_speed = data.wan_ethernet_speed;
+            this.lan_interface_enabled = data.lan_interface_enabled;
+            this.lan_carrier = data.lan_carrier;
+            this.lan_ethernet_speed = data.lan_ethernet_speed;
+
+            this.hostname = data.hostname;
+            this.model = data.model;
+            this.openwrt_version = data.openwrt_version;
+            this.firmware_version = data.firmware_version;
+            this.kernel = data.kernel;
+            this.modem_model = data.modem_model;
+            this.machine_sn = data.machine_sn;
+            this.machine_sn_verified = data.machine_sn_verified || false;
+
+            this.wan_ip = data.wan_ip;
+            this.wan_ipv6 = data.wan_ipv6 || "";
+            this.local_wan_ip = data.local_wan_ip;
+            this.carrier = data.carrier;
+            this.dhcp_clients_count = data.dhcp_clients_count;
+            this.wifi_clients_count = data.wifi_clients_count;
+            this.wifi_interfaces = data.wifi_interfaces;
+
+            this.on_charging = data.on_charging;
+            this.charge_percent = data.charge_percent;
+            this.voltage = data.battery_voltage_v ?? data.voltage;
+            this.charge_voltage = data.charge_voltage;
+            this.battery_current = data.battery_current_a ?? data.battery_current;
+            this.battery_wattage = data.battery_wattage_w ?? data.battery_wattage;
+            this.board_temperature = data.board_temperature;
+            this.battery_remaining_time = data.battery_remaining_time;
+            this.sd_state = data.sd_state;
+            this.sim_state = data.sim_state;
+            this.sim_ccid = data.sim_ccid || '';
+            this.sim_cimi = data.sim_cimi || '';
+            this.sim_number = data.sim_number || '';
+            this.isp_name = data.isp_name;
+            this.modem_signal_strength = data.modem_signal_strength;
+            
+            // Store cell MCC/MNC for client-side lookup
+            this.cell_mccmnc = data.cell_mccmnc || '';
+            
+            // Store enhanced ISP information from dashboard
+            this.enhanced_isp_available = data.enhanced_isp_available || false;
+            this.enhanced_isp_full = data.enhanced_isp_full || '';
+            this.enhanced_isp_full_cn = data.enhanced_isp_full_cn || '';
+            this.enhanced_isp_full_en = data.enhanced_isp_full_en || '';
+            this.enhanced_isp_country = data.enhanced_isp_country || '';
+            this.enhanced_isp_bilingual = data.enhanced_isp_bilingual || false;
+            this.enhanced_isp_mcc = data.enhanced_isp_mcc || '';
+            this.enhanced_isp_mnc = data.enhanced_isp_mnc || '';
+            
+            // Enhanced ISP name lookup - use server-provided separate CN/EN fields
+            if (!this.isp_name || this.isp_name === '') {
+              if (this.enhanced_isp_available) {
+                // Use pre-parsed server data based on locale - no extra JS parsing needed
+                const currentLocale = document.documentElement.lang === 'zh-CN' ? 'CN' : 'EN';
+                if (currentLocale === 'CN' && this.enhanced_isp_full_cn) {
+                  this.isp_name = this.enhanced_isp_full_cn;
+                } else if (this.enhanced_isp_full_en) {
+                  this.isp_name = this.enhanced_isp_full_en;
+                }
+              }
+            }
+          })
+          .catch((error) => {
+            console.error('Dashboard fetch error:', error);
+          });
+      },
+      init() {
+        
+        this.fetchStatus();
+        setInterval(() => {
+          this.fetchStatus();
+        }, 4000);
+      },
+
+      // Helper methods for ethernet status display
+      getWanEthernetStatus() {
+        if (!this.wan_interface_enabled) {
+          return "{{locales['disabled']}}";
+        } else if (!this.wan_carrier) {
+          return "{{locales['disconnected']}}";
+        } else {
+          return this.wan_ethernet_speed;
+        }
+      },
+
+      getLanEthernetStatus() {
+        if (!this.lan_interface_enabled) {
+          return "{{locales['disabled']}}";
+        } else if (!this.lan_carrier) {
+          return "{{locales['disconnected']}}";
+        } else {
+          return this.lan_ethernet_speed;
+        }
+      },
+
+      isWanEthernetConnected() {
+        return this.wan_interface_enabled && this.wan_carrier;
+      },
+
+      isLanEthernetConnected() {
+        return this.lan_interface_enabled && this.lan_carrier;
+      },
+
+      connection: "",
+      server_location: "",
+      down_speed: null,
+      up_speed: null,
+      uptime: "",
+      wan_interface_enabled: false,
+      wan_carrier: false,
+      sim_interface_enabled: false,
+      wwan_powered: true,
+      wan_ethernet_speed: "",
+      lan_interface_enabled: false,
+      lan_carrier: false,
+      lan_ethernet_speed: "",
+
+      hostname: "",
+      model: "",
+      openwrt_version: "",
+      firmware_version: "",
+      kernel: "",
+      modem_model: "",
+      machine_sn: "",
+      machine_sn_verified: false,
+
+      wan_ip: "",
+      wan_ipv6: "",
+      local_wan_ip: "",
+      carrier: "",
+      dhcp_clients_count: "",
+      wifi_clients_count: "",
+      wifi_interfaces: [],
+
+      on_charging: false,
+      charge_percent: null,
+      voltage: null,
+      charge_voltage: "",
+      battery_current: null,
+      battery_wattage: null,
+      board_temperature: null,
+      battery_remaining_time: null,
+      sd_state: "",
+      sim_state: "",
+      sim_ccid: "",
+      sim_cimi: "",
+      sim_number: "",
+      modem_signal_strength: 0,
+      isp_name: "",
+      cell_mccmnc: "",
+      
+      // Enhanced ISP information from dashboard
+      enhanced_isp_available: false,
+      enhanced_isp_full: "",
+      enhanced_isp_full_cn: "",
+      enhanced_isp_full_en: "",
+      enhanced_isp_country: "",
+      enhanced_isp_bilingual: false,
+      enhanced_isp_mcc: "",
+      enhanced_isp_mnc: "",
+      
+      pcie_wifi: null,
+
+      get connection_name() {
+        if (this.connection === "unknown") {
+          return '';
+        } else if (this.connection === "mobile") {
+          return '{{locales["connection_mobile"]}}';
+        } else if (this.connection === "wired") {
+          return '{{locales["connection_wired"]}}';
+        } else if (this.connection === "none") {
+          return '';
+        }
+      },
+
+      get carrier_name() {
+        if (this.sim_state === 'absent'){ return; }
+        if (this.connection === "wired" && (this.carrier === "3G" || this.carrier === "4G" || this.carrier === "5G") ) {
+          return "";
+        } else {
+          return this.carrier;
+        }
+      },
+
+      // Enhanced operator name using server-provided separate CN/EN fields - no extra JS parsing
+      get enhanced_operator_name() {
+        // Return existing ISP name if available and not just MCC/MNC
+        if (this.isp_name && this.isp_name !== '' && this.isp_name !== this.cell_mccmnc) {
+          return this.isp_name;
+        }
+        
+        // Use server-provided pre-parsed CN/EN fields based on locale
+        if (this.enhanced_isp_available) {
+          const currentLocale = document.documentElement.lang === 'zh-CN' ? 'CN' : 'EN';
+          
+          if (currentLocale === 'CN' && this.enhanced_isp_full_cn) {
+            return this.enhanced_isp_full_cn;
+          } else if (this.enhanced_isp_full_en) {
+            return this.enhanced_isp_full_en;
+          }
+        }
+        
+        // Fallback to existing values
+        return this.isp_name || this.carrier || this.cell_mccmnc || '';
+      },
+
+      // Get operator info with country details from server data
+      get operator_details() {
+        if (this.enhanced_isp_available) {
+          return {
+            name_cn: this.enhanced_isp_full_cn,
+            name_en: this.enhanced_isp_full_en,
+            country: this.enhanced_isp_country,
+            mcc: this.enhanced_isp_mcc,
+            mnc: this.enhanced_isp_mnc,
+            bilingual: this.enhanced_isp_bilingual
+          };
+        }
+        return null;
+      },
+
+      formatMbps(val) {
+        if (val >= 100) return val.toFixed(1);
+        if (val >= 10) return val.toFixed(2);
+        return val.toFixed(2);
+      },
+
+      get up_speed_value() {
+        if (this.up_speed === null) {
+          return "";
+        }
+        if (this.up_speed > 1048576 / 8) {
+          return `${this.formatMbps(this.up_speed / 1048576.0 * 8.0)} Mbps`;
+        } else {
+          return `${(this.up_speed / 128.0).toFixed(0)} Kbps`;
+        }
+      },
+
+      get down_speed_value() {
+        if (this.down_speed === null) {
+          return "";
+        }
+        if (this.down_speed > 1048576 / 8) {
+          return `${this.formatMbps(this.down_speed / 1048576.0 * 8.0)} Mbps`;
+        } else {
+          return `${(this.down_speed / 128.0).toFixed(0)} Kbps`;
+        }
+      },
+
+      get charge_percent_status() {
+        if (!Alpine.store("app").firmware_exist) {
+          return "";
+        } else if (this.charge_percent === null) {
+          return "";
+        } else {
+          if (this.on_charging){
+            if (this.charge_percent > 20) {
+              return `<span class='text-green-600'>${this.charge_percent}%</span>`;
+            } else {
+              return `<span class='text-red-600'>${this.charge_percent}%</span>`;
+            }
+          }else{
+            if (this.charge_percent > 20) {
+              return `<span>${this.charge_percent}%</span>`;
+            } else {
+              return `<span class='text-red-600'>${this.charge_percent}%</span>`;
+            }
+          }
+        }
+      },
+
+      get battery_charging_status() {
+        if (this.charge_percent === null) {
+          return "-";
+        }
+        if(this.on_charging) {
+          if (this.charge_percent > 20) {
+            return `<span class='text-green-600'>{{locales["battery_charging"]}}</span>`;
+          } else {
+            return `<span class='text-red-600'>{{locales["battery_charging"]}}</span>`;
+          }
+        } else {
+          if (this.charge_percent > 20) {
+            return `<span>{{locales["battery_discharging"]}}</span>`;
+          } else {
+            return `<span class='text-red-600'>{{locales["battery_discharging"]}}</span>`;
+          }
+        }
+      },
+
+      get voltage_status() {
+        if (!Alpine.store("app").firmware_exist) {
+          return "-";
+        }
+        if(this.voltage == null) {
+          return "-";
+        }
+        if ("photonicat2" == "{{board_name}}") {
+          var bc = this.battery_current ?? 0;
+          var bw = this.battery_wattage ?? 0;
+          if (bc > 0) {
+            current = "+" + bc.toFixed(2);
+            wattage = "+" + bw.toFixed(2);
+          } else {
+            current = bc.toFixed(2);
+            wattage = bw.toFixed(2);
+          }
+
+           return `${(this.voltage).toFixed(3)} V, ${current} A, ${wattage} W`;
+        } else {
+          return `${(this.voltage / 1000).toFixed(3)} V`;
+        }
+        
+        //keep 3 digits after decimal point
+        return `${(this.voltage / 1000).toFixed(3)} V`;
+      },
+
+
+      get charge_voltage_status() {
+        if (!Alpine.store("app").firmware_exist) {
+          return "-";
+        }
+        if (this.on_charging) {
+          return `${(this.charge_voltage / 1000).toFixed(2)} V`;
+        } else {
+          return "-";
+        }
+      },
+
+      get battery_current_status() {
+        if (this.battery_current === null) {
+          return "-";
+        }
+        return `${(this.battery_current / 1000 ).toFixed(2)} A`;
+      },
+
+      get battery_wattage_status() {
+        if (this.battery_wattage === null) {
+          return "-";
+        }
+        return `${(this.battery_wattage).toFixed(2)} W`;
+      },
+
+      getDeviceTypeTranslation(deviceType) {
+        const translations = {
+          'Onboard': '{{locales["device_type_onboard"]}}',
+          'PCIE': '{{locales["device_type_pcie"]}}',
+          'Builtin': '{{locales["device_type_builtin"]}}',
+          'Unknown': '{{locales["device_type_unknown"]}}'
+        };
+        return translations[deviceType] || deviceType;
+      },
+
+      format_openwrt_version(version) {
+        if (!version) return "";
+        // Extract main version and r-number from format like "R25.02.0 / r7561-973b5947b"
+        // Return format like "R25.02.0 / r7561"
+        const match = version.match(/^(.+?)\s*\/\s*r(\d+)/);
+        if (match) {
+          return `${match[1]} / r${match[2]}`;
+        }
+        return version; // Return original if no match
+      },
+
+    }));
+  });
+</script>
+{% endblock %}

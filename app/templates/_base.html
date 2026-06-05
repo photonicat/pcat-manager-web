@@ -1,0 +1,604 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="apple-touch-icon" sizes="180x180" href="{{locales['apple_touch_icon']}}" />
+    <link rel="icon" type="image/png" sizes="32x32" href="{{locales['favicon_32']}}" />
+    <link rel="icon" type="image/png" sizes="16x16" href="{{locales['favicon_16']}}" />
+    <title>{{locales["oem_name"]}} - {{locales["config_title"]}}</title>
+    {% block html_head0 %}{% endblock %}
+    <style type="text/css">
+      [x-cloak] {
+        display: none !important;
+      }
+    </style>
+    <script defer src="/static/alpine-3.10.2.js?v={{ cache_bust_version }}"></script>
+    <link rel="stylesheet" href="/static/app.css?v={{ cache_bust_version }}" />
+    {% block html_head %}{% endblock %}
+  </head>
+
+  <body class="bg-gray-100 font-sans leading-normal tracking-normal" x-data="{ user_menu_open: false, reboot_dlg_open : false, reboot_reason: '', rebooting: false }">
+    <div class="fixed top-0 z-10 w-full bg-white px-2 shadow sm:px-0">
+      <div class="container mx-auto flex flex-wrap justify-between py-0 sm:py-2">
+        <div class="flex">
+          <a class="flex items-center font-title text-xs font-bold text-pcatgray no-underline hover:no-underline sm:text-xl truncate overflow-hidden" href="/">
+            <img src="{{locales['logo_uri']}}" class="w-4 sm:w-10" /><span class="ml-1 hidden sm:inline sm:ml-2">{{locales["oem_name"]}}</span><span class="ml-1 sm:hidden">2</span>
+          </a>
+        </div>
+        <div class="flex flex-grow items-center justify-end text-sm text-gray-500">
+          <div id="network-status" class="flex flex-grow items-center justify-end text-sm text-gray-500" x-cloak x-show="$store.app.net_icons_loaded">
+            <!-- Modem (5G/4G) -->
+            <div class="relative" style="margin-right:1px" x-show="$store.app.modem_mode">
+              <span class="font-bold" x-text="$store.app.modem_mode" style="color:#00274D;font-size:15px;line-height:1"></span>
+              <div x-show="$store.app.net_route_mode === 'mobile'" style="position:absolute;bottom:-3px;left:2px;right:2px;height:2px;background:linear-gradient(to bottom, #4ADE80, #16A34A);border-radius:1px"></div>
+            </div>
+            <!-- LAN (eth1) -->
+            <div class="relative" x-show="$store.app.net_lan_exists">
+              <svg class="w-4 sm:w-6" viewBox="0 0 28 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M22 15.2727V5.09091C22 4.89802 21.9298 4.71304 21.8047 4.57665C21.6797 4.44026 21.5101 4.36364 21.3333 4.36364H19.3333V2.18182C19.3333 1.98893 19.2631 1.80395 19.1381 1.66756C19.013 1.53117 18.8435 1.45455 18.6667 1.45455H17.3333V0.727273C17.3333 0.534388 17.2631 0.349403 17.1381 0.213013C17.013 0.0766233 16.8435 0 16.6667 0H11.3333C11.1565 0 10.987 0.0766233 10.8619 0.213013C10.7369 0.349403 10.6667 0.534388 10.6667 0.727273V1.45455H9.33333C9.15652 1.45455 8.98695 1.53117 8.86193 1.66756C8.7369 1.80395 8.66667 1.98893 8.66667 2.18182V4.36364H6.66667C6.48986 4.36364 6.32029 4.44026 6.19526 4.57665C6.07024 4.71304 6 4.89802 6 5.09091V15.2727C6 15.4656 6.07024 15.6506 6.19526 15.787C6.32029 15.9234 6.48986 16 6.66667 16H21.3333C21.5101 16 21.6797 15.9234 21.8047 15.787C21.9298 15.6506 22 15.4656 22 15.2727ZM8.33333 10.6364H9C9.08841 10.6364 9.17319 10.6747 9.2357 10.7429C9.29821 10.8111 9.33333 10.9036 9.33333 11V14.1818C9.33333 14.2783 9.29821 14.3708 9.2357 14.4389C9.17319 14.5071 9.08841 14.5455 9 14.5455H8.33333C8.24493 14.5455 8.16014 14.5071 8.09763 14.4389C8.03512 14.3708 8 14.2783 8 14.1818V11C8 10.9036 8.03512 10.8111 8.09763 10.7429C8.16014 10.6747 8.24493 10.6364 8.33333 10.6364ZM11 10.6364H11.6667C11.7551 10.6364 11.8399 10.6747 11.9024 10.7429C11.9649 10.8111 12 10.9036 12 11V14.1818C12 14.2783 11.9649 14.3708 11.9024 14.4389C11.8399 14.5071 11.7551 14.5455 11.6667 14.5455H11C10.9116 14.5455 10.8268 14.5071 10.7643 14.4389C10.7018 14.3708 10.6667 14.2783 10.6667 14.1818V11C10.6667 10.9036 10.7018 10.8111 10.7643 10.7429C10.8268 10.6747 10.9116 10.6364 11 10.6364ZM13.3333 11C13.3333 10.9036 13.3685 10.8111 13.431 10.7429C13.4935 10.6747 13.5783 10.6364 13.6667 10.6364H14.3333C14.4217 10.6364 14.5065 10.6747 14.569 10.7429C14.6315 10.8111 14.6667 10.9036 14.6667 11V14.1818C14.6667 14.2783 14.6315 14.3708 14.569 14.4389C14.5065 14.5071 14.4217 14.5455 14.3333 14.5455H13.6667C13.5783 14.5455 13.4935 14.5071 13.431 14.4389C13.3685 14.3708 13.3333 14.2783 13.3333 14.1818V11ZM16.3333 10.6364H17C17.0884 10.6364 17.1732 10.6747 17.2357 10.7429C17.2982 10.8111 17.3333 10.9036 17.3333 11V14.1818C17.3333 14.2783 17.2982 14.3708 17.2357 14.4389C17.1732 14.5071 17.0884 14.5455 17 14.5455H16.3333C16.2449 14.5455 16.1601 14.5071 16.0976 14.4389C16.0351 14.3708 16 14.2783 16 14.1818V11C16 10.9036 16.0351 10.8111 16.0976 10.7429C16.1601 10.6747 16.2449 10.6364 16.3333 10.6364ZM18.6667 11C18.6667 10.9036 18.7018 10.8111 18.7643 10.7429C18.8268 10.6747 18.9116 10.6364 19 10.6364H19.6667C19.7551 10.6364 19.8399 10.6747 19.9024 10.7429C19.9649 10.8111 20 10.9036 20 11V14.1818C20 14.2783 19.9649 14.3708 19.9024 14.4389C19.8399 14.5071 19.7551 14.5455 19.6667 14.5455H19C18.9116 14.5455 18.8268 14.5071 18.7643 14.4389C18.7018 14.3708 18.6667 14.2783 18.6667 14.1818V11Z"
+                  :fill="!$store.app.net_lan_enabled ? '#CCCCCC' : ($store.app.net_lan_carrier ? '#00274D' : '#CCCCCC')"
+                  :stroke="!$store.app.net_lan_enabled ? 'none' : (!$store.app.net_lan_carrier ? '#AAAAAA' : 'none')"
+                  stroke-width="0.5"/>
+                <line x-show="!$store.app.net_lan_enabled" x1="4" y1="1" x2="24" y2="15" stroke="#CCCCCC" stroke-width="2" stroke-linecap="round"/>
+              </svg>
+              <div x-show="$store.app.net_route_mode === 'wired' && $store.app.net_lan_carrier" style="position:absolute;bottom:-3px;left:2px;right:2px;height:2px;background:linear-gradient(to bottom, #4ADE80, #16A34A);border-radius:1px"></div>
+            </div>
+            <!-- WAN (eth0) -->
+            <div class="relative" x-show="$store.app.net_wan_exists">
+              <svg class="w-4 sm:w-6" viewBox="0 0 28 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M22 15.2727V5.09091C22 4.89802 21.9298 4.71304 21.8047 4.57665C21.6797 4.44026 21.5101 4.36364 21.3333 4.36364H19.3333V2.18182C19.3333 1.98893 19.2631 1.80395 19.1381 1.66756C19.013 1.53117 18.8435 1.45455 18.6667 1.45455H17.3333V0.727273C17.3333 0.534388 17.2631 0.349403 17.1381 0.213013C17.013 0.0766233 16.8435 0 16.6667 0H11.3333C11.1565 0 10.987 0.0766233 10.8619 0.213013C10.7369 0.349403 10.6667 0.534388 10.6667 0.727273V1.45455H9.33333C9.15652 1.45455 8.98695 1.53117 8.86193 1.66756C8.7369 1.80395 8.66667 1.98893 8.66667 2.18182V4.36364H6.66667C6.48986 4.36364 6.32029 4.44026 6.19526 4.57665C6.07024 4.71304 6 4.89802 6 5.09091V15.2727C6 15.4656 6.07024 15.6506 6.19526 15.787C6.32029 15.9234 6.48986 16 6.66667 16H21.3333C21.5101 16 21.6797 15.9234 21.8047 15.787C21.9298 15.6506 22 15.4656 22 15.2727ZM8.33333 10.6364H9C9.08841 10.6364 9.17319 10.6747 9.2357 10.7429C9.29821 10.8111 9.33333 10.9036 9.33333 11V14.1818C9.33333 14.2783 9.29821 14.3708 9.2357 14.4389C9.17319 14.5071 9.08841 14.5455 9 14.5455H8.33333C8.24493 14.5455 8.16014 14.5071 8.09763 14.4389C8.03512 14.3708 8 14.2783 8 14.1818V11C8 10.9036 8.03512 10.8111 8.09763 10.7429C8.16014 10.6747 8.24493 10.6364 8.33333 10.6364ZM11 10.6364H11.6667C11.7551 10.6364 11.8399 10.6747 11.9024 10.7429C11.9649 10.8111 12 10.9036 12 11V14.1818C12 14.2783 11.9649 14.3708 11.9024 14.4389C11.8399 14.5071 11.7551 14.5455 11.6667 14.5455H11C10.9116 14.5455 10.8268 14.5071 10.7643 14.4389C10.7018 14.3708 10.6667 14.2783 10.6667 14.1818V11C10.6667 10.9036 10.7018 10.8111 10.7643 10.7429C10.8268 10.6747 10.9116 10.6364 11 10.6364ZM13.3333 11C13.3333 10.9036 13.3685 10.8111 13.431 10.7429C13.4935 10.6747 13.5783 10.6364 13.6667 10.6364H14.3333C14.4217 10.6364 14.5065 10.6747 14.569 10.7429C14.6315 10.8111 14.6667 10.9036 14.6667 11V14.1818C14.6667 14.2783 14.6315 14.3708 14.569 14.4389C14.5065 14.5071 14.4217 14.5455 14.3333 14.5455H13.6667C13.5783 14.5455 13.4935 14.5071 13.431 14.4389C13.3685 14.3708 13.3333 14.2783 13.3333 14.1818V11ZM16.3333 10.6364H17C17.0884 10.6364 17.1732 10.6747 17.2357 10.7429C17.2982 10.8111 17.3333 10.9036 17.3333 11V14.1818C17.3333 14.2783 17.2982 14.3708 17.2357 14.4389C17.1732 14.5071 17.0884 14.5455 17 14.5455H16.3333C16.2449 14.5455 16.1601 14.5071 16.0976 14.4389C16.0351 14.3708 16 14.2783 16 14.1818V11C16 10.9036 16.0351 10.8111 16.0976 10.7429C16.1601 10.6747 16.2449 10.6364 16.3333 10.6364ZM18.6667 11C18.6667 10.9036 18.7018 10.8111 18.7643 10.7429C18.8268 10.6747 18.9116 10.6364 19 10.6364H19.6667C19.7551 10.6364 19.8399 10.6747 19.9024 10.7429C19.9649 10.8111 20 10.9036 20 11V14.1818C20 14.2783 19.9649 14.3708 19.9024 14.4389C19.8399 14.5071 19.7551 14.5455 19.6667 14.5455H19C18.9116 14.5455 18.8268 14.5071 18.7643 14.4389C18.7018 14.3708 18.6667 14.2783 18.6667 14.1818V11Z"
+                  :fill="!$store.app.net_wan_enabled ? '#CCCCCC' : ($store.app.net_wan_carrier ? '#00274D' : '#CCCCCC')"
+                  :stroke="!$store.app.net_wan_enabled ? 'none' : (!$store.app.net_wan_carrier ? '#AAAAAA' : 'none')"
+                  stroke-width="0.5"/>
+                <line x-show="!$store.app.net_wan_enabled" x1="4" y1="1" x2="24" y2="15" stroke="#CCCCCC" stroke-width="2" stroke-linecap="round"/>
+              </svg>
+              <div x-show="$store.app.net_route_mode === 'wired' && $store.app.net_wan_carrier" style="position:absolute;bottom:-3px;left:2px;right:2px;height:2px;background:linear-gradient(to bottom, #4ADE80, #16A34A);border-radius:1px"></div>
+            </div>
+            <!-- Onboard WiFi (radio0) -->
+            <div class="relative" x-show="$store.app.net_wifi0_exists">
+              <svg class="w-4 sm:w-6" viewBox="0 0 28 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M4 3.5529C6.82855 1.24919 10.3597 -0.00539646 14 1.74488e-05C17.7887 1.74488e-05 21.2679 1.33068 24 3.5529L22.3333 5.62668C19.9761 3.70715 17.0335 2.66192 14 2.66668C10.8435 2.66668 7.94341 3.77601 5.66667 5.62668L4 3.5529ZM6.77719 7.01068C8.82016 5.34668 11.3707 4.44049 14 4.44446C16.7356 4.44446 19.2485 5.40534 21.2228 7.00979L19.5561 9.08445C17.9845 7.80464 16.0225 7.10781 14 7.11112C11.8957 7.11112 9.96286 7.85068 8.44386 9.08445L6.77719 7.00979V7.01068ZM9.55526 10.4685C10.8124 9.44436 12.3819 8.88659 14 8.8889C15.6835 8.8889 17.2299 9.48001 18.4447 10.4676L16.7781 12.5422C15.9922 11.9024 15.0113 11.554 14 11.5556C12.9888 11.554 12.0078 11.9024 11.2219 12.5422L9.55526 10.4676V10.4685ZM12.3333 13.9262C12.8046 13.542 13.3932 13.3326 14 13.3333C14.6313 13.3333 15.2113 13.5556 15.6667 13.9253L14 16L12.3333 13.9262Z"
+                  :fill="!$store.app.net_wifi0_enabled ? '#CCCCCC' : '#00274D'"/>
+                <line x-show="!$store.app.net_wifi0_enabled" x1="4" y1="1" x2="24" y2="15" stroke="#CCCCCC" stroke-width="2" stroke-linecap="round"/>
+              </svg>
+            </div>
+            <!-- PCIe WiFi (radio1) -->
+            <div class="relative" x-show="$store.app.net_wifi1_exists">
+              <svg class="w-4 sm:w-6" viewBox="0 0 28 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M4 3.5529C6.82855 1.24919 10.3597 -0.00539646 14 1.74488e-05C17.7887 1.74488e-05 21.2679 1.33068 24 3.5529L22.3333 5.62668C19.9761 3.70715 17.0335 2.66192 14 2.66668C10.8435 2.66668 7.94341 3.77601 5.66667 5.62668L4 3.5529ZM6.77719 7.01068C8.82016 5.34668 11.3707 4.44049 14 4.44446C16.7356 4.44446 19.2485 5.40534 21.2228 7.00979L19.5561 9.08445C17.9845 7.80464 16.0225 7.10781 14 7.11112C11.8957 7.11112 9.96286 7.85068 8.44386 9.08445L6.77719 7.00979V7.01068ZM9.55526 10.4685C10.8124 9.44436 12.3819 8.88659 14 8.8889C15.6835 8.8889 17.2299 9.48001 18.4447 10.4676L16.7781 12.5422C15.9922 11.9024 15.0113 11.554 14 11.5556C12.9888 11.554 12.0078 11.9024 11.2219 12.5422L9.55526 10.4676V10.4685ZM12.3333 13.9262C12.8046 13.542 13.3932 13.3326 14 13.3333C14.6313 13.3333 15.2113 13.5556 15.6667 13.9253L14 16L12.3333 13.9262Z"
+                  :fill="!$store.app.net_wifi1_enabled ? '#CCCCCC' : '#00274D'"/>
+                <line x-show="!$store.app.net_wifi1_enabled" x1="4" y1="1" x2="24" y2="15" stroke="#CCCCCC" stroke-width="2" stroke-linecap="round"/>
+              </svg>
+            </div>
+          </div>
+
+          <form method="POST" target="_blank" class="inline" onsubmit="this.action = 'http://' + window.location.hostname + ':8080/cgi-bin/luci'">
+            <input type="hidden" name="luci_username" value="root">
+            <input type="hidden" name="luci_password" value="{{ remembered_password if remembered_password else 'photonicat' }}">
+            <button type="submit" class="ml-1 mr-2 text-base underline hover:no-underline focus:ring-2 focus:ring-blue-600 bg-transparent border-none cursor-pointer" title="{{locales['openwrt_tooltip']}}">
+              OpenWRT
+            </button>
+          </form>
+
+          <div class="mr-2 flex items-center" x-cloak x-show="$store.app.network_mode === 'all_off'">
+            <img src="/static/airplane.svg" class="w-5 h-5" />
+          </div>
+          <div class="mr-2 flex items-center" x-cloak x-show="$store.app.network_route_mode === 'mobile' && $store.app.network_mode !== 'all_off'">
+            <span x-text="$store.app.mobile_signal_name" class="mr-1"></span>
+            <img :src="$store.app.mobile_signal_strength_img"/>
+          </div>
+          <!-- battery -->
+          <div class="mr-2 flex items-center translate-y-[1px]" x-cloak x-show="$store.app.firmware_exist">
+            <svg class="h-10 w-12" viewBox="0 0 32 14" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <!--terminal-->
+              <path d="M28.5 3H29.5A1 1 0 0 1 30.5 4V7.5A1 1 0 0 1 29.5 8.5H28.5V3.5Z" fill="currentColor"/>
+              <!-- Battery fill -->
+              <rect x="1" y="1" :width="Math.min($store.app.charge_percent * 0.27, 27)" height="10" rx="0.5" :fill="$store.app.on_charging === 1 ? '#46EB91' : $store.app.charge_percent < 20 ? '#E24826' : '#EAEAEA'"/>
+              <!-- Battery border -->
+              <rect x="0.5" y="0.5" width="28" height="11" rx="2" stroke="currentColor" stroke-width="1"/>
+              <!-- Charge percentage text and charging bolt-->
+              <text x="14" y="6" text-anchor="middle" dominant-baseline="central" font-size="9" font-weight="bold" fill="currentColor" x-text="$store.app.on_charging === 1 ?  $store.app.charge_percent + '\u00A0\u00A0' : $store.app.charge_percent "></text>
+              <path x-show="$store.app.on_charging === 1" :transform="'translate(' + (11 + (($store.app.charge_percent.toString().length * 4.5 + 6) / 2)) + ', -1)'" d="M2 6H4L2 11V7.5H0L2 3V4.5Z" fill="currentColor" stroke="currentColor" stroke-width="0.5"/>
+            </svg>
+          </div>
+          <!-- /battery -->
+          <div class="relative float-right inline-block">
+            <div class="relative text-sm">
+              <button @click="user_menu_open = true" class="flex items-center focus:outline-none">
+                <svg xmlns="http://www.w3.org/2000/svg" class="mr-0 h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"></path>
+                </svg>
+                <div x-cloak x-show="user_menu_open" @click.outside="user_menu_open = false" class="absolute top-0 right-0 z-30 mt-10 w-48 overflow-auto rounded border bg-white shadow-md sm:w-32">
+                  <ul class="list-reset">
+                    <li class="border-b border-gray-100">
+                      <a href="#" @click="reboot_reason = ''; reboot_dlg_open = true" class="flex items-center px-2 py-4 text-gray-500 no-underline hover:bg-gray-200 hover:no-underline sm:justify-start sm:py-2">
+                        <svg class="mr-2 h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                        </svg>
+                        {{locales["nav_reboot_device"]}}
+                      </a>
+                    </li>
+                    <li class="border-b border-gray-100">
+                      <a href="/switch_locale" title="{{locales['switch_to_locale_tip']}}" class="flex items-center px-2 py-4 text-gray-500 no-underline hover:bg-gray-200 hover:no-underline sm:justify-start sm:py-2">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="mr-2 h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                          <path stroke-linecap="round" stroke-linejoin="round" d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9"></path>
+                        </svg>
+                        {{locales["switch_to_locale"]}}
+                      </a>
+                    </li>
+
+                    {% if locales['vendor_wiki_url'] %}
+                    <li class="border-b border-gray-100 block sm:hidden">
+                      <a href="{{locales['vendor_wiki_url']}}" title="Wiki" target="_blank" class="flex items-center px-2 py-4 text-gray-500 no-underline hover:bg-gray-200 hover:no-underline sm:justify-start sm:py-2">
+                        <img src="/static/wiki24.png" class="mr-2 h-6 w-6 text-black" />
+                        Wiki
+                      </a>
+                    </li>
+                    {% endif %}
+                    <li class="border-b border-gray-100">
+                      <a href="/logout" class="flex items-center px-2 py-4 text-gray-500 no-underline hover:bg-gray-200 hover:no-underline sm:justify-start sm:py-2">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="mr-2 h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"></path>
+                        </svg>
+                        {{locales["nav_logout"]}}
+                      </a>
+                    </li>
+                  </ul>
+                </div>
+              </button>
+
+              {% include "_reboot_confirm_modal.html" %} {% include "_rebooting_modal.html" %}
+            </div>
+            <!-- /relative text-sm -->
+          </div>
+        </div>
+      </div>
+      <div class="container z-20 mx-auto hidden w-full flex-grow items-center bg-white sm:flex lg:w-auto" id="nav-content">
+        <ul class="list-reset flex flex-1 items-center justify-between overflow-x-auto sm:justify-start sm:px-4 md:px-0">
+          <li class="w-16 sm:w-24" style="height: 50px;">
+            <a class="flex items-center justify-center space-x-2 h-full" :class="$store.app.page == 'index' ? 'nav-active' : 'nav'" href="/">
+              <img src="/static/home.svg" class="max-w-6 max-h-6 w-auto h-auto" />
+            </a>
+          </li>
+          <li class="w-16 sm:w-24" style="height: 50px;">
+            <a class="nav flex items-center justify-center space-x-2 h-full" :class="$store.app.page == 'settings' ? 'nav-active' : 'nav'" href="/device_control">
+              <img src="/static/settings.svg" class="max-w-6 max-h-6 w-auto h-auto" />
+            </a>
+          </li>
+          <li class="w-16 sm:w-24" style="height: 50px;">
+            <a class="nav flex items-center justify-center space-x-2 h-full" :class="$store.app.page == 'modem' ? 'nav-active' : 'nav'" href="/modem">
+              <img src="/static/tower.svg" class="max-w-6 max-h-6 w-auto h-auto" />
+            </a>
+          </li>
+          {% if locales["oem_name"] and locales["oem_name"]|length > 2 and "photonicat 2" in locales["oem_name"]|lower %}
+          <li class="w-16 sm:w-24" style="height: 50px;">
+            <a class="nav flex items-center justify-center space-x-2 h-full" :class="$store.app.page == 'screen' ? 'nav-active' : 'nav'" href="/screen">
+              <img src="/static/screen.svg" class="max-w-6 max-h-6 w-auto h-auto" />
+            </a>
+          </li>
+          {% endif %}
+          <li class="w-16 sm:w-24" style="height: 50px;">
+            <a class="nav flex items-center justify-center space-x-2 h-full" :class="$store.app.page == 'statistics' ? 'nav-active' : 'nav'" href="/stats">
+              <img src="/static/stats.svg" class="max-w-6 max-h-6 w-auto h-auto" />
+            </a>
+          </li>
+          {% if terminal_enabled %}
+          <li class="w-16 sm:w-24" style="height: 50px;">
+            <a class="nav flex items-center justify-center space-x-2 h-full" :class="$store.app.page == 'terminal' ? 'nav-active' : 'nav'" href="/terminal">
+              <img src="/static/console.svg" class="max-w-6 max-h-6 w-auto h-auto" />
+            </a>
+          </li>
+          {% endif %}
+          <li class="w-16 sm:w-24" style="height: 50px;">
+            <a class="nav flex items-center justify-center space-x-2 h-full" :class="$store.app.page == 'update' ? 'nav-active' : 'nav'" href="/update">
+              <img src="/static/software.svg" class="max-w-6 max-h-6 w-auto h-auto" />
+            </a>
+          </li>
+        </ul>
+      </div>
+    </div>
+    <!-- /end nav header -->
+    {% block content %}{% endblock %}
+    <!--bottom nav -->
+    <div class="fixed bottom-0 z-20 flex w-full flex-grow items-center border-t border-gray-300 bg-gray-200 sm:hidden" id="bottom-nav-content">
+      <ul class="list-reset flex flex-1 items-center justify-between overflow-x-auto">
+        <li class="w-24">
+          <a aria-current="page" class="flex items-center justify-center space-x-2 py-2" :class="$store.app.page == 'index' ? 'nav-active' : 'nav'" href="/">
+            <img src="/static/home.svg" />
+          </a>
+        </li>
+        <li class="w-24">
+          <a class="nav flex items-center justify-center space-x-2 py-2" :class="$store.app.page == 'settings' ? 'nav-active' : 'nav'" href="/device_control">
+            <img src="/static/settings.svg" />
+          </a>
+        </li>
+        <li class="w-24">
+          <a class="nav flex items-center justify-center space-x-2 py-2" :class="$store.app.page == 'modem' ? 'nav-active' : 'nav'" href="/modem">
+            <img src="/static/tower.svg" class="max-w-6 max-h-6 w-auto h-auto" />
+          </a>
+        </li>
+        {% if locales["oem_name"] and locales["oem_name"]|length > 2 and "photonicat 2" in locales["oem_name"]|lower %}
+        <li class="w-24">
+          <a class="nav flex items-center justify-center space-x-2 py-2" :class="$store.app.page == 'screen' ? 'nav-active' : 'nav'" href="/screen">
+            <img src="/static/screen.svg" class="max-w-6 max-h-6 w-auto h-auto" />
+          </a>
+        </li>
+        {% endif %}
+        <li class="w-24">
+          <a class="nav flex items-center justify-center space-x-2 py-2" :class="$store.app.page == 'statistics' ? 'nav-active' : 'nav'" href="/stats">
+            <img src="/static/stats.svg" class="max-w-6 max-h-6 w-auto h-auto" />
+          </a>
+        </li>
+        {% if terminal_enabled %}
+        <li class="w-24">
+          <a class="nav flex items-center justify-center space-x-2 py-2" :class="$store.app.page == 'terminal' ? 'nav-active' : 'nav'" href="/terminal">
+            <img src="/static/console.svg" class="max-w-6 max-h-6 w-auto h-auto" />
+          </a>
+        </li>
+        {% endif %}
+        <li class="w-24">
+          <a class="nav flex items-center justify-center space-x-2 py-2" :class="$store.app.page == 'update' ? 'nav-active' : 'nav'" href="/update">
+            <img src="/static/software.svg" />
+          </a>
+        </li>
+      </ul>
+      <div class="hidden sm:block"></div>
+    </div>
+    <!-- end bottom nav -->
+    <footer class="fixed bottom-0 hidden w-full border-t border-gray-200 bg-white shadow sm:block lg:px-4">
+      <div class="container mx-auto flex w-full items-center justify-between px-4 py-1.5 sm:px-0">
+        <div>
+          <ul class="flex gap-2 text-sm">
+            <li class="text-pcatgray3" x-text="$store.app.date + ' ' + $store.app.time"></li>
+          </ul>
+        </div>
+        <div class="flex items-center gap-2">
+          {% if locales['vendor_wiki_url'] %}
+          <a href="{{locales['vendor_wiki_url']}}" target="_blank" class="inline-flex items-center text-sm border-gray-200 border rounded-lg px-2 py-0.5 bg-gray-100 hover:bg-gray-200" title="Wiki">
+            Wiki
+          </a>
+          {% endif %}
+          {% if locales['forum_url'] %}
+          <a href="{{locales['forum_url']}}" target="_blank" class="inline-flex items-center text-sm border-gray-200 border rounded-lg px-2 py-0.5 bg-gray-100 hover:bg-gray-200" title="Community">
+            {{locales["community"]}}
+          </a>
+          {% endif %}
+        </div>
+      </div>
+    </footer>
+    <script type="text/javascript">
+      // Format phone number for display: add space after country code (e.g. +8618602152705 → +86 18602152705)
+      window.formatPhoneNumber = function(number) {
+        if (!number) return '';
+        number = number.trim();
+        if (!number.startsWith('+')) return number;
+        // Known country calling codes (longest match first)
+        const codes = [
+          '886','855','856','853','852','673','670','675','676','677','678','679',
+          '880','960','961','962','963','964','965','966','967','968','971','972','973','974','975','976','977',
+          '992','993','994','995','996','998',
+          '212','213','216','218','220','221','222','223','224','225','226','227','228','229',
+          '230','231','232','233','234','235','236','237','238','239','240','241','242','243','244','245','246','247','248','249',
+          '250','251','252','253','254','255','256','257','258','260','261','262','263','264','265','266','267','268','269',
+          '290','291','297','298','299',
+          '350','351','352','353','354','355','356','357','358','359',
+          '370','371','372','373','374','375','376','377','378','380','381','382','383','385','386','387','389',
+          '420','421','423',
+          '500','501','502','503','504','505','506','507','508','509','590','591','592','593','594','595','596','597','598','599',
+          '850','870',
+          '90','91','92','93','94','95','98',
+          '84','82','81','86','62','60','63','64','65','66',
+          '20','27',
+          '30','31','32','33','34','36','39',
+          '40','41','43','44','45','46','47','48','49',
+          '51','52','53','54','55','56','57','58','61',
+          '7','1'
+        ];
+        const digits = number.slice(1); // remove +
+        for (const code of codes) {
+          if (digits.startsWith(code) && digits.length > code.length + 4) {
+            return '+' + code + ' ' + digits.slice(code.length);
+          }
+        }
+        return number;
+      };
+
+      // Shared Dashboard Data Service
+      window.DashboardService = {
+        cache: null,
+        cacheTime: 0,
+        cacheDuration: 1000, // 1 second - matching server-side cache
+        subscribers: new Set(),
+        
+        async fetchDashboard() {
+          const now = Date.now();
+          
+          // Return cached data if still valid
+          if (this.cache && (now - this.cacheTime) < this.cacheDuration) {
+            return this.cache;
+          }
+          
+          try {
+            const response = await fetch("/api/v1/dashboard.json");
+            const data = await response.json();
+            
+            // Cache the data
+            this.cache = data;
+            this.cacheTime = now;
+            
+            // Notify all subscribers
+            this.notifySubscribers(data);
+            
+            return data;
+          } catch (error) {
+            console.error('Dashboard fetch error:', error);
+            throw error;
+          }
+        },
+        
+        subscribe(callback) {
+          this.subscribers.add(callback);
+          
+          // If we have cached data, immediately call the callback
+          if (this.cache) {
+            callback(this.cache);
+          }
+          
+          return () => this.subscribers.delete(callback);
+        },
+        
+        notifySubscribers(data) {
+          this.subscribers.forEach(callback => {
+            try {
+              callback(data);
+            } catch (error) {
+              console.error('Subscriber callback error:', error);
+            }
+          });
+        }
+      };
+
+      document.addEventListener("alpine:init", () => {
+        Alpine.store("app", {
+          fetchTips(){
+            var tipsUrl = "{{locales['tips_url']}}";
+            if (!tipsUrl) return;
+            fetch(tipsUrl)
+              .then((response) => {
+                if (response.ok) {
+                  return response.json();
+                }
+                throw new Error('Failed to fetch tips');
+              })
+              .then((data) => {
+                this.tips_collection = data.tips;
+                let i = Math.floor(Math.random() * this.tips_collection.length);
+                this.tips = this.tips_collection[i];
+              }).catch((error) => {
+                this.tips_collection = [];
+                this.tips = "";
+              });
+              setInterval(() => {
+                this.tips = "";
+                setTimeout(()=>{
+                  let i = Math.floor(Math.random() * this.tips_collection.length);
+                  this.tips = this.tips_collection[i];
+                }, 500);
+                
+              }, 30000);
+          },
+
+
+          fetch_status() {
+            fetch("/api/v1/network_interfaces.json")
+              .then(r => r.json())
+              .then(data => {
+                this.net_lan_exists = data.lan_exists !== false;
+                this.net_wan_exists = data.wan_exists !== false;
+                this.net_wifi0_exists = data.onboard_wifi_exists !== false;
+                this.net_wifi1_exists = data.pcie_wifi_exists === true;
+                this.net_lan_enabled = data.lan_enabled;
+                this.net_wan_enabled = data.wan_enabled;
+                this.net_wifi0_enabled = data.onboard_wifi_enabled;
+                this.net_wifi1_enabled = data.pcie_wifi_enabled;
+                this.net_lan_carrier = data.lan_carrier === true;
+                this.net_wan_carrier = data.wan_carrier === true;
+                this.net_route_mode = data.network_route_mode || "";
+                this.net_icons_loaded = true;
+              });
+
+            // Use shared dashboard service
+            window.DashboardService.fetchDashboard()
+              .then((data) => {
+                this.on_charging = data.on_charging ? 1 : 0;
+
+                if (this.system_status === 0 && data.system_status === 20) {
+                  this.reboot_timer = setInterval(() => {
+                    this.reboot_timer_count = this.reboot_timer_count + 1;
+                  }, 1000);
+                }
+
+                this.system_status = data.system_status;
+
+                if (this.system_status === 0) {
+                  if (this.reboot_timer) {
+                    clearInterval(this.reboot_timer);
+                    this.reboot_timer = null;
+                    this.reboot_timer_count = 0;
+                  }
+                }
+
+                this.firmware_version = data.firmware_version;
+                this.charge_percent = data.charge_percent;
+                this.date = data.date;
+                this.time = data.time;
+                this.car_mode.enabled = data.carmode.enabled;
+                if (this.car_mode.enabled === "true") {
+                  if (this.car_mode.countdown !== data.carmode.countdown && data.carmode.countdown !== data.carmode.timeout) {
+                    //this.notifation_text = `${data.carmode.countdown}秒后关机`;
+                  }
+                  this.car_mode.timeout = parseInt(data.carmode.timeout / 60);
+                } else {
+                  if (data.carmode.timeout === 0) {
+                    this.car_mode.timeout = 10; // default
+                  } else {
+                    this.car_mode.timeout = parseInt(data.carmode.timeout / 60);
+                  }
+                }
+                if (data.carmode.countdown === data.carmode.timeout) {
+                  this.notifation_text = "";
+                }
+                this.car_mode.countdown = data.carmode.countdown;
+                this.network_route_mode = data.network_route_mode;
+                this.network_mode = data.network_mode;
+                this.modem_mode = data.modem_mode;
+                this.sim_state = data.sim_state;
+                this.isp_name = data.isp_name;
+                this.modem_signal_strength = data.modem_signal_strength;
+              })
+              .catch((error) => {
+                if (this.system_status === 20) {
+                  this.system_status = 25;
+                }
+              });
+          },
+          init() {
+            this.fetch_status();
+            this.fetchTips();
+            setInterval(() => {
+              this.fetch_status();
+            }, 5000);
+          },
+          page: "index",
+          on_charging: 0,
+          firmware_version: "",
+          charge_percent: 0,
+          date: "",
+          time: "",
+          car_mode: { countdown: 0, enabled: "false", timeout: 0 },
+          network_route_mode: "",
+          network_mode: "",
+          sim_state: "",
+          modem_mode: "",
+          modem_signal_strength: 0,
+          isp_name: "",
+          reboot_timer: null,
+          reboot_timer_count: 0,
+          tips_collection: [],
+          tips: "",
+          notifation_text: "",
+          net_icons_loaded: false,
+          net_lan_exists: true,
+          net_wan_exists: true,
+          net_wifi0_exists: true,
+          net_wifi1_exists: false,
+          net_lan_enabled: true,
+          net_wan_enabled: true,
+          net_wifi0_enabled: true,
+          net_wifi1_enabled: false,
+          net_lan_carrier: false,
+          net_wan_carrier: false,
+          net_route_mode: "",
+
+          set_page(page) {
+            this.page = page;
+          },
+
+          show_notification(message, duration = 3000) {
+            this.notifation_text = message;
+            setTimeout(() => {
+              this.notifation_text = "";
+            }, duration);
+          },
+
+          get firmware_exist() {
+            return this.firmware_version !== "" && this.firmware_version !== null;
+          },
+
+          get isp_readable_name() {
+            const isChinese = "{{locales['current_locale']}}" === "CN" || "{{locales['current_locale']}}" === "zh_CN";
+            
+            if (this.isp_name === "China Unicom" || this.isp_name === "中国联通") {
+              return isChinese ? "中国联通" : "China Unicom";
+            } else if (this.isp_name === "China Mobile" || this.isp_name === "中国移动") {
+              return isChinese ? "中国移动" : "China Mobile";
+            } else if (this.isp_name === "China Telecom" || this.isp_name === "中国电信") {
+              return isChinese ? "中国电信" : "China Telecom";
+            } else if (this.isp_name === "Chunghwa Telecom" || this.isp_name === "中华电信") {
+              return isChinese ? "中华电信" : "Chunghwa Telecom";
+            } else if (this.isp_name === "Far EasTone Telecom" || this.isp_name === "远传电信") {
+              return isChinese ? "远传电信" : "Far EasTone Telecom";
+            } else if (this.isp_name === "Taiwan Mobile Telecom" || this.isp_name === "台湾大哥大") {
+              return isChinese ? "台湾大哥大" : "Taiwan Mobile Telecom";
+            } else if (this.isp_name === "T STAR" || this.isp_name === "台灣之星") {
+              return isChinese ? "台灣之星" : "T STAR";
+            } else if (this.isp_name !== "") {  
+              return this.isp_name;
+            } else {
+              return isChinese ? "无服务" : "No Service";
+            }
+          },
+
+          get mobile_signal_name() {
+            return this.isp_readable_name + " " + this.modem_mode;
+          },
+
+          get mobile_signal_strength_img() {
+            if (this.modem_signal_strength >= 80) {
+              return "/static/sig4.svg";
+            } else if (this.modem_signal_strength >= 60) {
+              return "/static/sig3.svg";
+            } else if (this.modem_signal_strength >= 40) {
+              return "/static/sig2.svg";
+            } else if (this.modem_signal_strength >= 20) {
+              return "/static/sig1.svg";
+            } else {
+              return "/static/sig0.svg";
+            }
+          },
+        });
+      });
+
+      // Global authentication redirect handler
+      window.handleApiResponse = function(response) {
+        if (response && response.redirect) {
+          // If API response includes redirect, navigate to login
+          window.location.href = response.redirect;
+          return true; // Indicates redirect was handled
+        }
+        return false; // No redirect needed
+      };
+
+      // Override fetch to handle authentication redirects globally
+      const originalFetch = window.fetch;
+      window.fetch = function(...args) {
+        return originalFetch.apply(this, args)
+          .then(response => {
+            // If it's a JSON response, check for redirect
+            if (response.headers.get('content-type')?.includes('application/json')) {
+              return response.clone().json().then(data => {
+                if (data && data.redirect) {
+                  window.location.href = data.redirect;
+                  return Promise.reject(new Error('Redirecting for authentication'));
+                }
+                return response;
+              }).catch(error => {
+                // If JSON parsing fails, return original response
+                if (error.message === 'Redirecting for authentication') {
+                  throw error;
+                }
+                return response;
+              });
+            }
+            return response;
+          });
+      };
+    </script>
+    {% block bottom %}{% endblock %}
+    <div x-show="$store.app.notifation_text !== ''" 
+         :class="$store.app.notifation_text.includes('成功') || $store.app.notifation_text.includes('succeed') ? 'border-green-300 bg-green-50 text-green-800' : 'border-blue-300 bg-blue-50 text-blue-800'" 
+         class="absolute top-[32px] right-[32px] z-50 hidden w-48 -translate-y-2 p-2 text-center shadow transition duration-500 ease-in-out" 
+         x-text="$store.app.notifation_text"></div>
+  </body>
+</html>

@@ -1,0 +1,283 @@
+{% extends '_base.html' %}
+{% block content %}
+<div class="container mx-auto w-full pt-14 pb-6 sm:pt-24 sm:pb-8 md:pt-28 lg:px-4" x-data="general_settings" x-init="init()">
+  <div class="flex items-center justify-between">
+    <h1 class="px-3 py-4 font-bold uppercase text-gray-600">{{locales["nav_settings"]}}</h1>
+  </div>
+
+  {% include '_notification.html' %}
+
+  <div class="mb-4 flex w-full leading-normal text-gray-800">
+    <div class="grow">
+      <div class="border bg-white">
+        <!--Settings navbar -->
+        <div class="border-b">
+          <ul class="flex justify-between">
+            {% if stm32_firmware_exist %}
+            <li class="basis-1/4 cursor-pointer border text-center hover:font-semibold">
+              <a href="/device_control" class="block p-1 sm:p-3">{{locales["tab_device_control"]}}</a>
+            </li>
+            <li class="basis-1/4 cursor-pointer border border-b-2 border-b-pcatblue text-center font-semibold hover:font-semibold">
+              <a href="/general_settings" class="block p-1 sm:p-3">{{locales["tab_general_settings"]}}</a>
+            </li>
+            <li class="basis-1/4 cursor-pointer border text-center hover:font-semibold">
+              <a href="/settings" class="block p-1 sm:p-3">Wi-Fi</a>
+            </li>
+            <li class="basis-1/4 cursor-pointer border text-center hover:font-semibold">
+              <a href="/timer" class="block p-1 sm:p-3">{{locales["tab_timers"]}}</a>
+            </li>
+            {% else %}
+            <li class="basis-1/3 cursor-pointer border text-center hover:font-semibold">
+              <a href="/device_control" class="block p-1 sm:p-3">{{locales["tab_device_control"]}}</a>
+            </li>
+            <li class="basis-1/3 cursor-pointer border border-b-2 border-b-pcatblue text-center font-semibold hover:font-semibold">
+              <a href="/general_settings" class="block p-1 sm:p-3">{{locales["tab_general_settings"]}}</a>
+            </li>
+            <li class="basis-1/3 cursor-pointer border text-center hover:font-semibold">
+              <a href="/settings" class="block p-1 sm:p-3">Wi-Fi</a>
+            </li>
+            {% endif %}
+          </ul>
+        </div>
+        <!--/ Settings navbar -->
+      </div>
+    </div>
+  </div>
+
+  <!-- Basic Settings Content -->
+  <div class="mb-4 grid w-full grid-cols-1 gap-4 px-2 leading-normal text-gray-800 sm:px-0">
+    <div class="grow rounded border bg-white shadow">
+      <div class="border-b px-5 py-3">
+        <h5 class="font-bold text-gray-600">{{locales["general_settings_title"]}}</h5>
+      </div>
+      <div class="p-5">
+        <!-- Language Setting -->
+        <div class="mb-6">
+          <label class="mb-2 block font-medium text-gray-700">
+            <svg xmlns="http://www.w3.org/2000/svg" class="mr-1 inline h-5 w-5 text-pcatblue" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5h12M9 3v2m1.048 9.5A18.022 18.022 0 016.412 9m6.088 9h7M11 21l5-10 5 10M12.751 5C11.783 10.77 8.07 15.61 3 18.129" />
+            </svg>
+            {{locales["language_label"]}}
+          </label>
+          <select x-model="language" class="w-full rounded-lg border border-gray-300 bg-gray-50 p-2.5 text-sm text-gray-900 focus:border-pcatblue focus:ring-pcatblue sm:w-1/2">
+            <option value="EN">English</option>
+            <option value="CN">中文 (Chinese)</option>
+          </select>
+          <p class="mt-1 text-sm text-gray-400">{{locales["language_help"]}}</p>
+        </div>
+
+        <!-- Timezone Setting -->
+        <div class="mb-6">
+          <label class="mb-2 block font-medium text-gray-700">
+            <svg xmlns="http://www.w3.org/2000/svg" class="mr-1 inline h-5 w-5 text-pcatblue" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            {{locales["timezone_label"]}}
+          </label>
+          <select x-model="zonename" @change="updateTimezoneStr()" class="w-full rounded-lg border border-gray-300 bg-gray-50 p-2.5 text-sm text-gray-900 focus:border-pcatblue focus:ring-pcatblue sm:w-1/2">
+            <template x-for="tz in timezones" :key="tz.zonename">
+              <option :value="tz.zonename" x-text="tz.label" :selected="tz.zonename === zonename"></option>
+            </template>
+          </select>
+          <p class="mt-1 text-sm text-gray-400">{{locales["timezone_help"]}}</p>
+        </div>
+
+        <!-- Hostname Setting -->
+        <div class="mb-6">
+          <label class="mb-2 block font-medium text-gray-700">
+            <svg xmlns="http://www.w3.org/2000/svg" class="mr-1 inline h-5 w-5 text-pcatblue" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+            </svg>
+            {{locales["hostname_label"]}}
+          </label>
+          <input type="text" x-model="hostname" maxlength="63"
+                 placeholder="{{locales["hostname_placeholder"]}}"
+                 class="w-full rounded-lg border border-gray-300 bg-gray-50 p-2.5 text-sm text-gray-900 focus:border-pcatblue focus:ring-pcatblue sm:w-1/2" />
+          <p class="mt-1 text-sm text-gray-400">{{locales["hostname_help"]}}</p>
+          <p x-show="hostname_error" x-cloak class="mt-1 text-sm text-red-500">{{locales["invalid_hostname"]}}</p>
+        </div>
+
+        <!-- TCP Congestion Control Setting -->
+        <div class="mb-6">
+          <label class="mb-2 block font-medium text-gray-700">
+            <svg xmlns="http://www.w3.org/2000/svg" class="mr-1 inline h-5 w-5 text-pcatblue" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+              <rect x="6" y="2" width="12" height="20" rx="2" stroke-width="2" />
+              <circle cx="12" cy="6.5" r="1.8" fill="#ef4444" stroke="none" />
+              <circle cx="12" cy="12" r="1.8" fill="#eab308" stroke="none" />
+              <circle cx="12" cy="17.5" r="1.8" fill="#22c55e" stroke="none" />
+            </svg>
+            {{locales["tcp_cc_label"]}}
+          </label>
+          <select x-model="tcp_congestion" class="w-full rounded-lg border border-gray-300 bg-gray-50 p-2.5 text-sm text-gray-900 focus:border-pcatblue focus:ring-pcatblue sm:w-1/2">
+            <option value="bbr">Google BBRv3</option>
+            <option value="cubic">CUBIC</option>
+            <option value="reno">Reno</option>
+          </select>
+          <p class="mt-1 text-sm text-gray-400">{{locales["tcp_cc_help"]}}</p>
+        </div>
+
+        <!-- Terminal Access Setting -->
+        <div class="mb-6">
+          <label class="mb-2 block font-medium text-gray-700">
+            <svg xmlns="http://www.w3.org/2000/svg" class="mr-1 inline h-5 w-5 text-pcatblue" viewBox="0 0 22 20" fill="currentColor">
+              <path d="M3 3L9.5 10L3 17L5 19L13.5 10L5 1L3 3Z" />
+              <path d="M13 15H21V19H13V15Z" />
+            </svg>
+            {{locales.terminal_enabled_label}}
+          </label>
+          <label class="relative flex cursor-pointer items-center">
+            <input class="peer sr-only" type="checkbox" x-model="terminal_enabled" />
+            <div
+              class="h-6 w-11 rounded-full border-2 border-gray-200 bg-gray-200 after:absolute after:top-0.5 after:left-0.5 after:h-5 after:w-5 after:rounded-full after:border after:border-gray-300 after:bg-white after:shadow-sm after:transition-all after:duration-300 peer-checked:border-blue-600 peer-checked:bg-blue-600 peer-checked:after:translate-x-full peer-checked:after:border-white"
+            ></div>
+            <span class="ml-2 select-none text-base text-gray-400" x-text="terminal_enabled ? '{{locales.common_enable}}' : '{{locales.common_disable}}'"></span>
+          </label>
+          <p class="mt-1 text-sm text-gray-400">{{locales.terminal_enabled_help}}</p>
+        </div>
+
+        <!-- Save Button -->
+        <div class="flex items-center space-x-4">
+          <button type="button"
+                  @click="saveSettings()"
+                  :disabled="saving || hostname_error"
+                  :class="saving || hostname_error ? 'bg-gray-400 cursor-not-allowed' : 'bg-pcatblue hover:bg-blue-700'"
+                  class="rounded-lg px-6 py-2.5 text-sm font-medium text-white focus:outline-none focus:ring-4 focus:ring-blue-300 flex items-center">
+            <svg x-show="saving" class="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            <span x-text="saving ? '{{locales["saving"]}}' : '{{locales["common_save"]}}'"></span>
+          </button>
+          <span x-show="save_success" x-cloak x-transition class="text-sm text-green-600 font-medium">{{locales["saved_succeed"]}}</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block bottom %}
+<script>
+  document.addEventListener("alpine:init", () => {
+    Alpine.store("app").set_page("settings");
+
+    Alpine.data("general_settings", () => ({
+      language: "{{locales["current_locale"]}}",
+      zonename: "{{current_zonename}}",
+      timezone_str: "{{current_timezone}}",
+      hostname: "{{current_hostname}}",
+      tcp_congestion: "{{current_tcp_congestion}}",
+      terminal_enabled: {{current_terminal_enabled|tojson}},
+      hostname_error: false,
+      saving: false,
+      save_success: false,
+
+      timezones: [
+        { zonename: "UTC", timezone: "UTC0", label: "UTC" },
+        { zonename: "Asia/Shanghai", timezone: "CST-8", label: "Asia/Shanghai (UTC+8)" },
+        { zonename: "Asia/Hong_Kong", timezone: "HKT-8", label: "Asia/Hong Kong (UTC+8)" },
+        { zonename: "Asia/Taipei", timezone: "CST-8", label: "Asia/Taipei (UTC+8)" },
+        { zonename: "Asia/Tokyo", timezone: "JST-9", label: "Asia/Tokyo (UTC+9)" },
+        { zonename: "Asia/Seoul", timezone: "KST-9", label: "Asia/Seoul (UTC+9)" },
+        { zonename: "Asia/Singapore", timezone: "SGT-8", label: "Asia/Singapore (UTC+8)" },
+        { zonename: "Asia/Kolkata", timezone: "IST-5:30", label: "Asia/Kolkata (UTC+5:30)" },
+        { zonename: "Asia/Dubai", timezone: "GST-4", label: "Asia/Dubai (UTC+4)" },
+        { zonename: "Asia/Bangkok", timezone: "ICT-7", label: "Asia/Bangkok (UTC+7)" },
+        { zonename: "Asia/Jakarta", timezone: "WIB-7", label: "Asia/Jakarta (UTC+7)" },
+        { zonename: "Asia/Kuala_Lumpur", timezone: "MYT-8", label: "Asia/Kuala Lumpur (UTC+8)" },
+        { zonename: "Asia/Manila", timezone: "PHT-8", label: "Asia/Manila (UTC+8)" },
+        { zonename: "Asia/Ho_Chi_Minh", timezone: "ICT-7", label: "Asia/Ho Chi Minh (UTC+7)" },
+        { zonename: "Europe/London", timezone: "GMT0BST,M3.5.0/1,M10.5.0", label: "Europe/London (UTC+0)" },
+        { zonename: "Europe/Berlin", timezone: "CET-1CEST,M3.5.0,M10.5.0/3", label: "Europe/Berlin (UTC+1)" },
+        { zonename: "Europe/Paris", timezone: "CET-1CEST,M3.5.0,M10.5.0/3", label: "Europe/Paris (UTC+1)" },
+        { zonename: "Europe/Moscow", timezone: "MSK-3", label: "Europe/Moscow (UTC+3)" },
+        { zonename: "Europe/Istanbul", timezone: "TRT-3", label: "Europe/Istanbul (UTC+3)" },
+        { zonename: "Europe/Rome", timezone: "CET-1CEST,M3.5.0,M10.5.0/3", label: "Europe/Rome (UTC+1)" },
+        { zonename: "Europe/Madrid", timezone: "CET-1CEST,M3.5.0,M10.5.0/3", label: "Europe/Madrid (UTC+1)" },
+        { zonename: "Europe/Amsterdam", timezone: "CET-1CEST,M3.5.0,M10.5.0/3", label: "Europe/Amsterdam (UTC+1)" },
+        { zonename: "America/New_York", timezone: "EST5EDT,M3.2.0,M11.1.0", label: "America/New York (UTC-5)" },
+        { zonename: "America/Chicago", timezone: "CST6CDT,M3.2.0,M11.1.0", label: "America/Chicago (UTC-6)" },
+        { zonename: "America/Denver", timezone: "MST7MDT,M3.2.0,M11.1.0", label: "America/Denver (UTC-7)" },
+        { zonename: "America/Los_Angeles", timezone: "PST8PDT,M3.2.0,M11.1.0", label: "America/Los Angeles (UTC-8)" },
+        { zonename: "America/Anchorage", timezone: "AKST9AKDT,M3.2.0,M11.1.0", label: "America/Anchorage (UTC-9)" },
+        { zonename: "America/Sao_Paulo", timezone: "BRT3", label: "America/Sao Paulo (UTC-3)" },
+        { zonename: "America/Mexico_City", timezone: "CST6CDT,M3.2.0,M11.1.0", label: "America/Mexico City (UTC-6)" },
+        { zonename: "America/Toronto", timezone: "EST5EDT,M3.2.0,M11.1.0", label: "America/Toronto (UTC-5)" },
+        { zonename: "America/Vancouver", timezone: "PST8PDT,M3.2.0,M11.1.0", label: "America/Vancouver (UTC-8)" },
+        { zonename: "Pacific/Auckland", timezone: "NZST-12NZDT,M9.5.0,M4.1.0/3", label: "Pacific/Auckland (UTC+12)" },
+        { zonename: "Pacific/Honolulu", timezone: "HST10", label: "Pacific/Honolulu (UTC-10)" },
+        { zonename: "Australia/Sydney", timezone: "AEST-10AEDT,M10.1.0,M4.1.0/3", label: "Australia/Sydney (UTC+10)" },
+        { zonename: "Australia/Melbourne", timezone: "AEST-10AEDT,M10.1.0,M4.1.0/3", label: "Australia/Melbourne (UTC+10)" },
+        { zonename: "Australia/Perth", timezone: "AWST-8", label: "Australia/Perth (UTC+8)" },
+        { zonename: "Africa/Cairo", timezone: "EET-2EEST,M4.5.5/0,M10.5.4/24", label: "Africa/Cairo (UTC+2)" },
+        { zonename: "Africa/Johannesburg", timezone: "SAST-2", label: "Africa/Johannesburg (UTC+2)" },
+        { zonename: "Africa/Lagos", timezone: "WAT-1", label: "Africa/Lagos (UTC+1)" },
+      ],
+
+      init() {
+        this.$watch('hostname', (val) => {
+          if (val === '') {
+            this.hostname_error = false;
+          } else {
+            this.hostname_error = !/^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$/.test(val);
+          }
+        });
+        // If zonename not set, try to match from timezone_str
+        if (!this.zonename && this.timezone_str) {
+          const match = this.timezones.find(tz => tz.timezone === this.timezone_str);
+          if (match) this.zonename = match.zonename;
+        }
+        if (!this.zonename) {
+          this.zonename = "UTC";
+        }
+      },
+
+      updateTimezoneStr() {
+        const tz = this.timezones.find(t => t.zonename === this.zonename);
+        if (tz) this.timezone_str = tz.timezone;
+      },
+
+      saveSettings() {
+        if (this.hostname_error || this.saving) return;
+
+        this.saving = true;
+        this.save_success = false;
+
+        const tz = this.timezones.find(t => t.zonename === this.zonename);
+
+        fetch("/api/v1/general_settings.json", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            language: this.language,
+            zonename: this.zonename,
+            timezone: tz ? tz.timezone : this.timezone_str,
+            hostname: this.hostname,
+            tcp_congestion: this.tcp_congestion,
+            terminal_enabled: this.terminal_enabled
+          })
+        })
+          .then(response => response.json())
+          .then(data => {
+            this.saving = false;
+            if (data.status === "ok") {
+              this.save_success = true;
+              setTimeout(() => { this.save_success = false; }, 3000);
+              // If language changed, reload page to apply new locale
+              if (data.saved && data.saved.includes("language")) {
+                setTimeout(() => { window.location.reload(); }, 500);
+              }
+            } else {
+              alert(data.message || "Save failed");
+            }
+          })
+          .catch(error => {
+            this.saving = false;
+            console.error("Error saving settings:", error);
+            alert("Network error");
+          });
+      }
+    }));
+  });
+</script>
+{% endblock %}

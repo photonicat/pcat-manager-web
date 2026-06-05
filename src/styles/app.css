@@ -1,0 +1,153 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@font-face {
+  font-family: "Orbitron";
+  font-weight: 700;
+  src: url("/static/fonts/Orbitron/static/Orbitron-Bold.ttf");
+  font-display: block;
+}
+
+/* Extra Orbitron weights so the screen-layout preview can render each named
+   device font with its real .ttf (matches photonicat2_mini_display/main.go:
+   Regular 400, Medium 500, ExtraBold 800). Without these the browser would
+   synthesize weights and the glyph metrics would drift from the device. */
+@font-face {
+  font-family: "Orbitron";
+  font-weight: 400;
+  src: url("/static/fonts/Orbitron/static/Orbitron-Regular.ttf");
+  font-display: block;
+}
+
+@font-face {
+  font-family: "Orbitron";
+  font-weight: 500;
+  src: url("/static/fonts/Orbitron/static/Orbitron-Medium.ttf");
+  font-display: block;
+}
+
+@font-face {
+  font-family: "Orbitron";
+  font-weight: 800;
+  src: url("/static/fonts/Orbitron/static/Orbitron-ExtraBold.ttf");
+  font-display: block;
+}
+
+@font-face {
+  font-family: "Titillium Web";
+  src: url("/static/fonts/Titillium_Web/TitilliumWeb-Regular.ttf");
+  font-display: block;
+}
+
+@font-face {
+  font-family: "Titillium Web";
+  font-weight: 600;
+  src: url("/static/fonts/Titillium_Web/TitilliumWeb-SemiBold.ttf");
+  font-display: block;
+}
+
+@layer components {
+  .nav {
+    @apply block border-b-2 border-white pl-1 align-middle text-gray-500 no-underline hover:border-pcatgray2 hover:text-pcatgray2;
+    height: 50px;
+  }
+
+  .nav-active {
+    @apply block border-b-2 border-pcatgray2 pl-1 align-middle text-pcatgray2 no-underline hover:text-gray-900;
+    height: 50px;
+  }
+
+  .language_active {
+    @apply bg-gray-300;
+  }
+
+  table.list-info tr {
+    @apply border-b last:border-none;
+  }
+
+  table.list-info td {
+    @apply py-2;
+  }
+
+  .modal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.6);
+    z-index: 999;
+  }
+
+  .modal .modal-main {
+    position: fixed;
+    background: white;
+    height: auto;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    @apply min-w-min max-w-md rounded-md;
+  }
+
+  .language_switch span[data-language-switcher] {
+    @apply ml-2 inline-flex items-center;
+  }
+
+  .upload-main {
+    @apply relative mb-4 flex flex-col items-center border border-dashed border-gray-400 p-4 hover:bg-gray-50;
+  }
+
+  .upload-main input[type="file"] {
+    font-size: 32px;
+    position: absolute;
+    left: 0;
+    top: 0;
+    opacity: 0;
+    width: 100%;
+    height: 100%;
+    @apply cursor-pointer;
+  }
+
+  /* Fan speed slider styles */
+  .fan-slider {
+    @apply w-32 h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer;
+  }
+  
+  .fan-slider::-webkit-slider-thumb {
+    @apply appearance-none w-4 h-4 bg-blue-600 rounded-full cursor-pointer;
+  }
+  
+  .fan-slider::-moz-range-thumb {
+    @apply w-4 h-4 bg-blue-600 rounded-full border-0 cursor-pointer;
+  }
+
+  /* Charge limit slider styles */
+  .charge-limit-slider {
+    @apply h-2 rounded-lg appearance-none cursor-pointer;
+  }
+
+  .charge-limit-slider::-webkit-slider-thumb {
+    @apply appearance-none w-5 h-5 bg-green-600 rounded-full cursor-pointer;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+  }
+
+  .charge-limit-slider::-moz-range-thumb {
+    @apply w-5 h-5 bg-green-600 rounded-full border-0 cursor-pointer;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+  }
+
+  /* Password input bullet styling - rounded square dots like dice */
+  input[type="password"] {
+    font-family: system-ui, -apple-system, sans-serif;
+    -webkit-text-security: square;
+    font-size: 18px;
+    letter-spacing: 0.2em;
+    border-radius: 0.375rem;
+  }
+  
+  /* Firefox fallback */
+  input[type="password"]::-moz-placeholder {
+    font-family: inherit;
+  }
+}

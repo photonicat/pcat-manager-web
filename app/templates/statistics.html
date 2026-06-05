@@ -1,0 +1,747 @@
+{% extends '_base.html' %} {% block content %}
+<div class="container mx-auto w-full pt-10 pb-12 sm:pt-24 sm:pb-12 md:pt-28 lg:px-4" x-data="statistics">
+  <div class="flex items-center justify-between">
+    <h1 class="px-1 py-4 font-bold uppercase text-gray-600">{{locales["nav_statistics"]}}</h1>
+  </div>
+
+  {% include '_notification.html' %}
+
+  <!-- Battery History Chart -->
+  <div class="mb-4 px-2 lg:px-0">
+    <div class="rounded border bg-white shadow">
+      <div class="border-b p-3 flex items-center justify-between">
+        <h5 class="flex items-center font-bold text-gray-600">
+          <svg xmlns="http://www.w3.org/2000/svg" class="mr-2 h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+            <rect x="2" y="7" width="18" height="10" rx="2" stroke-linecap="round" stroke-linejoin="round" />
+            <path stroke-linecap="round" stroke-linejoin="round" d="M22 11v2" />
+            <rect x="5" y="10" width="8" height="4" rx="0.5" fill="currentColor" stroke="none" />
+          </svg>
+          {{locales.battery_chart_title}}
+          <span x-show="current_uptime" class="ml-2 text-xs font-normal text-gray-400" x-text="'(' + current_uptime + ')'"></span>
+        </h5>
+        <div class="flex space-x-1">
+          <button @click="loadBatteryHistory(24)" :class="bat_hours === 24 ? 'bg-pcatblue text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'" class="px-3 py-1 text-xs rounded-l-lg font-medium transition-colors">{{locales.battery_chart_24h}}</button>
+          <button @click="loadBatteryHistory(168)" :class="bat_hours === 168 ? 'bg-pcatblue text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'" class="px-3 py-1 text-xs font-medium transition-colors">{{locales.battery_chart_7d}}</button>
+          <button @click="loadBatteryHistory(720)" :class="bat_hours === 720 ? 'bg-pcatblue text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'" class="px-3 py-1 text-xs rounded-r-lg font-medium transition-colors">{{locales.battery_chart_30d}}</button>
+        </div>
+      </div>
+      <div class="p-3">
+        <!-- Legend -->
+        <div class="flex items-center space-x-4 mb-2 text-xs text-gray-500">
+          <label class="flex items-center space-x-1 cursor-pointer">
+            <input type="checkbox" x-model="bat_show_soc" class="form-checkbox h-3 w-3 text-blue-500 rounded" />
+            <span class="w-3 h-0.5 bg-blue-500 inline-block"></span>
+            <span>{{locales.battery_chart_soc}}</span>
+          </label>
+          <label class="flex items-center space-x-1 cursor-pointer">
+            <input type="checkbox" x-model="bat_show_voltage" class="form-checkbox h-3 w-3 text-green-500 rounded" />
+            <span class="w-3 h-0.5 bg-green-500 inline-block"></span>
+            <span>{{locales.battery_chart_voltage}}</span>
+          </label>
+          <label class="flex items-center space-x-1 cursor-pointer">
+            <input type="checkbox" x-model="bat_show_current" class="form-checkbox h-3 w-3 rounded" style="color: #FDE021" />
+            <span class="w-3 h-0.5 inline-block" style="background: #FDE021"></span>
+            <span>{{locales.battery_chart_current}}</span>
+          </label>
+          <label class="flex items-center space-x-1 cursor-pointer">
+            <input type="checkbox" x-model="bat_show_temp" class="form-checkbox h-3 w-3 text-red-500 rounded" />
+            <span class="w-3 h-0.5 bg-red-500 inline-block"></span>
+            <span>{{locales.battery_chart_temp}}</span>
+          </label>
+          <span class="flex items-center space-x-1">
+            <span class="w-0 h-0 inline-block" style="border-left: 4px solid transparent; border-right: 4px solid transparent; border-bottom: 6px solid #22c55e"></span>
+            <span>{{locales.battery_chart_power_on}}</span>
+          </span>
+          <span class="flex items-center space-x-1">
+            <span class="w-0 h-0 inline-block" style="border-left: 4px solid transparent; border-right: 4px solid transparent; border-bottom: 6px solid #ef4444"></span>
+            <span>{{locales.battery_chart_power_off}}</span>
+          </span>
+          <span class="flex items-center space-x-1">
+            <span class="w-0 h-0 inline-block" style="border-left: 4px solid transparent; border-right: 4px solid transparent; border-bottom: 6px solid #06b6d4"></span>
+            <span>{{locales.battery_chart_dc_plug}}</span>
+          </span>
+          <span class="flex items-center space-x-1">
+            <span class="w-0 h-0 inline-block" style="border-left: 4px solid transparent; border-right: 4px solid transparent; border-bottom: 6px solid #0e7490"></span>
+            <span>{{locales.battery_chart_dc_unplug}}</span>
+          </span>
+        </div>
+        <!-- Chart Canvas -->
+        <div class="relative" style="height: 264px" x-ref="chartContainer">
+          <canvas x-ref="batteryCanvas" width="800" height="264" style="width: 100%; height: 264px; display: block"></canvas>
+          <div x-show="bat_data.length === 0 && bat_power_events.length === 0 && !bat_loading" class="absolute inset-0 flex items-center justify-center text-gray-400 text-sm">{{locales.battery_chart_no_data}}</div>
+          <div x-show="bat_loading" class="absolute inset-0 flex items-center justify-center">
+            <svg class="animate-spin h-6 w-6 text-gray-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+          </div>
+        </div>
+        <!-- Hover tooltip -->
+        <div x-ref="batTooltip" class="hidden absolute bg-gray-800 text-white text-xs rounded px-2 py-1 pointer-events-none z-50 whitespace-nowrap" style="position: fixed"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Two column: Device List + Traffic Stats -->
+  <div class="mb-8 flex w-full flex-col space-y-4 px-2 leading-normal text-gray-800 lg:flex-row lg:space-y-0 lg:space-x-4 lg:px-0">
+    <div class="grow">
+      <div class="rounded border bg-white shadow">
+        <div class="border-b p-3">
+          <h5 class="flex items-center font-bold text-gray-600">
+            <svg xmlns="http://www.w3.org/2000/svg" class="mr-2 h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 10h16M4 14h16M4 18h16"></path>
+            </svg>
+            {{locales["card_device_list"]}}
+          </h5>
+        </div>
+        <div class="p-3">
+          <table class="whitespace-no-wrap w-full">
+            <thead class="text-sm">
+              <tr>
+                <th class="text-left">{{locales["mac_address"]}}</th>
+                <th class="text-left">{{locales["ip_address"]}}</th>
+                <th class="text-left">{{locales["device_name"]}}</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y bg-white">
+              <template x-for="device in online_devices">
+                <tr class="hover:bg-gray-100">
+                  <td class="py-3 text-left text-sm" x-text="device.mac"></td>
+                  <td class="text-left text-sm" x-text="device.ip"></td>
+                  <td class="text-left text-sm" x-text="device.name"></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    <div class="grow" x-data="{clear_btn_show: true}">
+      <div class="rounded border bg-white shadow">
+        <div class="border-b">
+          <h5 class="flex items-center justify-between px-3 font-bold text-gray-600">
+            <div class="flex">
+              <div class="mr-2 flex p-3">
+                <svg xmlns="http://www.w3.org/2000/svg" class="mr-2 h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M16 8v8m-4-5v5m-4-2v2m-2 4h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
+                </svg>
+                {{locales["card_traffic_stats"]}}
+              </div>
+
+              <div class="flex items-stretch">
+                <button :class="network_type === 'mobile' ? 'border-b-2 border-b-pcatblue' : '' " :disabled="loading.fetchMobileStats || loading.fetchWiredStats" class="flex items-center border-x px-4 hover:bg-gray-100 disabled:bg-gray-50 disabled:cursor-not-allowed" @click="fetch_data_stats('mobile')">
+                  <svg x-show="loading.fetchMobileStats" class="animate-spin -ml-1 mr-2 h-4 w-4 text-gray-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                  <span x-text="loading.fetchMobileStats ? 'Loading...' : '{{locales.network_type_mobile}}'"></span>
+                </button>
+              </div>
+              <div class="flex items-stretch">
+                <button :class="network_type === 'wired' ? 'border-b-2 border-b-pcatblue' : '' " :disabled="loading.fetchMobileStats || loading.fetchWiredStats" class="flex items-center border-x px-4 hover:bg-gray-100 disabled:bg-gray-50 disabled:cursor-not-allowed" @click="fetch_data_stats('wired')">
+                  <svg x-show="loading.fetchWiredStats" class="animate-spin -ml-1 mr-2 h-4 w-4 text-gray-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                  <span x-text="loading.fetchWiredStats ? 'Loading...' : '{{locales.network_type_wired}}'"></span>
+                </button>
+              </div>
+            </div>
+            <button @click="reset_statics" x-show="clear_btn_show" :disabled="loading.resetStats" :class="loading.resetStats ? 'text-gray-400 cursor-not-allowed' : 'text-gray-600 hover:text-red-600'" class="p-1 rounded transition-colors duration-150">
+              <svg x-show="loading.resetStats" class="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+              </svg>
+              <svg x-show="!loading.resetStats" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-trash-2">
+                <polyline points="3 6 5 6 21 6"></polyline>
+                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                <line x1="10" y1="11" x2="10" y2="17"></line>
+                <line x1="14" y1="11" x2="14" y2="17"></line>
+              </svg>
+            </button>
+          </h5>
+        </div>
+        <div class="p-3">
+          <table class="whitespace-no-wrap w-full">
+            <tbody class="divide-y bg-white">
+              <tr class="hover:bg-gray-100">
+                <td class="py-3 text-left text-sm">{{locales["today_used"]}}</td>
+                <td class="text-right text-sm" x-text="today_used_size"></td>
+              </tr>
+              <tr class="hover:bg-gray-100">
+                <td class="py-3 text-left text-sm">{{locales["week_used"]}}</td>
+                <td class="text-right text-sm" x-text="week_used_size"></td>
+              </tr>
+              <tr class="hover:bg-gray-100">
+                <td class="py-3 text-left text-sm">{{locales["month_used"]}}</td>
+                <td class="text-right text-sm" x-text="month_used_size"></td>
+              </tr>
+              <tr class="hover:bg-gray-100">
+                <td class="py-3 text-left text-sm">{{locales["last_month_used"]}}</td>
+                <td class="text-right text-sm" x-text="last_month_used_size"></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  function humanFileSize(bytes, si = false, dp = 1) {
+    const thresh = si ? 1000 : 1024;
+    if (Math.abs(bytes) < 1024 * 1024) {
+      return "" + parseInt(bytes / 1024.0) + " kB";
+    }
+    const units = si ? ["kB", "MB", "GB", "TB", "PB", "EB", "ZB", "YB"] : ["KiB", "MiB", "GiB", "TiB", "PiB", "EiB", "ZiB", "YiB"];
+    let u = -1;
+    const r = 10 ** dp;
+    do {
+      bytes /= thresh;
+      ++u;
+    } while (Math.round(Math.abs(bytes) * r) / r >= thresh && u < units.length - 1);
+    return bytes.toFixed(dp) + " " + units[u];
+  }
+
+  function drawBatteryChart(canvas, data, showSoc, showVoltage, showCurrent, showTemp, powerEvents, tsMin, tsMax) {
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    const dpr = window.devicePixelRatio || 1;
+    const parent = canvas.parentElement;
+    const W = parent ? parent.offsetWidth : canvas.offsetWidth;
+    const H = 264;
+    if (W < 10) return; // Not laid out yet
+    canvas.width = W * dpr;
+    canvas.height = H * dpr;
+    canvas.style.width = W + "px";
+    canvas.style.height = H + "px";
+    ctx.scale(dpr, dpr);
+
+    ctx.clearRect(0, 0, W, H);
+
+    const PAD_L = 45,
+      PAD_R = Math.max(45, 45 + ([showVoltage, showCurrent, showTemp].filter(Boolean).length - 1) * 35),
+      PAD_T = 10,
+      PAD_B = 30;
+    const cW = W - PAD_L - PAD_R;
+    const cH = H - PAD_T - PAD_B;
+
+    // Always use full time range (tsMin/tsMax from caller)
+    const tsRange = tsMax - tsMin || 1;
+
+    function xPos(ts) {
+      return PAD_L + ((ts - tsMin) / tsRange) * cW;
+    }
+
+    // Draw grid
+    ctx.strokeStyle = "#f0f0f0";
+    ctx.lineWidth = 1;
+    for (let i = 0; i <= 4; i++) {
+      let y = PAD_T + (i / 4) * cH;
+      ctx.beginPath();
+      ctx.moveTo(PAD_L, y);
+      ctx.lineTo(W - PAD_R, y);
+      ctx.stroke();
+    }
+
+    // Draw power-off shading (grey bands between shutdown and next start)
+    if (powerEvents && powerEvents.length > 0) {
+      let sorted = powerEvents.slice().sort((a, b) => a.ts - b.ts);
+      let offStart = null;
+      // Check if first event is a start (meaning device was off before)
+      for (let i = 0; i < sorted.length; i++) {
+        let ev = sorted[i];
+        let isOff = ev.type === "system_shutdown" || ev.type === "idle_shutdown_triggered" || ev.type === "low_battery_shutdown_triggered" || ev.type === "car_mode_shutdown" || ev.type === "timer_shutdown";
+        let isOn = ev.type === "system_start" || ev.type === "car_mode_power_on" || ev.type === "timer_power_on";
+        if (isOff) {
+          offStart = ev.ts;
+        } else if (isOn && offStart !== null) {
+          // Draw grey band from offStart to this start
+          ctx.fillStyle = "rgba(200, 200, 200, 0.25)";
+          let x1 = Math.max(xPos(offStart), PAD_L);
+          let x2 = Math.min(xPos(ev.ts), W - PAD_R);
+          if (x2 > x1) ctx.fillRect(x1, PAD_T, x2 - x1, cH);
+          offStart = null;
+        }
+      }
+      // If still off at end of chart, shade to the end
+      if (offStart !== null) {
+        ctx.fillStyle = "rgba(200, 200, 200, 0.25)";
+        let x1 = Math.max(xPos(offStart), PAD_L);
+        ctx.fillRect(x1, PAD_T, W - PAD_R - x1, cH);
+      }
+
+      // Draw vertical event lines
+      for (let ev of sorted) {
+        let isOff = ev.type === "system_shutdown" || ev.type === "idle_shutdown_triggered" || ev.type === "low_battery_shutdown_triggered" || ev.type === "car_mode_shutdown" || ev.type === "timer_shutdown";
+        let isOn = ev.type === "system_start" || ev.type === "car_mode_power_on" || ev.type === "timer_power_on";
+        let isDcPlug = ev.type === "dc_plugged_in";
+        let isDcUnplug = ev.type === "dc_unplugged";
+        if (!isOff && !isOn && !isDcPlug && !isDcUnplug) continue;
+        let x = xPos(ev.ts);
+        if (x < PAD_L || x > W - PAD_R) continue;
+        // Small triangle marker at top
+        if (isDcPlug) {
+          ctx.fillStyle = "#06b6d4";
+        } else if (isDcUnplug) {
+          ctx.fillStyle = "#0e7490";
+        } else {
+          ctx.fillStyle = isOn ? "#22c55e" : "#ef4444";
+        }
+        ctx.beginPath();
+        ctx.moveTo(x, PAD_T);
+        ctx.lineTo(x - 4, PAD_T - 6);
+        ctx.lineTo(x + 4, PAD_T - 6);
+        ctx.closePath();
+        ctx.fill();
+      }
+    }
+
+    // Time labels on X axis (adapt count to available width)
+    ctx.fillStyle = "#9ca3af";
+    ctx.font = "10px monospace";
+    ctx.textAlign = "center";
+    const labelWidth = 75; // approx pixel width per "MM-DD HH:MM" label
+    const labelCount = Math.max(2, Math.min(6, Math.floor(cW / labelWidth)));
+    for (let i = 0; i <= labelCount; i++) {
+      let ts = tsMin + (i / labelCount) * tsRange;
+      let d = new Date(ts * 1000);
+      let label = String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0") + " " + String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+      ctx.fillText(label, xPos(ts), H - 5);
+    }
+
+    // Gap threshold: if two consecutive data points are more than 10 minutes apart, break the line
+    const GAP_THRESHOLD = 600;
+
+    function drawLine(values, color, yMin, yMax, dashed) {
+      if (values.length < 1) return;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash(dashed ? [4, 3] : []);
+      let prevTs = null;
+      for (let i = 0; i < values.length; i++) {
+        let v = values[i].v;
+        if (v == null) {
+          prevTs = null;
+          continue;
+        }
+        let x = xPos(values[i].ts);
+        let y = PAD_T + (1 - (v - yMin) / (yMax - yMin || 1)) * cH;
+        let gap = prevTs !== null && values[i].ts - prevTs > GAP_THRESHOLD;
+        if (prevTs === null || gap) {
+          // Start a new segment
+          if (i > 0 && prevTs !== null) ctx.stroke(); // finish previous segment
+          ctx.beginPath();
+          ctx.moveTo(x, y);
+        } else {
+          ctx.lineTo(x, y);
+        }
+        prevTs = values[i].ts;
+      }
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    function drawAreaLine(values, lineColor, fillColor, yMin, yMax) {
+      if (values.length < 1) return;
+      // Draw segments with area fill, breaking on gaps
+      let segments = [];
+      let seg = [];
+      let prevTs = null;
+      for (let i = 0; i < values.length; i++) {
+        let v = values[i].v;
+        if (v == null) { if (seg.length > 0) { segments.push(seg); seg = []; } prevTs = null; continue; }
+        let gap = prevTs !== null && values[i].ts - prevTs > GAP_THRESHOLD;
+        if (gap && seg.length > 0) { segments.push(seg); seg = []; }
+        seg.push(values[i]);
+        prevTs = values[i].ts;
+      }
+      if (seg.length > 0) segments.push(seg);
+
+      let yBottom = PAD_T + cH;
+      for (let seg of segments) {
+        if (seg.length < 1) continue;
+        // Fill area
+        ctx.beginPath();
+        let x0 = xPos(seg[0].ts);
+        let y0 = PAD_T + (1 - (seg[0].v - yMin) / (yMax - yMin || 1)) * cH;
+        ctx.moveTo(x0, yBottom);
+        ctx.lineTo(x0, y0);
+        for (let i = 1; i < seg.length; i++) {
+          let x = xPos(seg[i].ts);
+          let y = PAD_T + (1 - (seg[i].v - yMin) / (yMax - yMin || 1)) * cH;
+          ctx.lineTo(x, y);
+        }
+        ctx.lineTo(xPos(seg[seg.length - 1].ts), yBottom);
+        ctx.closePath();
+        ctx.fillStyle = fillColor;
+        ctx.fill();
+        // Draw line on top
+        ctx.beginPath();
+        ctx.moveTo(x0, y0);
+        for (let i = 1; i < seg.length; i++) {
+          let x = xPos(seg[i].ts);
+          let y = PAD_T + (1 - (seg[i].v - yMin) / (yMax - yMin || 1)) * cH;
+          ctx.lineTo(x, y);
+        }
+        ctx.strokeStyle = lineColor;
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      }
+    }
+
+    // SOC: 0-100% (left axis, blue with area fill)
+    if (showSoc && data && data.length > 0) {
+      let socData = data.map((d) => ({ ts: d.ts, v: d.soc }));
+      drawAreaLine(socData, "#3b82f6", "rgba(59, 130, 246, 0.12)", 0, 100);
+      // Left Y axis labels for SOC
+      ctx.fillStyle = "#3b82f6";
+      ctx.textAlign = "right";
+      ctx.font = "10px monospace";
+      for (let i = 0; i <= 4; i++) {
+        let val = 100 - i * 25;
+        let y = PAD_T + (i / 4) * cH;
+        ctx.fillText(val + "%", PAD_L - 4, y + 3);
+      }
+    }
+
+    // Voltage: fixed 5.5V-7.5V (right axis, green with area fill)
+    if (showVoltage && data && data.length > 0) {
+      let vData = data.filter((d) => d.voltage != null).map((d) => ({ ts: d.ts, v: d.voltage }));
+      if (vData.length > 0) {
+        let vMin = 5.5, vMax = 8.5;
+        drawAreaLine(vData, "#22c55e", "rgba(34, 197, 94, 0.15)", vMin, vMax);
+        // Right Y axis labels for voltage
+        ctx.fillStyle = "#22c55e";
+        ctx.textAlign = "left";
+        for (let i = 0; i <= 4; i++) {
+          let val = vMax - (i / 4) * (vMax - vMin);
+          let y = PAD_T + (i / 4) * cH;
+          ctx.fillText(val.toFixed(1) + "V", W - PAD_R + 4, y + 3);
+        }
+      }
+    }
+
+    // Wattage: voltage * current / 1000 (solid orange, auto-range, with right-side W labels)
+    if (showCurrent && data && data.length > 0) {
+      let wData = data.filter((d) => d.current != null && d.voltage != null).map((d) => ({ ts: d.ts, v: (d.voltage * d.current) / 1000 }));
+      if (wData.length > 0) {
+        let wMin = -50;
+        let wMax = 50;
+        drawLine(wData, "#FDE021", wMin, wMax, false);
+        // Right Y axis labels for wattage (offset further right when voltage is also shown)
+        ctx.fillStyle = "#d4b800";
+        ctx.textAlign = "left";
+        ctx.font = "10px monospace";
+        let wLabelX = showVoltage ? W - PAD_R + 4 + 32 : W - PAD_R + 4;
+        for (let i = 0; i <= 4; i++) {
+          let val = wMax - (i / 4) * (wMax - wMin);
+          let y = PAD_T + (i / 4) * cH;
+          ctx.fillText(Math.round(val) + "W", wLabelX, y + 3);
+        }
+      }
+    }
+
+    // Temperature: fixed -20°C to 80°C (red dashed line, right axis)
+    if (showTemp && data && data.length > 0) {
+      let tData = data.filter((d) => d.temperature != null).map((d) => ({ ts: d.ts, v: d.temperature }));
+      if (tData.length > 0) {
+        let tMin = -20, tMax = 80;
+        drawLine(tData, "#ef4444", tMin, tMax, true);
+        // Right Y axis labels for temperature
+        ctx.fillStyle = "#ef4444";
+        ctx.textAlign = "left";
+        ctx.font = "10px monospace";
+        let rightLabelsCount = [showVoltage, showCurrent].filter(Boolean).length;
+        let tLabelX = W - PAD_R + 4 + rightLabelsCount * 32;
+        for (let i = 0; i <= 4; i++) {
+          let val = tMax - (i / 4) * (tMax - tMin);
+          let y = PAD_T + (i / 4) * cH;
+          ctx.fillText(val.toFixed(0) + "°", tLabelX, y + 3);
+        }
+      }
+    }
+
+    // Store chart meta for tooltip
+    canvas._chartMeta = { data: data || [], powerEvents: powerEvents || [], tsMin, tsMax, tsRange, PAD_L, PAD_R, PAD_T, PAD_B, cW, cH };
+  }
+
+  document.addEventListener("alpine:init", () => {
+    Alpine.data("statistics", () => ({
+      init() {
+        const fetch_clients = () => {
+          fetch("/api/v1/wifi_clients.json")
+            .then((response) => response.json())
+            .then((data) => {
+              this.online_devices = data.devices;
+            });
+        };
+
+        setInterval(() => {
+          fetch_clients();
+        }, 3000);
+
+        fetch_clients();
+        this.fetch_data_stats("mobile");
+        this.loadBatteryHistory(24);
+
+        // Fetch uptime
+        const fetch_uptime = () => {
+          fetch("/api/v1/dashboard.json")
+            .then((r) => r.json())
+            .then((data) => { this.current_uptime = data.uptime || ""; })
+            .catch(() => {});
+        };
+        fetch_uptime();
+        setInterval(fetch_uptime, 30000);
+
+        // Auto-refresh battery chart every 60 seconds
+        setInterval(() => {
+          this.loadBatteryHistory(this.bat_hours);
+        }, 60000);
+
+        // Tooltip on canvas hover
+        this.$nextTick(() => {
+          const canvas = this.$refs.batteryCanvas;
+          const tooltip = this.$refs.batTooltip;
+          canvas.addEventListener("mousemove", (e) => {
+            const meta = canvas._chartMeta;
+            if (!meta || meta.data.length < 2) {
+              tooltip.classList.add("hidden");
+              return;
+            }
+            const rect = canvas.getBoundingClientRect();
+            const mx = e.clientX - rect.left;
+            if (mx < meta.PAD_L || mx > rect.width - meta.PAD_R) {
+              tooltip.classList.add("hidden");
+              return;
+            }
+            const ratio = (mx - meta.PAD_L) / meta.cW;
+            const ts = meta.tsMin + ratio * meta.tsRange;
+            // Check if near a power event first
+            let nearEvent = null;
+            if (meta.powerEvents) {
+              for (let ev of meta.powerEvents) {
+                if (Math.abs(ev.ts - ts) < meta.tsRange * 0.01) {
+                  nearEvent = ev;
+                  break;
+                }
+              }
+            }
+            // Find closest data point
+            let closest = null,
+              minDist = Infinity;
+            for (let d of meta.data) {
+              let dist = Math.abs(d.ts - ts);
+              if (dist < minDist) {
+                minDist = dist;
+                closest = d;
+              }
+            }
+            let tipParts = [];
+            if (nearEvent) {
+              let evDt = new Date(nearEvent.ts * 1000);
+              let evTime = String(evDt.getMonth() + 1).padStart(2, "0") + "/" + String(evDt.getDate()).padStart(2, "0") + " " + String(evDt.getHours()).padStart(2, "0") + ":" + String(evDt.getMinutes()).padStart(2, "0");
+              let evLabel = nearEvent.type.replace(/_/g, " ");
+              tipParts.push(evTime + " [" + evLabel + "]");
+            }
+            if (closest && minDist < meta.tsRange * 0.02) {
+              let dt = new Date(closest.ts * 1000);
+              let timeStr = String(dt.getMonth() + 1).padStart(2, "0") + "/" + String(dt.getDate()).padStart(2, "0") + " " + String(dt.getHours()).padStart(2, "0") + ":" + String(dt.getMinutes()).padStart(2, "0");
+              let watt = ((closest.voltage || 0) * (closest.current || 0) / 1000).toFixed(2);
+              let tip = timeStr + "  SOC:" + closest.soc + "%  V:" + (closest.voltage || 0).toFixed(2) + "  " + watt + "W";
+              if (closest.temperature != null) tip += "  " + closest.temperature + "°C";
+              tipParts.push(tip);
+            }
+            if (tipParts.length === 0) {
+              let hDt = new Date(ts * 1000);
+              tipParts.push(String(hDt.getMonth() + 1).padStart(2, "0") + "/" + String(hDt.getDate()).padStart(2, "0") + " " + String(hDt.getHours()).padStart(2, "0") + ":" + String(hDt.getMinutes()).padStart(2, "0"));
+            }
+            tooltip.textContent = tipParts.join(" | ");
+            tooltip.style.left = e.clientX + 12 + "px";
+            tooltip.style.top = e.clientY - 28 + "px";
+            tooltip.classList.remove("hidden");
+          });
+          canvas.addEventListener("mouseleave", () => {
+            tooltip.classList.add("hidden");
+          });
+        });
+
+        // Redraw on resize
+        window.addEventListener("resize", () => {
+          this.$nextTick(() => this._tryDraw());
+        });
+
+        // Watch toggles
+        this.$watch("bat_show_soc", () => this._redrawChart());
+        this.$watch("bat_show_voltage", () => this._redrawChart());
+        this.$watch("bat_show_current", () => this._redrawChart());
+        this.$watch("bat_show_temp", () => this._redrawChart());
+      },
+
+      online_devices: [],
+      today_used: 0,
+      week_used: 0,
+      month_used: 0,
+      last_month_used: 0,
+      network_type: "",
+      loading: {
+        fetchMobileStats: false,
+        fetchWiredStats: false,
+        resetStats: false,
+      },
+      notification: {
+        show: false,
+        message: "",
+        message_en: "",
+        message_cn: "",
+        type: "info",
+      },
+
+      // Uptime
+      current_uptime: "",
+
+      // Battery chart state
+      bat_data: [],
+      bat_power_events: [],
+      bat_ts_min: 0,
+      bat_ts_max: 0,
+      bat_hours: 24,
+      bat_loading: false,
+      bat_show_soc: true,
+      bat_show_voltage: true,
+      bat_show_current: false,
+      bat_show_temp: false,
+
+      loadBatteryHistory(hours) {
+        this.bat_hours = hours;
+        this.bat_loading = true;
+        fetch("/api/v1/battery_history.json?hours=" + hours)
+          .then((r) => r.json())
+          .then((resp) => {
+            this.bat_data = resp.data || [];
+            this.bat_power_events = resp.power_events || [];
+            // Always use full time range: (now - hours) to now
+            const nowTs = resp.now || Math.floor(Date.now() / 1000);
+            this.bat_ts_min = nowTs - hours * 3600;
+            this.bat_ts_max = nowTs;
+            this.bat_loading = false;
+            this.$nextTick(() => {
+              if (!this._tryDraw()) {
+                setTimeout(() => {
+                  if (!this._tryDraw()) {
+                    setTimeout(() => this._tryDraw(), 300);
+                  }
+                }, 100);
+              }
+            });
+          })
+          .catch(() => {
+            this.bat_loading = false;
+          });
+      },
+
+      _tryDraw() {
+        const c = this.$refs.batteryCanvas;
+        if (!c) return false;
+        const parent = c.parentElement;
+        if (!parent || parent.offsetWidth < 10) return false;
+        drawBatteryChart(c, this.bat_data, this.bat_show_soc, this.bat_show_voltage, this.bat_show_current, this.bat_show_temp, this.bat_power_events, this.bat_ts_min, this.bat_ts_max);
+        return true;
+      },
+
+      _redrawChart() {
+        if (!this._tryDraw()) {
+          setTimeout(() => this._tryDraw(), 50);
+        }
+      },
+
+      fetch_data_stats(network_type) {
+        const loadingKey = network_type === "mobile" ? "fetchMobileStats" : "fetchWiredStats";
+        this.loading[loadingKey] = true;
+        this.network_type = network_type;
+
+        fetch("/api/v1/data_stats.json?network_type=" + network_type)
+          .then((response) => {
+            if (!response.ok) throw new Error("Network response was not ok");
+            return response.json();
+          })
+          .then((data) => {
+            this.today_used = data.today_used;
+            this.week_used = data.week_used;
+            this.month_used = data.month_used;
+            this.last_month_used = data.last_month_used;
+            this.loading[loadingKey] = false;
+          })
+          .catch((error) => {
+            console.error("Error fetching data stats:", error);
+            this.showNotification("Failed to fetch statistics", "", "error");
+            this.loading[loadingKey] = false;
+          });
+      },
+
+      get today_used_size() {
+        return humanFileSize(this.today_used, true);
+      },
+      get week_used_size() {
+        return humanFileSize(this.week_used, true);
+      },
+      get month_used_size() {
+        return humanFileSize(this.month_used, true);
+      },
+      get last_month_used_size() {
+        return humanFileSize(this.last_month_used, true);
+      },
+
+      reset_statics() {
+        if (confirm("{{locales['statistics_reset_confirm']}}")) {
+          this.loading.resetStats = true;
+          fetch("/stats/reset", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key: "" }) })
+            .then((r) => {
+              if (!r.ok) throw new Error("fail");
+              return r.json();
+            })
+            .then((data) => {
+              if (data.status === "ok") {
+                this.today_used = 0;
+                this.week_used = 0;
+                this.month_used = 0;
+                this.last_month_used = 0;
+                this.showNotification("Statistics reset successfully", "", "success");
+              }
+              this.loading.resetStats = false;
+            })
+            .catch(() => {
+              this.showNotification("Failed to reset", "", "error");
+              this.loading.resetStats = false;
+            });
+        }
+      },
+
+      showNotification(message_en, message_cn = "", type = "info") {
+        this.notification.message_en = message_en;
+        this.notification.message_cn = message_cn;
+        this.notification.message = message_en;
+        this.notification.type = type;
+        this.notification.show = true;
+        if (type !== "error") {
+          setTimeout(() => {
+            this.notification.show = false;
+          }, 4000);
+        }
+      },
+      hideNotification() {
+        this.notification.show = false;
+      },
+    }));
+  });
+</script>
+
+{% endblock %} {% block bottom %}
+<script>
+  document.addEventListener("alpine:init", () => {
+    Alpine.store("app").set_page("statistics");
+  });
+</script>
+{% endblock %}

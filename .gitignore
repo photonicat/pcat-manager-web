@@ -1,0 +1,33 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+/.next/
+/out/
+/.pnp
+.pnp.js
+
+# testing
+/coverage
+
+# production
+/app_temp
+/build
+
+# misc
+.DS_Store
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+.gitlab_token
+
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+app/__pycache__/
+app/venv/
+venv/
+
+__pycache__
