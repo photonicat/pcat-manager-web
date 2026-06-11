@@ -268,6 +268,32 @@ def does_lan_have_carrier():
       return False
   return False
 
+# Which interface actually carries the default route (the "active WAN").
+# network_route_mode only says wired/mobile and can't tell WAN from LAN when
+# both ethernet ports have carrier, so the status bar lit up the underline on
+# both. Resolve the real egress from the lowest-metric default route's device:
+#   eth0 -> "wan", eth1 -> "lan", anything else (eth2/wwan/usb*) -> "mobile".
+# Returns "" when there is no default route.
+def get_active_egress():
+  try:
+    out = subprocess.run(
+      ["ip", "-j", "route", "show", "default"],
+      capture_output=True, text=True, timeout=3).stdout.strip()
+    routes = json.loads(out) if out else []
+    if not routes:
+      return ""
+    # lowest metric wins (absent metric == 0, i.e. highest priority)
+    best = min(routes, key=lambda r: r.get("metric", 0))
+    dev = best.get("dev", "")
+    if dev == "eth0":
+      return "wan"
+    if dev == "eth1":
+      return "lan"
+    return "mobile"
+  except Exception as e:
+    pcat_logger.logger.debug(f"get_active_egress failed: {e}")
+    return ""
+
 # WAN 接口是否开启
 def is_wan_interface_enabled():
   try:

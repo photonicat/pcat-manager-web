@@ -183,14 +183,23 @@
 
       <!-- body -->
       <div class="flex flex-col p-3">
-      <!-- page selector -->
-      <div class="grid grid-cols-4 gap-1 mb-3">
-        <template x-for="p in [0,1,2,3]" :key="p">
-          <button @click="vpage = p"
-                  :class="vpage === p ? 'bg-pcatblue text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'"
+      <!-- page selector + add/remove. Pages are page0..pageN-1 and must stay
+           contiguous; addPage/removePage renumber to preserve that. -->
+      <div class="flex flex-wrap items-center gap-1 mb-3">
+        <template x-for="p in pageCount()" :key="p">
+          <button @click="vpage = (p - 1); selectedIdx = null"
+                  :class="vpage === (p - 1) ? 'bg-pcatblue text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'"
                   class="px-2 py-1 rounded text-sm font-semibold"
-                  x-text="`{{ locales['visual_page'] }} ${p}`"></button>
+                  x-text="`{{ locales['visual_page'] }} ${p - 1}`"></button>
         </template>
+        <button @click="addPage()" :disabled="pageCount() >= MAX_PAGES"
+                :class="pageCount() >= MAX_PAGES ? 'opacity-40 cursor-not-allowed' : 'hover:bg-green-200'"
+                class="px-2 py-1 rounded text-sm font-semibold bg-green-100 text-green-800"
+                :title="'{{ locales['visual_page_add'] | default('Add page') }}'">＋</button>
+        <button @click="removePage()" :disabled="pageCount() <= MIN_PAGES"
+                :class="pageCount() <= MIN_PAGES ? 'opacity-40 cursor-not-allowed' : 'hover:bg-red-200'"
+                class="px-2 py-1 rounded text-sm font-semibold bg-red-100 text-red-800"
+                :title="'{{ locales['visual_page_remove'] | default('Remove this page') }}'">🗑</button>
       </div>
 
       <!-- the device screen, intrinsically 258x480 (172x320 @ 1.5x). It is wrapped in
@@ -288,7 +297,7 @@
         <div class="space-y-3 text-sm text-gray-700" @change="pushHistory()">
           <div class="flex items-center justify-between">
             <label class="font-semibold whitespace-nowrap">{{ locales["visual_prop_type"] }}</label>
-            <select x-model="selectedEl().type" class="border rounded px-2 py-1 w-40 max-w-[55%] min-w-0">
+            <select x-model="selectedEl().type" @change="onTypeChange()" class="border rounded px-2 py-1 w-40 max-w-[55%] min-w-0">
               <option value="text">text</option>
               <option value="fixed_text">fixed_text</option>
               <option value="icon">icon</option>
@@ -296,7 +305,7 @@
             </select>
           </div>
           <div class="flex items-center justify-between">
-            <label class="font-semibold whitespace-nowrap">{{ locales["visual_prop_label"] }}</label>
+            <label class="font-semibold whitespace-nowrap" x-text="labelFieldCaption()"></label>
             <input type="text" x-model="selectedEl().label" class="border rounded px-2 py-1 w-40 max-w-[55%] min-w-0"/>
           </div>
           <!-- data_key: links this text element to a live value. Offer a
@@ -325,13 +334,13 @@
               <p class="text-[11px] text-green-600 leading-snug">
                 ✓ {{ locales["dk_status_custom"] | default("Linked to your data source.") }}
                 <span x-show="dataKeyValue(selectedEl().data_key) !== ''" class="font-mono text-gray-600">
-                  {{ locales["dk_now"] | default("now:") }} <span x-text="dataKeyValue(selectedEl().data_key)"></span></span>
+                  {{ locales["dk_now"] | default("now:") }} <span x-text="dataKeyValue(selectedEl().data_key)" :class="dataKeyValueClass(selectedEl().data_key)" :title="dataKeyValueTip(selectedEl().data_key)"></span></span>
               </p>
             </template>
             <template x-if="dataKeyStatus(selectedEl().data_key) === 'builtin'">
               <p class="text-[11px] text-blue-600 leading-snug">
                 ✓ {{ locales["dk_status_builtin"] | default("Built-in device metric.") }}
-                <span class="font-mono text-gray-600">{{ locales["dk_now"] | default("now:") }} <span x-text="dataKeyValue(selectedEl().data_key)"></span></span>
+                <span class="font-mono text-gray-600">{{ locales["dk_now"] | default("now:") }} <span x-text="dataKeyValue(selectedEl().data_key)" :class="dataKeyValueClass(selectedEl().data_key)" :title="dataKeyValueTip(selectedEl().data_key)"></span></span>
               </p>
             </template>
             <template x-if="dataKeyStatus(selectedEl().data_key) === 'unknown'">
@@ -353,6 +362,23 @@
             <label class="font-semibold whitespace-nowrap">icon_path</label>
             <input type="text" x-model="selectedEl().icon_path" class="border rounded px-2 py-1 w-40 max-w-[55%] min-w-0 font-mono text-xs"/>
           </div>
+          <!-- graph_config: a graph element draws nothing on the device without
+               a graph_type + time frame. Show these only for graph elements. -->
+          <template x-if="selectedEl().type === 'graph'">
+            <div class="flex flex-col gap-2">
+              <div class="flex items-center justify-between">
+                <label class="font-semibold whitespace-nowrap">{{ locales["graph_type"] | default("graph type") }}</label>
+                <select x-model="ensureGraphConfig().graph_type" class="border rounded px-2 py-1 w-40 max-w-[55%] min-w-0">
+                  <option value="power">power</option>
+                </select>
+              </div>
+              <div class="flex items-center justify-between">
+                <label class="font-semibold whitespace-nowrap">{{ locales["graph_time_frame"] | default("time frame (min)") }}</label>
+                <input type="number" min="1" max="1440" x-model.number="ensureGraphConfig().time_frame_mins"
+                       class="border rounded px-2 py-1 w-40 max-w-[55%] min-w-0"/>
+              </div>
+            </div>
+          </template>
           <div class="flex items-center justify-between" x-show="selectedEl().type !== 'icon' && selectedEl().type !== 'graph'">
             <label class="font-semibold whitespace-nowrap">{{ locales["visual_prop_font"] }}</label>
             <select x-model="selectedEl().font" class="border rounded px-2 py-1 w-40 max-w-[55%] min-w-0">
@@ -364,14 +390,45 @@
             <input type="color" :value="rgbToHex(selectedEl().color)" @input="setColor($event.target.value)" class="border rounded h-8 w-40"/>
           </div>
           <div class="flex items-center justify-between gap-2">
-            <label class="font-semibold whitespace-nowrap">{{ locales["visual_prop_position"] }}</label>
+            <label class="font-semibold whitespace-nowrap flex items-center gap-1">
+              {{ locales["visual_prop_position"] }}
+              <!-- dirty dot: position differs from where the element loaded -->
+              <span x-show="posDirty()" class="text-amber-500" title="{{ locales['visual_pos_moved'] | default('Moved from its original position') }}">●</span>
+            </label>
             <div class="flex gap-1">
               <input type="number" min="0" max="171" x-model.number="selectedEl().position.x" class="border rounded px-2 py-1 w-16" title="x"/>
               <input type="number" min="0" :max="CONTENT_H - 1" x-model.number="selectedEl().position.y" class="border rounded px-2 py-1 w-16" title="y (0–265, content region)"/>
             </div>
           </div>
+          <!-- position tools: reset-to-original / reset-to-default / center / snap -->
+          <div class="flex flex-wrap items-center justify-end gap-1">
+            <button @click="resetPos()" :disabled="!posDirty() && !sizeDirty()"
+                    :class="(!posDirty() && !sizeDirty()) ? 'opacity-40 cursor-not-allowed' : 'hover:bg-gray-200'"
+                    class="bg-gray-100 text-gray-700 px-2 py-1 rounded text-xs font-semibold"
+                    title="{{ locales['visual_reset_pos_tip'] | default('Reset to the position it had when this layout was loaded') }}">
+              ↺ {{ locales["visual_reset_pos"] | default("Reset position") }}
+            </button>
+            <button @click="resetPosDefault()" x-show="defaultPosDiffers()"
+                    class="bg-gray-100 hover:bg-gray-200 text-gray-700 px-2 py-1 rounded text-xs font-semibold"
+                    title="{{ locales['visual_reset_pos_default_tip'] | default('Reset to this element’s position in the default configuration') }}">
+              ⤺ {{ locales["visual_reset_pos_default"] | default("Default position") }}
+            </button>
+            <button @click="centerHorizontally()"
+                    class="bg-gray-100 hover:bg-gray-200 text-gray-700 px-2 py-1 rounded text-xs font-semibold"
+                    title="{{ locales['visual_center_h_tip'] | default('Center horizontally') }}">
+              ⇔ {{ locales["visual_center_h"] | default("Center") }}
+            </button>
+            <button @click="snapToGrid(4)"
+                    class="bg-gray-100 hover:bg-gray-200 text-gray-700 px-2 py-1 rounded text-xs font-semibold"
+                    title="{{ locales['visual_snap_tip'] | default('Snap position to the nearest 4px grid') }}">
+              # {{ locales["visual_snap"] | default("Snap") }}
+            </button>
+          </div>
           <div class="flex items-center justify-between gap-2" x-show="selectedEl().size">
-            <label class="font-semibold whitespace-nowrap">{{ locales["visual_prop_size"] }}</label>
+            <label class="font-semibold whitespace-nowrap flex items-center gap-1">
+              {{ locales["visual_prop_size"] }}
+              <span x-show="sizeDirty()" class="text-amber-500" title="{{ locales['visual_size_changed'] | default('Resized from its original size') }}">●</span>
+            </label>
             <div class="flex gap-1">
               <input type="number" min="1" x-model.number="selectedEl().size.width" class="border rounded px-2 py-1 w-16" title="w"/>
               <input type="number" min="1" x-model.number="selectedEl().size.height" class="border rounded px-2 py-1 w-16" title="h"/>
@@ -805,6 +862,10 @@
       // raw data_key token (e.g. {net_wan_rx_speed}).
       labelMode: "label",
       display_template: { elements: { page0: [], page1: [], page2: [], page3: [] } },
+      // Default-config elements, kept from loadVisual() so a per-element "reset to
+      // default position" can look up where the upstream/default layout places
+      // each element (matched by page + identity). Empty until loaded.
+      defaultElements: { page0: [], page1: [], page2: [], page3: [] },
       // ---- custom data sources (firmware custom_metrics) ----
       // Each source feeds a data_key into the device's globalData store, which
       // text elements then display. Source types handled natively by the
@@ -837,6 +898,8 @@
         valueErrorTip: "{{ locales['ds_value_error_tip'] | default('The fetch failed. Check the URL, the parser, and that the device has internet access.') }}",
         saveRestart: "{{ locales['ds_save_restart'] | default('Save and Restart') }}",
         savingRestarting: "{{ locales['ds_saving_restarting'] | default('Saving…') }}",
+        propText: "{{ locales['visual_prop_text'] | default('Text') }}",
+        propLabel: "{{ locales['visual_prop_label'] | default('Label') }}",
       },
       drag: { active: false, mode: null, idx: null, startX: 0, startY: 0, origX: 0, origY: 0, origW: 0, origH: 0 },
       // undo/redo history of display_template snapshots (JSON strings).
@@ -1299,12 +1362,24 @@
                    ? usr.display_template
                    : (def.display_template || { elements: {} });
           let elements = dt.elements || {};
-          // normalize: ensure all 4 pages exist as arrays
-          for (let p = 0; p < 4; p++) {
-            let key = "page" + p;
-            if (!Array.isArray(elements[key])) elements[key] = [];
+          // normalize: keep whatever contiguous pages the config defines (the
+          // firmware uses len(elements) as the page count), but guarantee at
+          // least page0 exists. Pad to 4 only when the config has no pages at all.
+          this.normalizePages(elements, 4);
+          // Stamp each element with the position/size it loaded at, so the
+          // property pane can offer a per-element "reset to where I started"
+          // (covers added elements that have no default-config counterpart).
+          this.stampOrig(elements);
+          // Remember the default layout's elements so we can also offer
+          // "reset to the default-config position" when one exists.
+          let defEls = (def.display_template && def.display_template.elements) || {};
+          this.defaultElements = {};
+          for (let p = 0; Array.isArray(defEls["page" + p]); p++) {
+            this.defaultElements["page" + p] = JSON.parse(JSON.stringify(defEls["page" + p]));
           }
           this.display_template = { elements: elements };
+          // clamp the viewed page in case this config has fewer pages
+          if (this.vpage > this.pageCount() - 1) this.vpage = 0;
           // custom_metrics: user overrides default; normalize to {sources, global_settings}
           let cm = (usr.custom_metrics && typeof usr.custom_metrics === "object")
                    ? usr.custom_metrics
@@ -1470,6 +1545,83 @@
         return this.display_template.elements["page" + this.vpage] || [];
       },
 
+      // ---- pages (page0..pageN-1, kept contiguous) ----
+      // The firmware derives its page count from len(display_template.elements),
+      // and indexes pages as "page"+i — so keys MUST be a gap-free 0..N-1 run.
+      // Everything that iterates pages goes through pageCount()/pageKeys() so the
+      // count is dynamic instead of the old hardcoded 4.
+      MIN_PAGES: 1,
+      MAX_PAGES: 8,
+
+      // Ensure an elements map has a gap-free run of page arrays. Collapses any
+      // gaps (so page0,page2 -> page0,page1) and, if there are none at all,
+      // creates `fallback` empty pages. Returns the same object.
+      normalizePages(elements, fallback) {
+        // gather existing pages in index order, skipping gaps
+        let ordered = [];
+        for (let p = 0; ; p++) {
+          let v = elements["page" + p];
+          if (v === undefined) {
+            // allow one gap-scan past the end to catch sparse keys, then stop
+            if (elements["page" + (p + 1)] === undefined) break;
+            continue;
+          }
+          if (Array.isArray(v)) ordered.push(v);
+        }
+        // wipe and rewrite contiguously
+        Object.keys(elements).forEach((k) => { if (/^page\d+$/.test(k)) delete elements[k]; });
+        if (ordered.length === 0) {
+          for (let i = 0; i < (fallback || 1); i++) elements["page" + i] = [];
+        } else {
+          ordered.forEach((arr, i) => { elements["page" + i] = arr; });
+        }
+        return elements;
+      },
+
+      // How many contiguous pages exist, starting at page0 (always >= 1).
+      pageCount() {
+        let els = this.display_template.elements || {};
+        let n = 0;
+        while (Array.isArray(els["page" + n])) n++;
+        return Math.max(this.MIN_PAGES, n);
+      },
+
+      // Ordered list of the real page keys: ["page0","page1",...].
+      pageKeys() {
+        let out = [];
+        for (let i = 0; i < this.pageCount(); i++) out.push("page" + i);
+        return out;
+      },
+
+      // Append a new empty page after the last one (capped at MAX_PAGES) and
+      // jump to it.
+      addPage() {
+        let n = this.pageCount();
+        if (n >= this.MAX_PAGES) return;
+        this.display_template.elements["page" + n] = [];
+        this.vpage = n;
+        this.selectedIdx = null;
+        this.pushHistory();
+      },
+
+      // Remove the current page, then renumber the rest so keys stay contiguous
+      // (page2 -> page1, ...). Refuses to drop below MIN_PAGES.
+      removePage() {
+        let n = this.pageCount();
+        if (n <= this.MIN_PAGES) return;
+        let removed = this.vpage;
+        let els = this.display_template.elements;
+        // shift every page above the removed one down by one index
+        for (let i = removed; i < n - 1; i++) {
+          els["page" + i] = els["page" + (i + 1)];
+        }
+        delete els["page" + (n - 1)];
+        // keep the viewed page valid
+        if (this.vpage > this.pageCount() - 1) this.vpage = this.pageCount() - 1;
+        this.selectedIdx = null;
+        this.pushHistory();
+      },
+
       selectedEl() {
         if (this.selectedIdx === null) return null;
         return this.pageElements()[this.selectedIdx] || null;
@@ -1583,10 +1735,45 @@
           data_key: "",
           units_font: "unit",
           enable: 1,
+          _orig: { position: { x: 10, y: 10 }, size: null },
         };
         this.pageElements().push(el);
         this.selectedIdx = this.pageElements().length - 1;
         this.pushHistory();
+      },
+
+      // When the element type changes, fill in the fields that type needs so the
+      // device can actually render it. A "graph" element draws NOTHING on the
+      // device unless it carries a graph_config (graph_type + time_frame_mins)
+      // and a size box — without them the firmware logs "missing graph_config"
+      // and skips it. Seed sensible defaults so a freshly-typed graph appears.
+      onTypeChange() {
+        let el = this.selectedEl();
+        if (!el) return;
+        if (el.type === "graph") {
+          if (!el.size) el.size = { width: 60, height: 25 };
+          if (!el.graph_config) el.graph_config = { graph_type: "power", time_frame_mins: 15 };
+          // re-baseline so reset returns to where it lands now that it's sized
+          this.restampOrig(el);
+        } else if (el.type === "text" || el.type === "fixed_text") {
+          // text is unsized and never a graph; drop fields that would make the
+          // device treat it as a box / graph.
+          if (el.size) delete el.size;
+          if (el.graph_config) delete el.graph_config;
+        }
+        // icon: leave size alone — firmware falls back to the image's natural
+        // dimensions when size is absent, so we must not force one.
+        // (history is pushed by the panel's @change="pushHistory()")
+      },
+
+      // Return the selected element's graph_config, creating it with defaults if
+      // absent. Lets the graph property inputs x-model into it safely even for a
+      // graph element loaded from older config that lacks one.
+      ensureGraphConfig() {
+        let el = this.selectedEl();
+        if (!el) return {};
+        if (!el.graph_config) el.graph_config = { graph_type: "power", time_frame_mins: 15 };
+        return el.graph_config;
       },
 
       deleteElement() {
@@ -1604,9 +1791,19 @@
         if (!copy.position) copy.position = { x: 0, y: 0 };
         copy.position.x = Math.min(this.LCD_W - 1, (copy.position.x || 0) + 6);
         copy.position.y = Math.min(this.CONTENT_H - 1, (copy.position.y || 0) + 6);
+        this.restampOrig(copy);
         this.pageElements().push(copy);
         this.selectedIdx = this.pageElements().length - 1;
         this.pushHistory();
+      },
+
+      // Re-baseline a single element's _orig to its current position/size (used
+      // for freshly placed copies, so reset returns them to where they landed).
+      restampOrig(el) {
+        el._orig = {
+          position: el.position ? { x: el.position.x || 0, y: el.position.y || 0 } : null,
+          size: el.size ? { width: el.size.width || 0, height: el.size.height || 0 } : null,
+        };
       },
 
       // Copy/paste selected element across pages (Ctrl+C / Ctrl+V).
@@ -1621,6 +1818,7 @@
         if (!copy.position) copy.position = { x: 10, y: 10 };
         copy.position.x = Math.min(this.LCD_W - 1, (copy.position.x || 0) + 6);
         copy.position.y = Math.min(this.CONTENT_H - 1, (copy.position.y || 0) + 6);
+        this.restampOrig(copy);
         this.pageElements().push(copy);
         this.selectedIdx = this.pageElements().length - 1;
         this.pushHistory();
@@ -1633,6 +1831,150 @@
         if (!el.position) el.position = { x: 0, y: 0 };
         el.position.x = Math.max(0, Math.min(this.LCD_W - 1, (el.position.x || 0) + dx));
         el.position.y = Math.max(0, Math.min(this.CONTENT_H - 1, (el.position.y || 0) + dy));
+      },
+
+      // ---- per-element position reset / alignment helpers ----
+
+      // Record each element's current position+size as its session baseline
+      // (_orig) so "reset position/size" can return to where it was loaded.
+      // _orig is a UI-only annotation; it is stripped before save/serialize.
+      stampOrig(elements) {
+        for (let p = 0; Array.isArray(elements["page" + p]); p++) {
+          let arr = elements["page" + p];
+          arr.forEach((el) => {
+            el._orig = {
+              position: el.position ? { x: el.position.x || 0, y: el.position.y || 0 } : null,
+              size: el.size ? { width: el.size.width || 0, height: el.size.height || 0 } : null,
+            };
+          });
+        }
+      },
+
+      // Deep copy of the layout with all UI-only _orig annotations removed, for
+      // persisting / mirroring into the JSON editor (so _orig never leaks out).
+      cleanElements() {
+        let out = {};
+        this.pageKeys().forEach((key) => {
+          out[key] = (this.display_template.elements[key] || []).map((el) => {
+            let c = JSON.parse(JSON.stringify(el));
+            delete c._orig;
+            return c;
+          });
+        });
+        return out;
+      },
+
+      // Find the matching element in the default-config layout for the element at
+      // (page vpage, index idx). Match by a stable identity: same type plus the
+      // same label/data_key/icon_path; fall back to positional index when the
+      // page's element list is structurally identical. Returns null if no match.
+      defaultMatchFor(idx) {
+        let el = this.pageElements()[idx];
+        if (!el) return null;
+        let defArr = this.defaultElements["page" + this.vpage] || [];
+        let sig = (e) => (e.type || "") + "|" + (e.label || "") + "|" + (e.data_key || "") + "|" + (e.icon_path || "");
+        let mine = sig(el);
+        let matches = defArr.filter((d) => sig(d) === mine);
+        if (matches.length === 1) return matches[0];
+        // ambiguous (duplicate signatures) — only trust positional index when the
+        // lists line up one-to-one at this index with the same signature.
+        if (defArr[idx] && sig(defArr[idx]) === mine) return defArr[idx];
+        return null;
+      },
+
+      // The element's loaded-state baseline position (from stampOrig), or null.
+      origPosFor(idx) {
+        let el = this.pageElements()[idx];
+        return (el && el._orig && el._orig.position) ? el._orig.position : null;
+      },
+
+      // True if the selected element's position differs from its loaded baseline.
+      posDirty() {
+        let el = this.selectedEl();
+        if (!el || !el.position) return false;
+        let o = el._orig && el._orig.position;
+        if (!o) return false;
+        return (el.position.x || 0) !== (o.x || 0) || (el.position.y || 0) !== (o.y || 0);
+      },
+
+      // True if the selected element's size differs from its loaded baseline.
+      sizeDirty() {
+        let el = this.selectedEl();
+        if (!el || !el.size) return false;
+        let o = el._orig && el._orig.size;
+        if (!o) return false;
+        return (el.size.width || 0) !== (o.width || 0) || (el.size.height || 0) !== (o.height || 0);
+      },
+
+      // True if a default-config position exists for the selection AND differs
+      // from where the element currently sits (so the button is meaningful).
+      defaultPosDiffers() {
+        let el = this.selectedEl();
+        if (!el || this.selectedIdx === null || !el.position) return false;
+        let m = this.defaultMatchFor(this.selectedIdx);
+        if (!m || !m.position) return false;
+        return (el.position.x || 0) !== (m.position.x || 0) || (el.position.y || 0) !== (m.position.y || 0);
+      },
+
+      // Reset selected element to its loaded-state baseline position (and size,
+      // if it has one). No-op when already there.
+      resetPos() {
+        let el = this.selectedEl();
+        if (!el || !el._orig) return;
+        if (el._orig.position && el.position) {
+          el.position.x = el._orig.position.x;
+          el.position.y = el._orig.position.y;
+        }
+        if (el._orig.size && el.size) {
+          el.size.width = el._orig.size.width;
+          el.size.height = el._orig.size.height;
+        }
+        this.pushHistory();
+      },
+
+      // Reset selected element to its position in the default config, if one
+      // can be matched. No-op otherwise.
+      resetPosDefault() {
+        let el = this.selectedEl();
+        if (!el || this.selectedIdx === null || !el.position) return;
+        let m = this.defaultMatchFor(this.selectedIdx);
+        if (!m || !m.position) return;
+        el.position.x = Math.max(0, Math.min(this.LCD_W - 1, m.position.x || 0));
+        el.position.y = Math.max(0, Math.min(this.CONTENT_H - 1, m.position.y || 0));
+        if (m.size && el.size) {
+          el.size.width = Math.max(1, m.size.width || el.size.width);
+          el.size.height = Math.max(1, m.size.height || el.size.height);
+        }
+        this.pushHistory();
+      },
+
+      // Center the selected element horizontally in the content region. Text is
+      // anchored at its top-left, so subtract an estimated glyph-run width;
+      // sized elements (graph/icon) use their box width.
+      centerHorizontally() {
+        let el = this.selectedEl();
+        if (!el || !el.position) return;
+        let w;
+        if (el.size) {
+          w = el.size.width || 0;
+        } else {
+          // estimate: average glyph advance ≈ 0.6em of the element's font px
+          let fpx = this.fontPx[el.font] || 12;
+          let txt = this.elementLabel(el) || "";
+          w = Math.round(txt.length * fpx * 0.6);
+        }
+        el.position.x = Math.max(0, Math.round((this.LCD_W - w) / 2));
+        this.pushHistory();
+      },
+
+      // Snap the selected element's position to the nearest grid step (px).
+      snapToGrid(step) {
+        let el = this.selectedEl();
+        if (!el || !el.position) return;
+        let g = step || 4;
+        el.position.x = Math.max(0, Math.min(this.LCD_W - 1, Math.round((el.position.x || 0) / g) * g));
+        el.position.y = Math.max(0, Math.min(this.CONTENT_H - 1, Math.round((el.position.y || 0) / g) * g));
+        this.pushHistory();
       },
 
       rgbToHex(rgb) {
@@ -1659,7 +2001,7 @@
           let res = await fetch("/api/v1/screen/user_config.json");
           let usr = await res.json().catch(() => ({}));
           if (typeof usr !== "object" || usr === null) usr = {};
-          usr.display_template = { elements: this.display_template.elements };
+          usr.display_template = { elements: this.cleanElements() };
           usr.custom_metrics = this.normalizedCustomMetrics();
           await fetch("/api/v1/screen/user_config.json", {
             method: "POST",
@@ -1726,12 +2068,19 @@
           }
 
           let elements = (def && def.display_template && def.display_template.elements) || {};
-          for (let p = 0; p < 4; p++) {
-            let key = "page" + p;
-            if (!Array.isArray(elements[key])) elements[key] = [];
-          }
+          // adopt the default's own page count (contiguous), padding to 4 only
+          // if the default defines no pages.
+          this.normalizePages(elements, 4);
           // deep copy so later edits don't mutate the fetched default
-          this.display_template = { elements: JSON.parse(JSON.stringify(elements)) };
+          let copy = JSON.parse(JSON.stringify(elements));
+          this.stampOrig(copy);
+          // these ARE the default positions now, so the default baseline matches
+          this.defaultElements = {};
+          for (let p = 0; Array.isArray(copy["page" + p]); p++) {
+            this.defaultElements["page" + p] = JSON.parse(JSON.stringify(copy["page" + p]));
+          }
+          this.display_template = { elements: copy };
+          this.vpage = 0;
           this.selectedIdx = null;
           this.pushHistory();
           this.syncEditorFromVisual();
@@ -1760,7 +2109,7 @@
         try { base = JSON.parse(this.savedEditor || "{}"); }
         catch (e) { base = {}; }
         if (typeof base !== "object" || base === null) base = {};
-        base.display_template = { elements: this.display_template.elements };
+        base.display_template = { elements: this.cleanElements() };
         base.custom_metrics = this.normalizedCustomMetrics();
         this.editor = JSON.stringify(base, null, 2);
       },
@@ -1852,6 +2201,22 @@
         if (!key) return "";
         let v = (this.sourceValues || {})[key];
         return (v === undefined || v === null) ? "" : String(v);
+      },
+
+      // Caption for the shared label/text property field. A plain helper —
+      // inline Jinja-print-in-ternary expressions get mangled by the template
+      // minifier and break rendering (see CLAUDE.md "Common Template Issues").
+      labelFieldCaption() {
+        return this.selectedEl().type === "fixed_text" ? this.dsLabels.propText : this.dsLabels.propLabel;
+      },
+
+      // Styling + tooltip for the "now:" hint so error sentinels (ERROR,
+      // TIMEOUT, ...) show red like the source-row value chip does.
+      dataKeyValueClass(key) {
+        return this.isErrorValue(this.dataKeyValue(key)) ? "text-red-600 font-semibold" : "";
+      },
+      dataKeyValueTip(key) {
+        return this.isErrorValue(this.dataKeyValue(key)) ? this.dsLabels.valueErrorTip : "";
       },
 
       // Classify the key the user typed, for the inline hint under the field:

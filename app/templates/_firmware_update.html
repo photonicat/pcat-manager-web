@@ -43,7 +43,8 @@
                   </div>
                   <div class="bg-white rounded-lg p-3 border border-orange-300 hover:border-blue-400 transition-colors cursor-pointer" @click="handleRemoteVersionClick('dev_firmware')">
                     <div class="text-sm text-orange-600 mb-1">{{locales["dev_latest_version"]}}</div>
-                    <div class="font-semibold text-orange-800 text-sm" x-text="format_version_with_hash_and_date(dev_firmware_info.dev_filename, dev_firmware_info.dev_revision, dev_firmware_info.dev_hash, dev_firmware_info.dev_build_date)"></div>
+                    <div class="font-semibold text-orange-800 text-sm" x-text="format_version_with_hash(dev_firmware_info.dev_filename, dev_firmware_info.dev_revision, dev_firmware_info.dev_hash)"></div>
+                    <div x-show="dev_firmware_info.dev_build_date" class="mt-1 text-xs text-gray-500" x-text="format_build_date(dev_firmware_info.dev_build_date, dev_firmware_info.dev_build_epoch)"></div>
                     <div x-show="dev_firmware_info.dev_sha256_available" class="mt-2 text-xs text-gray-600">
                       <div class="flex items-center">
                         <svg class="w-3 h-3 mr-1 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -113,7 +114,8 @@
                   </div>
                   <div class="bg-white rounded-lg p-3 border hover:border-blue-400 transition-colors cursor-pointer" @click="handleRemoteVersionClick('dev_firmware')">
                     <div class="text-sm text-gray-600 mb-1">{{locales["dev_latest_version"]}} (Remote)</div>
-                    <div class="font-semibold text-gray-800 text-sm" x-text="format_version_with_hash_and_date(dev_firmware_info.dev_filename, dev_firmware_info.dev_revision, dev_firmware_info.dev_hash, dev_firmware_info.dev_build_date)"></div>
+                    <div class="font-semibold text-gray-800 text-sm" x-text="format_version_with_hash(dev_firmware_info.dev_filename, dev_firmware_info.dev_revision, dev_firmware_info.dev_hash)"></div>
+                    <div x-show="dev_firmware_info.dev_build_date" class="mt-1 text-xs text-gray-500" x-text="format_build_date(dev_firmware_info.dev_build_date, dev_firmware_info.dev_build_epoch)"></div>
                     <div x-show="dev_firmware_info.dev_sha256_available" class="mt-2 text-xs text-gray-600">
                       <div class="flex items-center">
                         <svg class="w-3 h-3 mr-1 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -183,7 +185,8 @@
                   </div>
                   <div class="bg-white rounded-lg p-3 border hover:border-blue-400 transition-colors cursor-pointer" @click="handleRemoteVersionClick('dev_firmware')">
                     <div class="text-sm text-gray-600 mb-1">{{locales["dev_latest_version"]}}</div>
-                    <div class="font-semibold text-gray-800 text-sm" x-text="format_version_with_hash_and_date(dev_firmware_info.dev_filename, dev_firmware_info.dev_revision, dev_firmware_info.dev_hash, dev_firmware_info.dev_build_date)"></div>
+                    <div class="font-semibold text-gray-800 text-sm" x-text="format_version_with_hash(dev_firmware_info.dev_filename, dev_firmware_info.dev_revision, dev_firmware_info.dev_hash)"></div>
+                    <div x-show="dev_firmware_info.dev_build_date" class="mt-1 text-xs text-gray-500" x-text="format_build_date(dev_firmware_info.dev_build_date, dev_firmware_info.dev_build_epoch)"></div>
                     <div x-show="dev_firmware_info.dev_sha256_available" class="mt-2 text-xs text-gray-600">
                       <div class="flex items-center">
                         <svg class="w-3 h-3 mr-1 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -272,6 +275,7 @@
                 <div class="bg-white rounded-lg p-3 border border-green-300 hover:border-blue-400 transition-colors cursor-pointer" @click="handleRemoteVersionClick('prod_firmware')">
                   <div class="text-sm text-green-600 mb-1">{{locales["firmware_latest_version"]}}</div>
                   <div class="font-semibold text-green-800" x-text="format_version_display(firmware_info.remote_filename)"></div>
+                  <div x-show="firmware_info.remote_build_date" class="mt-1 text-xs text-gray-500" x-text="format_build_date(firmware_info.remote_build_date, firmware_info.remote_build_epoch)"></div>
                   <div x-show="firmware_info.sha256_available" class="mt-2 text-xs text-gray-600">
                     <div class="flex items-center">
                       <svg class="w-3 h-3 mr-1 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">

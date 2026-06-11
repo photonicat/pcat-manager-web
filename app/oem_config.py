@@ -250,9 +250,28 @@ def get_favicon_uri(size):
     return fallback_map.get(size, "/static/favicon.ico")
 
 
+# Factory defaults for the Photonicat 2 brand. Used when running on a
+# photonicat2 board with no boot1 OEM override, so the original factory wiki /
+# forum links stay present even without an OEM config (the public DEFAULT_OEM
+# is intentionally brand-neutral). Mirrors get_oem_name()'s board detection.
+PHOTONICAT_WIKI_URL = "https://photonicat.com/wiki/Main_Page"
+PHOTONICAT_FORUM_URL = "https://photonicat.com/forums"
+
+
+def _is_photonicat2_board():
+    try:
+        board = open("/proc/device-tree/compatible", "r").read().strip()
+        return "photonicat2" in board
+    except (FileNotFoundError, PermissionError):
+        return False
+
+
 def get_vendor_wiki_url():
     oem = get_oem()
-    return oem.get("wiki_url") or oem.get("company_url") or ""
+    url = oem.get("wiki_url") or oem.get("company_url") or ""
+    if not url and _is_photonicat2_board():
+        return PHOTONICAT_WIKI_URL
+    return url
 
 
 def get_vendor_site_domain():
@@ -265,7 +284,10 @@ def get_vendor_site_domain():
 
 def get_forum_url():
     oem = get_oem()
-    return oem.get("forum_url", "")
+    url = oem.get("forum_url", "")
+    if not url and _is_photonicat2_board():
+        return PHOTONICAT_FORUM_URL
+    return url
 
 
 def get_tips_url():

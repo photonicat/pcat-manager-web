@@ -6,6 +6,7 @@
     <link rel="apple-touch-icon" sizes="180x180" href="{{locales['apple_touch_icon']}}" />
     <link rel="icon" type="image/png" sizes="32x32" href="{{locales['favicon_32']}}" />
     <link rel="icon" type="image/png" sizes="16x16" href="{{locales['favicon_16']}}" />
+    <link rel="shortcut icon" href="{{locales['favicon_ico']}}" />
     <title>{{locales["oem_name"]}} - {{locales["config_title"]}}</title>
     {% block html_head0 %}{% endblock %}
     <style type="text/css">
@@ -29,46 +30,60 @@
         <div class="flex flex-grow items-center justify-end text-sm text-gray-500">
           <div id="network-status" class="flex flex-grow items-center justify-end text-sm text-gray-500" x-cloak x-show="$store.app.net_icons_loaded">
             <!-- Modem (5G/4G) -->
-            <div class="relative" style="margin-right:1px" x-show="$store.app.modem_mode">
-              <span class="font-bold" x-text="$store.app.modem_mode" style="color:#00274D;font-size:15px;line-height:1"></span>
-              <div x-show="$store.app.net_route_mode === 'mobile'" style="position:absolute;bottom:-3px;left:2px;right:2px;height:2px;background:linear-gradient(to bottom, #4ADE80, #16A34A);border-radius:1px"></div>
+            <div class="relative" style="margin-right:1px" x-show="$store.app.modem_mode"
+                 :title="$store.app.netTip($store.app.modem_mode, $store.app.net_sim_enabled, $store.app.net_route_mode === 'mobile', 'mobile')">
+              <span class="font-bold" x-text="$store.app.modem_mode"
+                    :style="`color:${$store.app.net_sim_enabled ? '#00274D' : '#CCCCCC'};font-size:15px;line-height:1`"></span>
+              <!-- red cross when the modem/SIM is disabled -->
+              <svg x-show="!$store.app.net_sim_enabled" class="absolute inset-0 w-full h-full pointer-events-none" viewBox="0 0 28 16" preserveAspectRatio="none">
+                <line x1="4" y1="1" x2="24" y2="15" stroke="#DC2626" stroke-width="2" stroke-linecap="round"/>
+              </svg>
+              <div x-show="$store.app.net_active_egress === 'mobile'" style="position:absolute;bottom:-3px;left:2px;right:2px;height:2px;background:linear-gradient(to bottom, #4ADE80, #16A34A);border-radius:1px"></div>
             </div>
             <!-- LAN (eth1) -->
-            <div class="relative" x-show="$store.app.net_lan_exists">
+            <div class="relative" x-show="$store.app.net_lan_exists"
+                 :title="$store.app.netTip('LAN', $store.app.net_lan_enabled, $store.app.net_lan_carrier, 'lan')">
               <svg class="w-4 sm:w-6" viewBox="0 0 28 16" fill="none" xmlns="http://www.w3.org/2000/svg">
                 <path d="M22 15.2727V5.09091C22 4.89802 21.9298 4.71304 21.8047 4.57665C21.6797 4.44026 21.5101 4.36364 21.3333 4.36364H19.3333V2.18182C19.3333 1.98893 19.2631 1.80395 19.1381 1.66756C19.013 1.53117 18.8435 1.45455 18.6667 1.45455H17.3333V0.727273C17.3333 0.534388 17.2631 0.349403 17.1381 0.213013C17.013 0.0766233 16.8435 0 16.6667 0H11.3333C11.1565 0 10.987 0.0766233 10.8619 0.213013C10.7369 0.349403 10.6667 0.534388 10.6667 0.727273V1.45455H9.33333C9.15652 1.45455 8.98695 1.53117 8.86193 1.66756C8.7369 1.80395 8.66667 1.98893 8.66667 2.18182V4.36364H6.66667C6.48986 4.36364 6.32029 4.44026 6.19526 4.57665C6.07024 4.71304 6 4.89802 6 5.09091V15.2727C6 15.4656 6.07024 15.6506 6.19526 15.787C6.32029 15.9234 6.48986 16 6.66667 16H21.3333C21.5101 16 21.6797 15.9234 21.8047 15.787C21.9298 15.6506 22 15.4656 22 15.2727ZM8.33333 10.6364H9C9.08841 10.6364 9.17319 10.6747 9.2357 10.7429C9.29821 10.8111 9.33333 10.9036 9.33333 11V14.1818C9.33333 14.2783 9.29821 14.3708 9.2357 14.4389C9.17319 14.5071 9.08841 14.5455 9 14.5455H8.33333C8.24493 14.5455 8.16014 14.5071 8.09763 14.4389C8.03512 14.3708 8 14.2783 8 14.1818V11C8 10.9036 8.03512 10.8111 8.09763 10.7429C8.16014 10.6747 8.24493 10.6364 8.33333 10.6364ZM11 10.6364H11.6667C11.7551 10.6364 11.8399 10.6747 11.9024 10.7429C11.9649 10.8111 12 10.9036 12 11V14.1818C12 14.2783 11.9649 14.3708 11.9024 14.4389C11.8399 14.5071 11.7551 14.5455 11.6667 14.5455H11C10.9116 14.5455 10.8268 14.5071 10.7643 14.4389C10.7018 14.3708 10.6667 14.2783 10.6667 14.1818V11C10.6667 10.9036 10.7018 10.8111 10.7643 10.7429C10.8268 10.6747 10.9116 10.6364 11 10.6364ZM13.3333 11C13.3333 10.9036 13.3685 10.8111 13.431 10.7429C13.4935 10.6747 13.5783 10.6364 13.6667 10.6364H14.3333C14.4217 10.6364 14.5065 10.6747 14.569 10.7429C14.6315 10.8111 14.6667 10.9036 14.6667 11V14.1818C14.6667 14.2783 14.6315 14.3708 14.569 14.4389C14.5065 14.5071 14.4217 14.5455 14.3333 14.5455H13.6667C13.5783 14.5455 13.4935 14.5071 13.431 14.4389C13.3685 14.3708 13.3333 14.2783 13.3333 14.1818V11ZM16.3333 10.6364H17C17.0884 10.6364 17.1732 10.6747 17.2357 10.7429C17.2982 10.8111 17.3333 10.9036 17.3333 11V14.1818C17.3333 14.2783 17.2982 14.3708 17.2357 14.4389C17.1732 14.5071 17.0884 14.5455 17 14.5455H16.3333C16.2449 14.5455 16.1601 14.5071 16.0976 14.4389C16.0351 14.3708 16 14.2783 16 14.1818V11C16 10.9036 16.0351 10.8111 16.0976 10.7429C16.1601 10.6747 16.2449 10.6364 16.3333 10.6364ZM18.6667 11C18.6667 10.9036 18.7018 10.8111 18.7643 10.7429C18.8268 10.6747 18.9116 10.6364 19 10.6364H19.6667C19.7551 10.6364 19.8399 10.6747 19.9024 10.7429C19.9649 10.8111 20 10.9036 20 11V14.1818C20 14.2783 19.9649 14.3708 19.9024 14.4389C19.8399 14.5071 19.7551 14.5455 19.6667 14.5455H19C18.9116 14.5455 18.8268 14.5071 18.7643 14.4389C18.7018 14.3708 18.6667 14.2783 18.6667 14.1818V11Z"
-                  :fill="!$store.app.net_lan_enabled ? '#CCCCCC' : ($store.app.net_lan_carrier ? '#00274D' : '#CCCCCC')"
-                  :stroke="!$store.app.net_lan_enabled ? 'none' : (!$store.app.net_lan_carrier ? '#AAAAAA' : 'none')"
+                  :fill="$store.app.netFill($store.app.net_lan_enabled, $store.app.net_lan_carrier)"
+                  :stroke="$store.app.net_lan_enabled && !$store.app.net_lan_carrier ? '#AAAAAA' : 'none'"
                   stroke-width="0.5"/>
-                <line x-show="!$store.app.net_lan_enabled" x1="4" y1="1" x2="24" y2="15" stroke="#CCCCCC" stroke-width="2" stroke-linecap="round"/>
+                <!-- red cross when disabled -->
+                <line x-show="!$store.app.net_lan_enabled" x1="4" y1="1" x2="24" y2="15" stroke="#DC2626" stroke-width="2" stroke-linecap="round"/>
               </svg>
-              <div x-show="$store.app.net_route_mode === 'wired' && $store.app.net_lan_carrier" style="position:absolute;bottom:-3px;left:2px;right:2px;height:2px;background:linear-gradient(to bottom, #4ADE80, #16A34A);border-radius:1px"></div>
+              <!-- green underline only on the actual default-route interface -->
+              <div x-show="$store.app.net_active_egress === 'lan'" style="position:absolute;bottom:-3px;left:2px;right:2px;height:2px;background:linear-gradient(to bottom, #4ADE80, #16A34A);border-radius:1px"></div>
             </div>
             <!-- WAN (eth0) -->
-            <div class="relative" x-show="$store.app.net_wan_exists">
+            <div class="relative" x-show="$store.app.net_wan_exists"
+                 :title="$store.app.netTip('WAN', $store.app.net_wan_enabled, $store.app.net_wan_carrier, 'wan')">
               <svg class="w-4 sm:w-6" viewBox="0 0 28 16" fill="none" xmlns="http://www.w3.org/2000/svg">
                 <path d="M22 15.2727V5.09091C22 4.89802 21.9298 4.71304 21.8047 4.57665C21.6797 4.44026 21.5101 4.36364 21.3333 4.36364H19.3333V2.18182C19.3333 1.98893 19.2631 1.80395 19.1381 1.66756C19.013 1.53117 18.8435 1.45455 18.6667 1.45455H17.3333V0.727273C17.3333 0.534388 17.2631 0.349403 17.1381 0.213013C17.013 0.0766233 16.8435 0 16.6667 0H11.3333C11.1565 0 10.987 0.0766233 10.8619 0.213013C10.7369 0.349403 10.6667 0.534388 10.6667 0.727273V1.45455H9.33333C9.15652 1.45455 8.98695 1.53117 8.86193 1.66756C8.7369 1.80395 8.66667 1.98893 8.66667 2.18182V4.36364H6.66667C6.48986 4.36364 6.32029 4.44026 6.19526 4.57665C6.07024 4.71304 6 4.89802 6 5.09091V15.2727C6 15.4656 6.07024 15.6506 6.19526 15.787C6.32029 15.9234 6.48986 16 6.66667 16H21.3333C21.5101 16 21.6797 15.9234 21.8047 15.787C21.9298 15.6506 22 15.4656 22 15.2727ZM8.33333 10.6364H9C9.08841 10.6364 9.17319 10.6747 9.2357 10.7429C9.29821 10.8111 9.33333 10.9036 9.33333 11V14.1818C9.33333 14.2783 9.29821 14.3708 9.2357 14.4389C9.17319 14.5071 9.08841 14.5455 9 14.5455H8.33333C8.24493 14.5455 8.16014 14.5071 8.09763 14.4389C8.03512 14.3708 8 14.2783 8 14.1818V11C8 10.9036 8.03512 10.8111 8.09763 10.7429C8.16014 10.6747 8.24493 10.6364 8.33333 10.6364ZM11 10.6364H11.6667C11.7551 10.6364 11.8399 10.6747 11.9024 10.7429C11.9649 10.8111 12 10.9036 12 11V14.1818C12 14.2783 11.9649 14.3708 11.9024 14.4389C11.8399 14.5071 11.7551 14.5455 11.6667 14.5455H11C10.9116 14.5455 10.8268 14.5071 10.7643 14.4389C10.7018 14.3708 10.6667 14.2783 10.6667 14.1818V11C10.6667 10.9036 10.7018 10.8111 10.7643 10.7429C10.8268 10.6747 10.9116 10.6364 11 10.6364ZM13.3333 11C13.3333 10.9036 13.3685 10.8111 13.431 10.7429C13.4935 10.6747 13.5783 10.6364 13.6667 10.6364H14.3333C14.4217 10.6364 14.5065 10.6747 14.569 10.7429C14.6315 10.8111 14.6667 10.9036 14.6667 11V14.1818C14.6667 14.2783 14.6315 14.3708 14.569 14.4389C14.5065 14.5071 14.4217 14.5455 14.3333 14.5455H13.6667C13.5783 14.5455 13.4935 14.5071 13.431 14.4389C13.3685 14.3708 13.3333 14.2783 13.3333 14.1818V11ZM16.3333 10.6364H17C17.0884 10.6364 17.1732 10.6747 17.2357 10.7429C17.2982 10.8111 17.3333 10.9036 17.3333 11V14.1818C17.3333 14.2783 17.2982 14.3708 17.2357 14.4389C17.1732 14.5071 17.0884 14.5455 17 14.5455H16.3333C16.2449 14.5455 16.1601 14.5071 16.0976 14.4389C16.0351 14.3708 16 14.2783 16 14.1818V11C16 10.9036 16.0351 10.8111 16.0976 10.7429C16.1601 10.6747 16.2449 10.6364 16.3333 10.6364ZM18.6667 11C18.6667 10.9036 18.7018 10.8111 18.7643 10.7429C18.8268 10.6747 18.9116 10.6364 19 10.6364H19.6667C19.7551 10.6364 19.8399 10.6747 19.9024 10.7429C19.9649 10.8111 20 10.9036 20 11V14.1818C20 14.2783 19.9649 14.3708 19.9024 14.4389C19.8399 14.5071 19.7551 14.5455 19.6667 14.5455H19C18.9116 14.5455 18.8268 14.5071 18.7643 14.4389C18.7018 14.3708 18.6667 14.2783 18.6667 14.1818V11Z"
-                  :fill="!$store.app.net_wan_enabled ? '#CCCCCC' : ($store.app.net_wan_carrier ? '#00274D' : '#CCCCCC')"
-                  :stroke="!$store.app.net_wan_enabled ? 'none' : (!$store.app.net_wan_carrier ? '#AAAAAA' : 'none')"
+                  :fill="$store.app.netFill($store.app.net_wan_enabled, $store.app.net_wan_carrier)"
+                  :stroke="$store.app.net_wan_enabled && !$store.app.net_wan_carrier ? '#AAAAAA' : 'none'"
                   stroke-width="0.5"/>
-                <line x-show="!$store.app.net_wan_enabled" x1="4" y1="1" x2="24" y2="15" stroke="#CCCCCC" stroke-width="2" stroke-linecap="round"/>
+                <!-- red cross when disabled -->
+                <line x-show="!$store.app.net_wan_enabled" x1="4" y1="1" x2="24" y2="15" stroke="#DC2626" stroke-width="2" stroke-linecap="round"/>
               </svg>
-              <div x-show="$store.app.net_route_mode === 'wired' && $store.app.net_wan_carrier" style="position:absolute;bottom:-3px;left:2px;right:2px;height:2px;background:linear-gradient(to bottom, #4ADE80, #16A34A);border-radius:1px"></div>
+              <!-- green underline only on the actual default-route interface -->
+              <div x-show="$store.app.net_active_egress === 'wan'" style="position:absolute;bottom:-3px;left:2px;right:2px;height:2px;background:linear-gradient(to bottom, #4ADE80, #16A34A);border-radius:1px"></div>
             </div>
             <!-- Onboard WiFi (radio0) -->
-            <div class="relative" x-show="$store.app.net_wifi0_exists">
+            <div class="relative" x-show="$store.app.net_wifi0_exists"
+                 :title="$store.app.net_wifi0_enabled ? 'WiFi: ' + $store.app.t_net_connected : 'WiFi: ' + $store.app.t_net_disabled">
               <svg class="w-4 sm:w-6" viewBox="0 0 28 16" fill="none" xmlns="http://www.w3.org/2000/svg">
                 <path d="M4 3.5529C6.82855 1.24919 10.3597 -0.00539646 14 1.74488e-05C17.7887 1.74488e-05 21.2679 1.33068 24 3.5529L22.3333 5.62668C19.9761 3.70715 17.0335 2.66192 14 2.66668C10.8435 2.66668 7.94341 3.77601 5.66667 5.62668L4 3.5529ZM6.77719 7.01068C8.82016 5.34668 11.3707 4.44049 14 4.44446C16.7356 4.44446 19.2485 5.40534 21.2228 7.00979L19.5561 9.08445C17.9845 7.80464 16.0225 7.10781 14 7.11112C11.8957 7.11112 9.96286 7.85068 8.44386 9.08445L6.77719 7.00979V7.01068ZM9.55526 10.4685C10.8124 9.44436 12.3819 8.88659 14 8.8889C15.6835 8.8889 17.2299 9.48001 18.4447 10.4676L16.7781 12.5422C15.9922 11.9024 15.0113 11.554 14 11.5556C12.9888 11.554 12.0078 11.9024 11.2219 12.5422L9.55526 10.4676V10.4685ZM12.3333 13.9262C12.8046 13.542 13.3932 13.3326 14 13.3333C14.6313 13.3333 15.2113 13.5556 15.6667 13.9253L14 16L12.3333 13.9262Z"
                   :fill="!$store.app.net_wifi0_enabled ? '#CCCCCC' : '#00274D'"/>
-                <line x-show="!$store.app.net_wifi0_enabled" x1="4" y1="1" x2="24" y2="15" stroke="#CCCCCC" stroke-width="2" stroke-linecap="round"/>
+                <line x-show="!$store.app.net_wifi0_enabled" x1="4" y1="1" x2="24" y2="15" stroke="#DC2626" stroke-width="2" stroke-linecap="round"/>
               </svg>
             </div>
             <!-- PCIe WiFi (radio1) -->
-            <div class="relative" x-show="$store.app.net_wifi1_exists">
+            <div class="relative" x-show="$store.app.net_wifi1_exists"
+                 :title="$store.app.net_wifi1_enabled ? 'WiFi (PCIe): ' + $store.app.t_net_connected : 'WiFi (PCIe): ' + $store.app.t_net_disabled">
               <svg class="w-4 sm:w-6" viewBox="0 0 28 16" fill="none" xmlns="http://www.w3.org/2000/svg">
                 <path d="M4 3.5529C6.82855 1.24919 10.3597 -0.00539646 14 1.74488e-05C17.7887 1.74488e-05 21.2679 1.33068 24 3.5529L22.3333 5.62668C19.9761 3.70715 17.0335 2.66192 14 2.66668C10.8435 2.66668 7.94341 3.77601 5.66667 5.62668L4 3.5529ZM6.77719 7.01068C8.82016 5.34668 11.3707 4.44049 14 4.44446C16.7356 4.44446 19.2485 5.40534 21.2228 7.00979L19.5561 9.08445C17.9845 7.80464 16.0225 7.10781 14 7.11112C11.8957 7.11112 9.96286 7.85068 8.44386 9.08445L6.77719 7.00979V7.01068ZM9.55526 10.4685C10.8124 9.44436 12.3819 8.88659 14 8.8889C15.6835 8.8889 17.2299 9.48001 18.4447 10.4676L16.7781 12.5422C15.9922 11.9024 15.0113 11.554 14 11.5556C12.9888 11.554 12.0078 11.9024 11.2219 12.5422L9.55526 10.4676V10.4685ZM12.3333 13.9262C12.8046 13.542 13.3932 13.3326 14 13.3333C14.6313 13.3333 15.2113 13.5556 15.6667 13.9253L14 16L12.3333 13.9262Z"
                   :fill="!$store.app.net_wifi1_enabled ? '#CCCCCC' : '#00274D'"/>
-                <line x-show="!$store.app.net_wifi1_enabled" x1="4" y1="1" x2="24" y2="15" stroke="#CCCCCC" stroke-width="2" stroke-linecap="round"/>
+                <line x-show="!$store.app.net_wifi1_enabled" x1="4" y1="1" x2="24" y2="15" stroke="#DC2626" stroke-width="2" stroke-linecap="round"/>
               </svg>
             </div>
           </div>
@@ -256,6 +271,7 @@
         <div class="flex items-center gap-2">
           {% if locales['vendor_wiki_url'] %}
           <a href="{{locales['vendor_wiki_url']}}" target="_blank" class="inline-flex items-center text-sm border-gray-200 border rounded-lg px-2 py-0.5 bg-gray-100 hover:bg-gray-200" title="Wiki">
+            <img src="/static/wiki24.png" class="mr-1 h-4 w-4" alt="Wiki" />
             Wiki
           </a>
           {% endif %}
@@ -400,11 +416,13 @@
                 this.net_wifi1_exists = data.pcie_wifi_exists === true;
                 this.net_lan_enabled = data.lan_enabled;
                 this.net_wan_enabled = data.wan_enabled;
+                this.net_sim_enabled = data.sim_enabled === true;
                 this.net_wifi0_enabled = data.onboard_wifi_enabled;
                 this.net_wifi1_enabled = data.pcie_wifi_enabled;
                 this.net_lan_carrier = data.lan_carrier === true;
                 this.net_wan_carrier = data.wan_carrier === true;
                 this.net_route_mode = data.network_route_mode || "";
+                this.net_active_egress = data.active_egress || "";
                 this.net_icons_loaded = true;
               });
 
@@ -495,11 +513,41 @@
           net_wifi1_exists: false,
           net_lan_enabled: true,
           net_wan_enabled: true,
+          net_sim_enabled: false,
           net_wifi0_enabled: true,
           net_wifi1_enabled: false,
           net_lan_carrier: false,
           net_wan_carrier: false,
           net_route_mode: "",
+          net_active_egress: "",
+
+          // ---- network-status icon helpers ----
+          // Four visual states per interface, driven by (enabled, active, egress):
+          //   disabled            -> red cross line over a grey icon
+          //   enabled, inactive   -> light-grey icon (link/carrier down)
+          //   enabled, active     -> solid dark icon (link up)
+          //   active egress (WAN) -> green underline (exactly one icon)
+          // `active` means: has carrier (eth) / connected (wifi,modem).
+          netFill(enabled, active) {
+            if (!enabled) return '#CCCCCC';
+            return active ? '#00274D' : '#CCCCCC';
+          },
+          // is this icon the single interface that holds the default route?
+          netIsEgress(kind) {
+            return this.net_active_egress === kind;
+          },
+          // tooltip text for an interface icon
+          netTip(label, enabled, active, kind) {
+            if (!enabled) return label + ': ' + this.t_net_disabled;
+            if (this.netIsEgress(kind)) return label + ': ' + this.t_net_active_wan;
+            if (active) return label + ': ' + this.t_net_connected;
+            return label + ': ' + this.t_net_no_link;
+          },
+          // localized state words (set from server locales below)
+          t_net_disabled: "{{ locales['net_state_disabled'] | default('Disabled') }}",
+          t_net_no_link: "{{ locales['net_state_no_link'] | default('Enabled, no link') }}",
+          t_net_connected: "{{ locales['net_state_connected'] | default('Connected') }}",
+          t_net_active_wan: "{{ locales['net_state_active_wan'] | default('Active internet connection') }}",
 
           set_page(page) {
             this.page = page;

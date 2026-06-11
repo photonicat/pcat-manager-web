@@ -441,6 +441,7 @@ def base_locales():
         "tips_url": oem_config.get_tips_url(),
         "favicon_16": oem_config.get_favicon_uri(16),
         "favicon_32": oem_config.get_favicon_uri(32),
+        "favicon_ico": oem_config.get_favicon_uri("ico"),
         "apple_touch_icon": oem_config.get_favicon_uri("apple"),
     }
 
@@ -490,6 +491,10 @@ def base_locales():
             "login_error_too_many_attempts": "登录尝试次数过多，请 5 分钟后再试",
             "login_error_security_token": "安全令牌无效，请重试",
             "openwrt_tooltip": "使用您登录此页面的密码或默认密码登录到 OpenWrt",
+            "net_state_disabled": "已禁用",
+            "net_state_no_link": "已启用，未连接",
+            "net_state_connected": "已连接",
+            "net_state_active_wan": "当前上网接口",
 
             "save_action_success_and_reboot": "设置成功，请重启",
             "save_action_success": "设置成功",
@@ -626,6 +631,10 @@ def base_locales():
             "login_error_too_many_attempts": "Too many login attempts. Please try again in 5 minutes.",
             "login_error_security_token": "Security token invalid. Please try again.",
             "openwrt_tooltip": "Login to OpenWrt using the same password you logged in with or default password",
+            "net_state_disabled": "Disabled",
+            "net_state_no_link": "Enabled, no link",
+            "net_state_connected": "Connected",
+            "net_state_active_wan": "Active internet connection",
 
             "save_action_success": "Saved successfully, please reboot.",
             "save_action_failed": "Save failed, please retry later.",
@@ -1177,6 +1186,9 @@ def get_network_interfaces_data_optimized():
 
     # Gateway detection
     network_route_mode = pc_app.socket_client.network_route_mode
+    # Which interface actually holds the default route (wan/lan/mobile/"") — used
+    # to put the green "active" underline on exactly one icon.
+    active_egress = pc_app.get_active_egress()
 
     return {
         "wan_enabled": wan_enabled,
@@ -1190,7 +1202,8 @@ def get_network_interfaces_data_optimized():
         "pcie_wifi_exists": pcie_wifi_exists,
         "wan_carrier": wan_carrier,
         "lan_carrier": lan_carrier,
-        "network_route_mode": network_route_mode
+        "network_route_mode": network_route_mode,
+        "active_egress": active_egress
     }
 
 def get_network_interfaces_data():
@@ -1228,7 +1241,8 @@ def get_network_interfaces_data():
                 "pcie_wifi_exists": interfaces_data["pcie_wifi_exists"],
                 "wan_carrier": interfaces_data["wan_carrier"],
                 "lan_carrier": interfaces_data["lan_carrier"],
-                "network_route_mode": interfaces_data["network_route_mode"]
+                "network_route_mode": interfaces_data["network_route_mode"],
+                "active_egress": interfaces_data["active_egress"]
             }
 
             # Calculate and log performance metrics
@@ -1269,7 +1283,8 @@ def get_network_interfaces_data():
                     "pcie_wifi_exists": False,
                     "wan_carrier": False,
                     "lan_carrier": False,
-                    "network_route_mode": ""
+                    "network_route_mode": "",
+                    "active_egress": ""
                 }
 
 def get_dashboard_data():
@@ -1747,6 +1762,7 @@ def dev_server_check():
     """
     import re
     from urllib.parse import urljoin
+    from email.utils import parsedate_to_datetime
     from html.parser import HTMLParser
     
     class FirmwareParser(HTMLParser):
@@ -1824,8 +1840,24 @@ def dev_server_check():
         local_hash = extract_hash_code(local_version)
         dev_hash = extract_hash_code(latest_file)
         
-        # Get build date for the dev firmware file
+        # Get build date for the dev firmware file.
+        # Prefer the file's Last-Modified HTTP header (authoritative server modify
+        # date, works with Caddy/nginx auto-index), falling back to the date column
+        # scraped from the directory listing if the header is unavailable.
         dev_build_date = parser.file_dates.get(latest_file, "")
+        dev_build_epoch = 0
+        try:
+            head_req = urllib.request.Request(
+                urljoin(dev_server_url, latest_file), method="HEAD")
+            with urllib.request.urlopen(head_req, timeout=10) as head_resp:
+                last_modified = head_resp.headers.get("Last-Modified", "")
+            if last_modified:
+                lm_dt = parsedate_to_datetime(last_modified)
+                dev_build_epoch = int(lm_dt.timestamp())
+                # Show in local server time, matching the version string format
+                dev_build_date = lm_dt.astimezone().strftime("%Y-%m-%d %H:%M")
+        except Exception as e:
+            pcat_logger.logger.warning(f"Error fetching dev firmware Last-Modified: {e}")
         
         # Get local build date from version string if available
         # Format: R25.02.0 / r7566-973b5947b / 2024-01-15 10:30
@@ -1864,6 +1896,7 @@ def dev_server_check():
             "dev_revision": latest_revision,
             "dev_hash": dev_hash,
             "dev_build_date": dev_build_date,
+            "dev_build_epoch": dev_build_epoch,
             "dev_download_url": urljoin(dev_server_url, latest_file),
             "dev_sha256_hash": dev_sha256_hash,
             "dev_sha256_available": dev_sha256_available,
@@ -1944,6 +1977,23 @@ def firmware_update_check():
             except Exception as e:
                 pcat_logger.logger.warning(f"Error processing production firmware SHA256: {e}")
         
+        # Get the build date from the firmware file's Last-Modified header.
+        remote_build_date = ""
+        remote_build_epoch = 0
+        if update_available:
+            try:
+                from email.utils import parsedate_to_datetime
+                fw_url = f"https://dl.photonicat.com/images/photonicat2/openwrt/{remote_filename}"
+                head_req = urllib.request.Request(fw_url, method="HEAD")
+                with urllib.request.urlopen(head_req, timeout=10) as head_resp:
+                    last_modified = head_resp.headers.get("Last-Modified", "")
+                if last_modified:
+                    lm_dt = parsedate_to_datetime(last_modified)
+                    remote_build_epoch = int(lm_dt.timestamp())
+                    remote_build_date = lm_dt.astimezone().strftime("%Y-%m-%d %H:%M")
+            except Exception as e:
+                pcat_logger.logger.warning(f"Error fetching production firmware Last-Modified: {e}")
+
         response_data = {
             "status": "ok",
             "local_version": local_version,
@@ -1954,6 +2004,8 @@ def firmware_update_check():
             "download_url": f"https://dl.photonicat.com/images/photonicat2/openwrt/{remote_filename}" if update_available else "",
             "sha256_hash": sha256_hash,
             "sha256_available": sha256_available,
+            "remote_build_date": remote_build_date,
+            "remote_build_epoch": remote_build_epoch,
             "luci_flash_url": "/cgi-bin/luci/admin/system/flash"
         }
         
@@ -6706,6 +6758,8 @@ def screen_action():
             "tab_screen_visual": "屏幕 - 可视化编辑",
             "visual_canvas_title": "页面布局 (172×320)",
             "visual_page": "页",
+            "visual_page_add": "添加页",
+            "visual_page_remove": "删除此页",
             "visual_drag_hint": "拖动元素移动，拖动右下角手柄调整大小",
             "visual_zones_hint": "顶栏与底栏由系统绘制（仅供预览），只能编辑中间区域",
             "data_sources_title": "数据源",
@@ -6759,11 +6813,24 @@ def screen_action():
             "visual_no_selection": "请在画布上选择一个元素进行编辑。",
             "visual_prop_type": "类型",
             "visual_prop_label": "标签",
+            "visual_prop_text": "文本",
             "visual_prop_units": "单位",
             "visual_prop_font": "字体",
             "visual_prop_color": "颜色",
             "visual_prop_position": "位置 (x, y)",
             "visual_prop_size": "大小 (宽, 高)",
+            "graph_type": "图表类型",
+            "graph_time_frame": "时间范围 (分钟)",
+            "visual_reset_pos": "重置位置",
+            "visual_reset_pos_tip": "重置为加载此布局时该元素所在的位置",
+            "visual_reset_pos_default": "默认位置",
+            "visual_reset_pos_default_tip": "重置为该元素在默认配置中的位置",
+            "visual_center_h": "居中",
+            "visual_center_h_tip": "水平居中",
+            "visual_snap": "对齐",
+            "visual_snap_tip": "将位置对齐到最近的 4 像素网格",
+            "visual_pos_moved": "已从原始位置移动",
+            "visual_size_changed": "已从原始大小调整",
             "visual_prop_enable": "启用",
             "visual_delete_element": "删除元素",
             "visual_reset_default": "重置为默认",
@@ -6814,6 +6881,8 @@ def screen_action():
             "tab_screen_visual": "Screen - Visual Editor",
             "visual_canvas_title": "Page Layout (172×320)",
             "visual_page": "Page",
+            "visual_page_add": "Add page",
+            "visual_page_remove": "Remove this page",
             "visual_drag_hint": "Drag elements to move, drag the corner handle to resize",
             "visual_zones_hint": "Top & bottom bars are drawn by the system (preview only); you can only edit the middle area",
             "data_sources_title": "Data Sources",
@@ -6867,11 +6936,24 @@ def screen_action():
             "visual_no_selection": "Select an element on the canvas to edit it.",
             "visual_prop_type": "Type",
             "visual_prop_label": "Label",
+            "visual_prop_text": "Text",
             "visual_prop_units": "Units",
             "visual_prop_font": "Font",
             "visual_prop_color": "Color",
             "visual_prop_position": "Position (x, y)",
             "visual_prop_size": "Size (w, h)",
+            "graph_type": "Graph type",
+            "graph_time_frame": "Time frame (min)",
+            "visual_reset_pos": "Reset position",
+            "visual_reset_pos_tip": "Reset to the position it had when this layout was loaded",
+            "visual_reset_pos_default": "Default position",
+            "visual_reset_pos_default_tip": "Reset to this element’s position in the default configuration",
+            "visual_center_h": "Center",
+            "visual_center_h_tip": "Center horizontally",
+            "visual_snap": "Snap",
+            "visual_snap_tip": "Snap position to the nearest 4px grid",
+            "visual_pos_moved": "Moved from its original position",
+            "visual_size_changed": "Resized from its original size",
             "visual_prop_enable": "Enable",
             "visual_delete_element": "Delete Element",
             "visual_reset_default": "Reset to Default",

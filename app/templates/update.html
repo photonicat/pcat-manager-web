@@ -70,6 +70,11 @@
     Alpine.store("app").set_page("update");
     Alpine.data("update", () => ({
       init() {
+        // Tick the relative-time clock so "X ago" labels stay current.
+        // Update every second for the first 2 minutes (fresh builds), then
+        // back off to once a minute to avoid needless re-renders.
+        setInterval(() => { this.now_ts = Math.floor(Date.now() / 1000); }, 1000);
+
         window.socket = io({ transports: ["polling"], upgrade: false });
         socket.on("connect", function () {
           socket.emit("client_connected", { data: "" });
@@ -290,6 +295,7 @@
       dev_firmware_info: {},
       dev_versions_same: false,
       dev_firmware_upgrading: false,
+      now_ts: Math.floor(Date.now() / 1000), // live clock for relative "X ago" timestamps
       
       // MCU Update functionality
       mcu_check_completed: false,
@@ -769,6 +775,31 @@
           return `${versionText} / ${buildDate}`;
         }
         return versionText;
+      },
+
+      // Human-friendly "X ago" from a Unix epoch (seconds). Reactive on now_ts.
+      relative_time(epoch) {
+        if (!epoch) return "";
+        let diff = this.now_ts - epoch;
+        if (diff < 0) diff = 0;
+        if (diff < 60) return `${diff}s ago`;
+        const mins = Math.floor(diff / 60);
+        if (mins < 60) return `${mins}m ago`;
+        const hours = Math.floor(diff / 3600);
+        if (hours < 24) return `${hours}h ago`;
+        const days = Math.floor(diff / 86400);
+        if (days < 30) return `${days} day${days === 1 ? '' : 's'} ago`;
+        const months = Math.floor(days / 30);
+        if (months < 12) return `${months} month${months === 1 ? '' : 's'} ago`;
+        const years = Math.floor(days / 365);
+        return `${years} year${years === 1 ? '' : 's'} ago`;
+      },
+
+      // "2026-06-11 07:12 (4m ago)" — absolute build date plus live relative span.
+      format_build_date(buildDate, epoch) {
+        if (!buildDate) return "";
+        const rel = this.relative_time(epoch);
+        return rel ? `${buildDate} (${rel})` : buildDate;
       },
 
       start_firmware_upgrade() {
