@@ -1794,66 +1794,70 @@ class PcModemClient (threading.Thread):
     def handle_qnwinfo(self, response: bytes):
         """
         Parse QNWINFO response for network information.
-        Example response:
+        Example responses:
+            SA / LTE-only (one line):
                 b'+QNWINFO: "TDD NR5G","46011","NR5G BAND 78",627264\r\nOK\r\n'
-        This method extracts:
-            - network_mode: "TDD NR5G"
-            - mccmnc:       "46011"
-            - band:         "NR5G BAND 78"
-            - cell_id:      "627264"
+            EN-DC / NSA (LTE anchor first, NR secondary cell group second):
+                b'+QNWINFO: "FDD LTE","40177","LTE BAND 3",1652\r\n'
+                b'+QNWINFO: "TDD NR5G","40177","NR5G BAND 78",643322\r\nOK\r\n'
+        All lines are parsed. If an NR line is present the tech is "5G"; when it
+        comes together with an LTE line the connection is EN-DC (NSA).
         """
-        # Check for ERROR response (modem doesn't support this command)
         if b'ERROR' in response:
             self.cmd_mark_failure('AT+QNWINFO')
             return
 
-        lines = response.split(b"\r\n")
-        for line in lines:
-            if line.startswith(b"+QNWINFO:"):
-                # Remove '+QNWINFO:' prefix
-                payload = line.split(b":", 1)[1].strip()
-                # Split by comma, strip quotes, and decode to strings
-                parts = [part.strip().strip(b'"').decode("utf-8", errors="ignore") for part in payload.split(b",") ]
-                if len(parts) >= 4:
-                    network_mode = parts[0]  # e.g. "TDD NR5G"
-                    mccmnc       = parts[1]  # e.g. "46011"
-                    band         = parts[2]  # e.g. "NR5G BAND 78"
-                    cell_id      = parts[3]  # e.g. "627264"
+        entries = []
+        for line in response.split(b"\r\n"):
+            if not line.startswith(b"+QNWINFO:"):
+                continue
+            payload = line.split(b":", 1)[1].strip()
+            parts = [part.strip().strip(b'"').decode("utf-8", errors="ignore") for part in payload.split(b",")]
+            if len(parts) < 4:
+                print("Warning: Unexpected +QNWINFO format:", line)
+                continue
+            entries.append(parts[:4])
 
-                    nm_upper = network_mode.upper()
-                    if "NR" in nm_upper or "5G" in nm_upper:
-                        tech = "5G"
-                    elif "LTE" in nm_upper or "4G" in nm_upper:
-                        tech = "4G"
-                    elif "WCDMA" in nm_upper or "HSPA" in nm_upper or "3G" in nm_upper:
-                        tech = "3G"
-                    else:
-                        tech = "Other"
+        if not entries:
+            return
 
-                    # Look up MCC/MNC details and get ISP information
-                    if self.is_em05() or self.is_fm350():
-                        self.basic["isp_details"] = lookup_isp_details(mccmnc)
-                    
-                    network_info = f"{network_mode} {band}".strip()
-                    parts = network_info.split(" ")
-                    #remove duplicated parts
-                    parts = list(dict.fromkeys(parts))
-                    network_info = " ".join(parts)
+        def tech_of(mode):
+            m = mode.upper()
+            if "NR" in m or "5G" in m:
+                return "5G"
+            if "LTE" in m or "4G" in m:
+                return "4G"
+            if "WCDMA" in m or "HSPA" in m or "3G" in m:
+                return "3G"
+            return "Other"
 
-                    # Store in basic info dictionary
-                    self.basic["cell_network_mode"] = network_mode
-                    self.basic["cell_mccmnc"]        = mccmnc
-                    self.basic["cell_band"]          = band
-                    self.basic["cell_id"]       = cell_id
-                    self.basic["cell_tech"]     = tech
-                    self.basic["network_info"]     = network_info
-                    print(
-                            f"Parsed QNWINFO → mode={network_mode}, "
-                            f"mccmnc={mccmnc}, band={band}, cell_id={cell_id}, cell_tech={tech}"
-                    )
-                else:
-                    print("Warning: Unexpected +QNWINFO format:", line)
-                break
+        def info_of(mode, band):
+            words = f"{mode} {band}".strip().split(" ")
+            return " ".join(dict.fromkeys(words))
+
+        network_mode, mccmnc, band, cell_id = entries[0]
+        techs = [tech_of(e[0]) for e in entries]
+        nr = next((e for e in entries if tech_of(e[0]) == "5G"), None)
+        lte = next((e for e in entries if tech_of(e[0]) == "4G"), None)
+        nsa = nr is not None and lte is not None
+
+        tech = "5G" if nr is not None else techs[0]
+        network_info = " + ".join(info_of(e[0], e[2]) for e in entries)
+
+        if self.is_em05() or self.is_fm350():
+            self.basic["isp_details"] = lookup_isp_details(mccmnc)
+
+        self.basic["cell_network_mode"] = "EN-DC (NSA)" if nsa else network_mode
+        self.basic["cell_mccmnc"]       = mccmnc
+        self.basic["cell_band"]         = " + ".join(e[2] for e in entries)
+        self.basic["cell_id"]           = cell_id
+        self.basic["cell_tech"]         = tech
+        self.basic["cell_nr5g_nsa"]     = nsa
+        self.basic["network_info"]      = network_info
+        print(
+            f"Parsed QNWINFO → mode={self.basic['cell_network_mode']}, "
+            f"mccmnc={mccmnc}, band={self.basic['cell_band']}, cell_id={cell_id}, cell_tech={tech}"
+        )
 
     def handle_qcfg_usbnet(self, response: bytes):
         """
@@ -1925,117 +1929,125 @@ class PcModemClient (threading.Thread):
 
     def handle_qeng_servingcell(self, response: bytes):
         """
-        Parse QENG="servingcell" response for current serving‐cell info.
-        Example:
-            b'+QENG: "servingcell","NOCONN","NR5G-SA","TDD",460,11,592E2E004,474,590903,627264,78,12,-72,-10,13,1,55\r\n'
-            b'+QENG: "servingcell","NOCONN","LTE","FDD",460,11,592E2E004,474,590903,627264,78,12,-72,-10,13,1,55\r\n'
-        Extracts:
-        - state           e.g. "NOCONN"
-        - rat             e.g. "NR5G-SA" or "LTE"
-        - duplex          e.g. "TDD" or "FDD"
-        - mcc, mnc        e.g. "460", "11"
-        - cellid          e.g. "592E2E004"
-        - pci             Physical Cell ID (int)
-        - tac             Tracking Area Code (int)
-        - arfcn           Absolute RF channel number (int)
-        - band            Band number (int)
-        - dl_bw_ind       DL bandwidth indicator (int)
-        - rsrp, rsrq      (int) in dBm/dB
-        - sinr            (int) in dB
-        - scs             subcarrier spacing index (int)
-        - srxlev          cell‐selection RX‐level (int)
-        - frequency_mhz   computed from arfcn
-        - bw_mhz          bandwidth in MHz
+        Parse QENG="servingcell" response for current serving-cell info.
+        Three layouts are produced by Quectel RM5xx modems:
+            NR5G-SA (one line):
+                +QENG: "servingcell",<state>,"NR5G-SA",<duplex>,<MCC>,<MNC>,<cellID>,<PCID>,<TAC>,<ARFCN>,<band>,<NR_DL_bw>,<RSRP>,<RSRQ>,<SINR>,<scs>,<srxlev>
+            LTE only (one line):
+                +QENG: "servingcell",<state>,"LTE",<is_tdd>,<MCC>,<MNC>,<cellID>,<PCID>,<earfcn>,<band>,<UL_bw>,<DL_bw>,<TAC>,<RSRP>,<RSRQ>,<RSSI>,<SINR>,<CQI>,<tx_power>,<srxlev>
+            EN-DC / NSA (three lines):
+                +QENG: "servingcell",<state>
+                +QENG: "LTE",<is_tdd>,<MCC>,<MNC>,<cellID>,<PCID>,<earfcn>,<band>,<UL_bw>,<DL_bw>,<TAC>,<RSRP>,<RSRQ>,<RSSI>,<SINR>,<CQI>,<tx_power>,<srxlev>
+                +QENG: "NR5G-NSA",<MCC>,<MNC>,<PCID>,<RSRP>,<SINR>,<RSRQ>,<ARFCN>,<band>,<NR_DL_bw>,<scs>
         """
-        # Check for ERROR response (modem doesn't support this command)
         if b'ERROR' in response:
             self.cmd_mark_failure('AT+QENG="servingcell"')
             return
 
-        # mapping DL‐bandwidth indicator → MHz
-        bw_map = {0:5,1:10,2:15,3:20,4:25,5:30,6:40,7:50,8:60,9:70,10:80,11:90,12:100,13:200}
+        nr_bw_map = {0:5,1:10,2:15,3:20,4:25,5:30,6:40,7:50,8:60,9:70,10:80,11:90,12:100,13:200}
+        lte_bw_map = {0:1.4,1:3,2:5,3:10,4:15,5:20}
+        to_int = self.convert_to_int
 
-        for line in response.split(b"\r\n"):
-            if not line.startswith(b'+QENG: "servingcell"'):
-                continue
-            try:
-                # split fields
-                parts = [p.strip().strip(b'"').decode("utf-8", errors="ignore")
-                        for p in line.split(b",")]
+        def fields(line):
+            payload = line.split(b":", 1)[1]
+            return [p.strip().strip(b'"').decode("utf-8", errors="ignore") for p in payload.split(b",")]
 
-                # unpack
-                # parts[0] = '+QENG: "servingcell"' → state in parts[1]
-                state    = parts[1]
-                rat      = parts[2]
-                duplex   = parts[3]
-                mcc      = parts[4]
-                mnc      = parts[5]
-                cellid   = parts[6]
-                pci      = self.convert_to_int(parts[7])
-                tac      = self.convert_to_int(parts[8])
-                arfcn    = self.convert_to_int(parts[9])
-                band     = self.convert_to_int(parts[10])
-                dl_bw_ind= self.convert_to_int(parts[11])
-                rsrp     = self.convert_to_int(parts[12])
-                rsrq     = self.convert_to_int(parts[13])
-                sinr     = self.convert_to_int(parts[14])
-                scs      = self.convert_to_int(parts[15])
-                srxlev   = self.convert_to_int(parts[16])
-
-                # compute BW
-                bw_mhz = bw_map.get(dl_bw_ind, None)
-
-                # compute frequency (only NR here; LTE would need EARFCN→MHz formula)
-                if "NR5G" in rat:
-                    if arfcn < 600_000:
-                        freq_mhz = arfcn * 0.005
-                    elif arfcn < 2_016_667:
-                        freq_mhz = 3000 + (arfcn - 600_000) * 0.015
+        state = None
+        lte = None
+        nr = None
+        try:
+            for line in response.split(b"\r\n"):
+                if not line.startswith(b"+QENG:"):
+                    continue
+                f = fields(line)
+                if f[0] == "servingcell":
+                    state = f[1] if len(f) > 1 else None
+                    if len(f) > 2:
+                        f = f[2:]
                     else:
-                        freq_mhz = 24250 + (arfcn - 2_016_667) * 0.06
-                else:
-                    # fallback: treat ARFCN directly as MHz
-                    freq_mhz = float(arfcn)
+                        continue
+                rat = f[0]
+                if rat == "LTE" and len(f) >= 18:
+                    lte = {
+                        "duplex": f[1], "mcc": f[2], "mnc": f[3], "cellid": f[4],
+                        "pci": to_int(f[5]), "arfcn": to_int(f[6]), "band": to_int(f[7]),
+                        "dl_bw_ind": to_int(f[9]), "tac": f[10],
+                        "rsrp": to_int(f[11]), "rsrq": to_int(f[12]), "sinr": to_int(f[14]),
+                        "srxlev": to_int(f[17]),
+                    }
+                    lte["bw_mhz"] = lte_bw_map.get(lte["dl_bw_ind"])
+                elif rat == "NR5G-SA" and len(f) >= 15:
+                    nr = {
+                        "rat": rat, "duplex": f[1], "mcc": f[2], "mnc": f[3], "cellid": f[4],
+                        "pci": to_int(f[5]), "tac": f[6], "arfcn": to_int(f[7]), "band": to_int(f[8]),
+                        "dl_bw_ind": to_int(f[9]), "rsrp": to_int(f[10]), "rsrq": to_int(f[11]),
+                        "sinr": to_int(f[12]), "scs": to_int(f[13]), "srxlev": to_int(f[14]),
+                    }
+                elif rat == "NR5G-NSA" and len(f) >= 11:
+                    nr = {
+                        "rat": rat, "duplex": "TDD" if 620000 <= to_int(f[7]) < 2016667 else "", "mcc": f[1], "mnc": f[2],
+                        "cellid": None, "pci": to_int(f[3]), "tac": None, "arfcn": to_int(f[7]),
+                        "band": to_int(f[8]), "dl_bw_ind": to_int(f[9]), "rsrp": to_int(f[4]),
+                        "rsrq": to_int(f[6]), "sinr": to_int(f[5]), "scs": to_int(f[10]), "srxlev": -9999,
+                    }
+        except Exception as e:
+            print(f"Error parsing QENG serving cell: {e}")
+            return
 
-                # store in your data structure
-                self.basic.update({
-                    "serving_state":       state,
-                    "serving_rat":         rat,
-                    "serving_duplex":      duplex,
-                    "serving_mcc":         mcc,
-                    "serving_mnc":         mnc,
-                    "serving_cellid":      cellid,
-                    "serving_pci":         pci,
-                    "serving_tac":         tac,
-                    "serving_arfcn":       arfcn,
-                    "serving_band":        band,
-                    "serving_dl_bw_ind":   dl_bw_ind,
-                    "serving_bw_mhz":      f"{bw_mhz} MHz" if bw_mhz is not None else None,
-                    "serving_frequency":   f"{freq_mhz:.3f} MHz",
-                    "serving_rsrp":        f"{rsrp} dBm",
-                    "serving_rsrq":        f"{rsrq} dB",
-                    "serving_sinr":        f"{sinr} dB",
-                    "serving_scs":         scs,
-                    "serving_srxlev":      srxlev,
-                })
-                self.basic["modem_serving_info"] = f"{rat}  {duplex}, Cell ID = {cellid}, TAC = {tac}, PCI = {pci}"
-                self.basic["modem_serving_quality"] = (
-                    f"{fmt_num(sinr, 'dB')}, "
-                    f"{fmt_num(rsrq, 'dB')}, "
-                    f"{fmt_num(rsrp, 'dBm')}, "
-                    f"{fmt_num(srxlev, 'dB')}"
-                )
+        if nr is None and lte is None:
+            return
 
-                print(
-                    f"ServingCell → state={state}, RAT={rat}, {duplex}, "
-                    f"MCC/MNC={mcc}/{mnc}, PCI={pci}, CellID={cellid}, TAC={tac}, "
-                    f"ARFCN={arfcn}, Band={band}, BW={bw_mhz} MHz, "
-                    f"Freq={freq_mhz:.3f} MHz, RSRP={rsrp}dBm, "
-                    f"RSRQ={rsrq}dB, SINR={sinr}dB, SCS={scs}, SRXLEV={srxlev}"
-                )
-            except Exception as e:
-                print(f"Error parsing QENG serving cell: {e}")
-            break
+        if nr is not None:
+            nr["bw_mhz"] = nr_bw_map.get(nr["dl_bw_ind"])
+            a = nr["arfcn"]
+            nr["freq_mhz"] = a * 0.005 if a < 600_000 else (3000 + (a - 600_000) * 0.015 if a < 2_016_667 else 24250 + (a - 2_016_667) * 0.06)
+
+        main = nr if nr is not None else lte
+        rat = nr["rat"] if nr is not None else "LTE"
+        cellid = (lte or main).get("cellid")
+        tac = (lte or main).get("tac")
+        duplex = main.get("duplex") or ""
+
+        self.basic.update({
+            "serving_state":     state,
+            "serving_rat":       rat,
+            "serving_duplex":    duplex,
+            "serving_mcc":       main["mcc"],
+            "serving_mnc":       main["mnc"],
+            "serving_cellid":    cellid,
+            "serving_pci":       main["pci"],
+            "serving_tac":       tac,
+            "serving_arfcn":     main["arfcn"],
+            "serving_band":      main["band"],
+            "serving_dl_bw_ind": main["dl_bw_ind"],
+            "serving_bw_mhz":    f"{main['bw_mhz']} MHz" if main.get("bw_mhz") is not None else None,
+            "serving_frequency": f"{main['freq_mhz']:.3f} MHz" if "freq_mhz" in main else None,
+            "serving_rsrp":      f"{main['rsrp']} dBm",
+            "serving_rsrq":      f"{main['rsrq']} dB",
+            "serving_sinr":      f"{main['sinr']} dB",
+            "serving_scs":       main.get("scs"),
+            "serving_srxlev":    main["srxlev"],
+            "serving_lte_anchor": lte if (nr is not None and lte is not None) else None,
+        })
+
+        def quality(c):
+            return f"{fmt_num(c['sinr'], 'dB')}, {fmt_num(c['rsrq'], 'dB')}, {fmt_num(c['rsrp'], 'dBm')}, {fmt_num(c['srxlev'], 'dB')}"
+
+        if rat == "NR5G-NSA" and lte is not None:
+            self.basic["modem_serving_info"] = (
+                f"EN-DC: LTE B{lte['band']} PCI {lte['pci']} + NR n{nr['band']} PCI {nr['pci']}, "
+                f"Cell ID = {cellid}, TAC = {tac}"
+            )
+            self.basic["modem_serving_quality"] = f"NR: {quality(nr)} | LTE: {quality(lte)}"
+        else:
+            self.basic["modem_serving_info"] = f"{rat}  {duplex}, Cell ID = {cellid}, TAC = {tac}, PCI = {main['pci']}"
+            self.basic["modem_serving_quality"] = quality(main)
+
+        print(
+            f"ServingCell → state={state}, RAT={rat}, PCI={main['pci']}, ARFCN={main['arfcn']}, "
+            f"Band={main['band']}, RSRP={main['rsrp']}dBm, RSRQ={main['rsrq']}dB, SINR={main['sinr']}dB"
+            + (f", LTE anchor B{lte['band']} PCI {lte['pci']}" if (nr is not None and lte is not None) else "")
+        )
 
     def handle_qcainfo(self, response: bytes):
         """
@@ -2073,9 +2085,11 @@ class PcModemClient (threading.Thread):
                     for p in payload.split(b",")]
             if len(parts) < 5:
                 print("Warning: Unexpected +QCAINFO format:", line)
-                break
+                continue
 
-            component, arfcn_str, bw_ind_str, band, pci = parts[:5]
+            component, arfcn_str, bw_ind_str, band = parts[:4]
+            # LTE lines carry <pcell_state> before <PCID>; NR lines have <PCID> right after the band
+            pci = parts[5] if ("LTE" in band.upper() and len(parts) >= 6) else parts[4]
             arfcn = int(arfcn_str)
             bw_ind = int(bw_ind_str)
 
@@ -2178,10 +2192,14 @@ class PcModemClient (threading.Thread):
 
             freq_str = f"{freq_mhz:.0f} MHz"
 
-            # guess technology
-            tech = "5G" if "NR" in band or "5G" in band else "Other"
-
-            # store results
+            # store results (PCC only; SCCs are collected in ca_scc_list)
+            if component != "PCC":
+                self.basic.setdefault("ca_scc_list", []).append(
+                    {"band": band, "arfcn": arfcn_str, "pci": pci, "tech": tech,
+                     "bandwidth_mhz": bw_str, "frequency_mhz": freq_str}
+                )
+                continue
+            self.basic["ca_scc_list"] = []
             self.basic["ca_component"]           = component
             self.basic["ca_arfcn"]               = arfcn_str
             self.basic["ca_bandwidth_indicator"] = bw_ind_str
@@ -2204,7 +2222,18 @@ class PcModemClient (threading.Thread):
                 f"band={band}, PCI={pci}, tech={tech}, "
                 f"frequency={freq_str}"
             )
-            break
+
+        scc = self.basic.get("ca_scc_list") or []
+        if scc and self.basic.get("cell_carrier_info"):
+            nr_scc = [c for c in scc if c["tech"] == "5G"]
+            lte_n = len(scc) - len(nr_scc)
+            extra = []
+            if lte_n:
+                extra.append(f"+{lte_n} LTE SCC")
+            for c in nr_scc:
+                extra.append(f"+ {c['band']} {c['frequency_mhz']} @ {c['bandwidth_mhz']}")
+            self.basic["cell_carrier_info"] = self.basic["cell_carrier_info"].split(" | ")[0] + " | " + ", ".join(extra)
+
 
     def handle_qrsrp(self, response: bytes):
         """
