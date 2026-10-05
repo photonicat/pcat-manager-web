@@ -1080,6 +1080,22 @@ network_interfaces_cache = {
 }
 NETWORK_INTERFACES_CACHE_DURATION = 15  # seconds - network configs change infrequently
 
+def get_modem_mode():
+    """Radio generation for the dashboard and the LCD.
+
+    pcat-manager's mode comes from the dialer (quectel-cm), which only reports
+    NR5G-NSA when the LTE cell broadcasts the EN-DC availability flag in SIB2.
+    Many networks do not, so an active EN-DC connection is reported as LTE.
+    AT+QNWINFO lists the NR leg whenever it is active, so trust cell_tech when it
+    says 5G.
+    """
+    socket_mode = pc_app.socket_client.modem_mode
+    cell_tech = pc_app.modem_client.basic.get("cell_tech", "")
+    if cell_tech == "5G":
+        return cell_tech
+    return socket_mode or cell_tech
+
+
 def get_cached_expensive_op(op_name, fetch_func):
     """Get cached result for expensive operations with longer cache duration"""
     current_time = time.time()
@@ -1383,7 +1399,7 @@ def get_dashboard_data():
             "system_status": getattr(pc_app.main_app, 'system_status', 0),
             "carmode": pc_app.socket_client.charger_on_auto_start_mode,
             "network_route_mode": pc_app.socket_client.network_route_mode,
-            "modem_mode": pc_app.socket_client.modem_mode or pc_app.modem_client.basic.get("cell_tech", ""),
+            "modem_mode": get_modem_mode(),
 
             # Idle shutdown monitoring status
             "idle_shutdown_enabled": getattr(pc_app.main_app, 'idle_shutdown_enabled', False),
@@ -4900,7 +4916,7 @@ def status2_json_action():
         "carmode": pc_app.socket_client.charger_on_auto_start_mode,
         "network_route_mode": pc_app.socket_client.network_route_mode,
         "network_mode": pcat_config.get_network_mode(),
-        "modem_mode": pc_app.socket_client.modem_mode or pc_app.modem_client.basic.get("cell_tech", ""),
+        "modem_mode": get_modem_mode(),
         "modem_signal_strength": pc_app.socket_client.modem_signal_strength,
         "isp_name": pc_app.socket_client.isp_name,
         "sim_state": pc_app.modem_client.get_inferred_sim_state(pc_app.socket_client.sim_state)
