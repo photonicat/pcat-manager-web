@@ -12,11 +12,14 @@
     <meta name="msapplication-TileColor" content="#0ed3cf" />
     <meta name="theme-color" content="#0ed3cf" />
     <title>PIN Required | {{locales["oem_name"]}} - 配置</title>
-    <script defer src="/static/alpine-3.10.2.js"></script>
+    <script src="/static/theme.js"></script>
+    <script defer src="/static/alpine-3.15.12.js"></script>
     <link rel="stylesheet" href="/static/app.css" />
     <style>[x-cloak]{display:none!important;}</style>
-    <!-- SHA-256 fallback for non-HTTPS environments -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js"></script>
+    <!-- No external CDN: this router is often offline. SHA-256 uses
+         window.crypto.subtle when available and falls back to the pure-JS
+         sha256() defined below (the previous crypto-js CDN middle-tier was
+         redundant with that fallback and stalled/leaked when offline). -->
   </head>
   <body class="bg-gray-200">
     <div class="md:6/12 m-auto my-10 w-10/12 bg-white shadow-md lg:w-4/12">
@@ -233,15 +236,17 @@
               const isMatch = validHashes.some(h => h.toLowerCase() === hashHex.toLowerCase());
               console.log('Hash match:', isMatch);
               
-              // Send verification request
+              // Send verification request (this page does not extend _base,
+              // so it carries the CSRF token explicitly).
               const response = await fetch('/pin_verify', {
                 method: 'POST',
                 headers: {
                   'Content-Type': 'application/json',
+                  'X-CSRF-Token': {{ csrf_token()|tojson }},
                 },
                 body: JSON.stringify({
                   pin_hash: hashHex,
-                  target_url: '{{ target_url }}'
+                  target_url: {{ target_url|tojson }}
                 })
               });
               

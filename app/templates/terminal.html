@@ -1,4 +1,5 @@
 {% extends '_base.html' %}
+{% block page_title %}{{locales.terminal_title}}{% endblock %}
 {% block html_head %}
 <link rel="stylesheet" href="/static/xterm.css?v={{ cache_bust_version }}" />
 <style>
@@ -22,18 +23,24 @@
     background: #1a1a2e;
   }
   #terminal-container {
-    height: calc(100vh - 112px);
-    min-height: 300px;
+    /* First-paint fallback only. The exact height is set from JS
+       (_resizeTerminal) by measuring the real gap between the terminal top and
+       the visible footer, so the last row is never clipped by the footer bar
+       and there is no vertical scrollbar, on any screen size. */
+    height: calc(100vh - 160px);
+    min-height: 150px;
     overflow: hidden;
     padding-left: 3px;
   }
-  @media (min-width: 640px) {
-    #terminal-container {
-      height: calc(100vh - 180px);
-    }
-  }
   #terminal-container .xterm-viewport {
     overflow-y: hidden !important;
+  }
+  #terminal-container .xterm {
+    /* Breathing room under the bottom row. The rendered rows can overshoot
+       rows*cellHeight by a few sub-pixels (fractional DPR / font metrics), and
+       with overflow:hidden that overshoot was clipped by the wrapper's bottom
+       edge. FitAddon subtracts this padding, so the reserve is exact. */
+    padding-bottom: 6px;
   }
   .terminal-fullscreen {
     position: fixed !important;
@@ -65,7 +72,7 @@
 {% endblock %}
 
 {% block content %}
-<div class="container mx-auto w-full pt-10 sm:pt-24 md:pt-28 lg:px-4" style="padding-bottom:4px" x-data="terminalPage">
+<div class="container mx-auto w-full {% if not chromeless %}pt-10 sm:pt-24 md:pt-28{% else %}pt-1{% endif %} lg:px-4" style="padding-bottom:4px" x-data="terminalPage">
   <div class="flex items-center justify-between px-1" style="padding:4px 4px 3px 4px">
     <h1 class="font-bold uppercase text-gray-600">{{locales.terminal_title}}</h1>
     <div class="flex items-center space-x-1 sm:space-x-3">
@@ -95,7 +102,7 @@
       <div id="terminal-container"></div>
     </div>
   </div>
-  <button x-show="isFullscreen" x-cloak @click="toggleFullscreen()" style="position:fixed;top:8px;right:8px;z-index:10000;background:rgba(255,255,255,0.85);color:#333;border:1px solid #999;border-radius:4px;padding:4px 12px;font-size:14px;cursor:pointer">
+  <button x-show="isFullscreen && !embed" x-cloak @click="toggleFullscreen()" style="position:fixed;top:8px;right:8px;z-index:10000;background:rgba(255,255,255,0.85);color:#333;border:1px solid #999;border-radius:4px;padding:4px 12px;font-size:14px;cursor:pointer">
     ✕ Exit
   </button>
 </div>
@@ -104,7 +111,14 @@
 {% block bottom %}
 <script src="/static/xterm.min.js?v={{ cache_bust_version }}"></script>
 <script src="/static/xterm-addon-fit.min.js?v={{ cache_bust_version }}"></script>
-<script src="/static/socket.io.js?v={{ cache_bust_version }}"></script>
+<script src="/static/pollbus.js?v={{ cache_bust_version }}"></script>
+<script>
+  // pollbus published itself as window.io; keep a handle before the real
+  // socket.io client (next tag) takes that name. The terminal tries the
+  // websocket first and falls back to this shim if the server can't serve it.
+  window._pollIo = window.io;
+</script>
+<script src="/static/socket.io.min.js?v={{ cache_bust_version }}"></script>
 <script>
 document.addEventListener("alpine:init", () => {
   Alpine.store("app").set_page("terminal");
@@ -113,7 +127,17 @@ document.addEventListener("alpine:init", () => {
     term: null,
     fitAddon: null,
     socket: null,
-    sessionId: "default",
+    // ?lxc=<name> turns this tab into that container's console (own
+    // session id so the host-shell "default" session is untouched).
+    // ?embed=1 fills the whole viewport (for the /lxc page's iframe pane).
+    lxcName: new URLSearchParams(location.search).get("lxc") || "",
+    // ?popup=1 is the console window opened from /lxc: like embed, the page
+    // chrome is gone (server-side, via `chromeless`), so the terminal owns
+    // the whole viewport — but unlike embed it keeps its own toolbar, which
+    // is the only way to reconnect or change font size in a bare window.
+    embed: new URLSearchParams(location.search).get("embed") === "1",
+    popup: new URLSearchParams(location.search).get("popup") === "1",
+    get sessionId() { return this.lxcName ? "lxc-" + this.lxcName : "default"; },
     status: "connecting",
     isFullscreen: false,
     _resizeTimeout: null,
@@ -128,7 +152,37 @@ document.addEventListener("alpine:init", () => {
     },
 
     init() {
+      if (this.embed) {
+        // Fill the iframe viewport; the fullscreen sizing path handles the
+        // rest. The floating exit button is gated on !embed.
+        this.isFullscreen = true;
+        document.getElementById("terminal-wrapper").classList.add("terminal-fullscreen");
+      }
+      if (this.popup) this._rememberGeometry();
       this._setup();
+    },
+
+    // Record where the user left this console window so the next one opens
+    // the same size and place. Written from inside the popup because only it
+    // knows its own outer dimensions; the opener reads it back before calling
+    // window.open (see consoleGeometry in the /lxc page).
+    _rememberGeometry() {
+      var save = () => {
+        try {
+          localStorage.setItem("pcat_console_geom", JSON.stringify({
+            w: window.outerWidth, h: window.outerHeight,
+            left: window.screenX, top: window.screenY,
+          }));
+        } catch (e) {}
+      };
+      var timer = null;
+      window.addEventListener("resize", () => {
+        clearTimeout(timer);
+        timer = setTimeout(save, 400);   // settle before writing
+      });
+      // pagehide rather than unload: it also fires when the window is closed,
+      // and it is the one the browser guarantees on a bfcache navigation.
+      window.addEventListener("pagehide", save);
     },
 
     _setup() {
@@ -162,8 +216,21 @@ document.addEventListener("alpine:init", () => {
       });
       this.term.loadAddon(fitAddon);
       this.term.open(container);
-      fitAddon.fit();
+      this._resizeTerminal();
       this.term.focus();
+      // Re-measure once fonts/layout settle so even the first paint is exact.
+      setTimeout(() => this._resizeTerminal(), 120);
+      // The cell size is measured when the terminal opens, which can be before
+      // JetBrains Mono has loaded — the fallback font is shorter, so fit()
+      // packs in more rows than the real font can show and the last line ends
+      // up under the bottom edge of the box (most visible in a fresh console
+      // popup, where nothing is warm). Re-measure once the fonts are in.
+      if (document.fonts && document.fonts.ready) {
+        document.fonts.ready.then(() => {
+          try { this.term._core._charSizeService.measure(); } catch (e) {}
+          this._resizeTerminal();
+        });
+      }
 
       this.term.onData((data) => {
         if (this.socket && this.socket.connected) {
@@ -186,23 +253,81 @@ document.addEventListener("alpine:init", () => {
         }
       });
 
-      window.addEventListener("resize", () => {
+      const onViewportChange = () => {
         clearTimeout(this._resizeTimeout);
-        this._resizeTimeout = setTimeout(() => {
-          try { this.fitAddon.fit(); } catch(e) {}
-        }, 150);
-      });
+        this._resizeTimeout = setTimeout(() => this._resizeTerminal(), 150);
+      };
+      window.addEventListener("resize", onViewportChange);
+      window.addEventListener("orientationchange", onViewportChange);
 
       // Now connect
       this._initSocket();
     },
 
+    // Height of whichever fixed footer is currently visible (the mobile bottom
+    // nav below the sm breakpoint, the desktop footer at/above it). Measured
+    // live so any change in footer content/height is accounted for. offsetParent
+    // is null for position:fixed elements, so visibility is read from the
+    // computed display (the bars are toggled with sm:hidden / hidden sm:block).
+    _visibleFooterHeight() {
+      let h = 0;
+      const bars = [
+        document.getElementById("bottom-nav-content"),
+        document.querySelector("footer"),
+      ];
+      for (const el of bars) {
+        if (el && getComputedStyle(el).display !== "none") {
+          h = Math.max(h, el.offsetHeight);
+        }
+      }
+      return h;
+    },
+
+    // Size the terminal to the exact gap between its top and the footer, then
+    // fit(). This replaces fixed calc(100vh - Npx) guesses that clipped the last
+    // row when the footer was taller than the guess. Fullscreen keeps its CSS
+    // 100vh (the terminal sits above the footer there), so only fit() runs.
+    _resizeTerminal() {
+      const container = document.getElementById("terminal-container");
+      if (!container) return;
+      if (!this.isFullscreen) {
+        const top = container.getBoundingClientRect().top;
+        // -2px hairline so the bottom row never tucks under the footer's border.
+        const avail = window.innerHeight - top - this._visibleFooterHeight() - 2;
+        container.style.height = Math.max(150, Math.floor(avail)) + "px";
+      }
+      try { this.fitAddon.fit(); } catch (e) {}
+    },
+
     _initSocket() {
       this.status = "connecting";
       this._openCount = 0;
+      // Websocket first: granian in ASGI mode (pcat_asgi) serves real
+      // socket.io at /socket.io, and a pushed PTY beats a 150ms-1s poll for
+      // typing latency. On the old WSGI build that path cannot answer a
+      // websocket at all, so the first connect_error -- before we have ever
+      // connected -- flips this page to the pollbus shim, the previous
+      // transport. Both speak the same .on/.emit API, so everything below
+      // is wired identically either way.
+      this._everConnected = false;
+      this._usingPollbus = false;
       this.socket = io({ transports: ["websocket"], upgrade: false });
+      this._wireSocket();
+    },
+
+    _fallbackToPollbus() {
+      if (this._usingPollbus || this._everConnected) return;
+      this._usingPollbus = true;
+      try { this.socket.disconnect(); } catch (e) {}
+      this.socket = window._pollIo();
+      this._wireSocket();
+    },
+
+    _wireSocket() {
+      this.socket.on("connect_error", () => { this._fallbackToPollbus(); });
 
       this.socket.on("connect", () => {
+        this._everConnected = true;
         this.status = "connected";
         this._connected = true;
         this._openCount++;
@@ -212,6 +337,7 @@ document.addEventListener("alpine:init", () => {
         }
         this.socket.emit("terminal_open", {
           session_id: this.sessionId,
+          lxc_attach: this.lxcName,
           cols: this.term.cols,
           rows: this.term.rows
         });
@@ -253,14 +379,14 @@ document.addEventListener("alpine:init", () => {
       const size = Math.min(this.term.options.fontSize + 2, 32);
       this.term.options.fontSize = size;
       localStorage.setItem('terminal_font_size', size);
-      try { this.fitAddon.fit(); } catch(e) {}
+      this._resizeTerminal();
     },
 
     fontSizeDown() {
       const size = Math.max(this.term.options.fontSize - 2, 8);
       this.term.options.fontSize = size;
       localStorage.setItem('terminal_font_size', size);
-      try { this.fitAddon.fit(); } catch(e) {}
+      this._resizeTerminal();
     },
 
     toggleFullscreen() {
@@ -272,7 +398,7 @@ document.addEventListener("alpine:init", () => {
         wrapper.classList.remove("terminal-fullscreen");
       }
       setTimeout(() => {
-        try { this.fitAddon.fit(); } catch(e) {}
+        this._resizeTerminal();
         this.term.focus();
       }, 100);
     }

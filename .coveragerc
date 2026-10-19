@@ -1,0 +1,36 @@
+# Coverage scope for `python3 -m coverage run --rcfile=.coveragerc tests/run_tests.py`
+#
+# Omissions are limited to code that is not part of the shipped, reachable
+# application, so the percentage reflects code a user can actually hit:
+#
+#   * app/test/*, app/locales/*      -- test fixtures and translation tables
+#   * app/pysms_tool*                -- vendored third-party library (synced
+#                                       from GitHub by update_pysms_tool.py;
+#                                       upstream owns its testing)
+#   * *_dummy.py, *mock*, dummy_*    -- dev-machine stand-ins for hardware;
+#                                       imported by nothing in production
+#   * battery_monitor/maintenance    -- dead code: imported by nothing
+#                                       (candidate for deletion)
+#   * indent_convert, opkg-install   -- standalone dev scripts, never imported
+#
+# Everything else in app/ counts, including the hardware-bound clients we
+# cannot exercise headless -- a low number there is information, not noise.
+
+[run]
+source = app
+omit =
+    app/test/*
+    app/locales/*
+    app/pysms_tool.py
+    app/pysms_tool/*
+    app/*_dummy.py
+    app/dummy_hardware.py
+    app/mock_hardware.py
+    app/platform_mock.py
+    app/battery_monitor.py
+    app/battery_maintenance.py
+    app/indent_convert.py
+    app/opkg-install.py
+
+[report]
+precision = 1

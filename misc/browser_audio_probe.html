@@ -1,0 +1,97 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>browser audio path probe</title>
+<!--
+  Measures the browser half of the call-audio budget, which the on-device probe
+  (misc/calat.py) cannot see: what sample rate the AudioContext actually runs at,
+  how much delay the mic node adds, and what the output path costs.
+
+  Run headless via misc/browser_audio_probe.sh -- needs a fake mic and a real
+  origin (http://127.0.0.1 counts as secure, so getUserMedia and AudioWorklet
+  both work without a cert).
+
+  Results are written into #out so `chromium --dump-dom` can read them.
+-->
+<body>
+<pre id="out">running…</pre>
+<script>
+const L = [];
+const say = (s) => { L.push(s); document.getElementById('out').textContent = L.join('\n'); };
+
+// Same construction phone.html uses.
+const MODEM_RATE = 16000;
+
+async function main() {
+  const AC = window.AudioContext || window.webkitAudioContext;
+  let ctx;
+  try { ctx = new AC({ sampleRate: MODEM_RATE }); }
+  catch (e) { ctx = new AC(); say('NOTE: {sampleRate} rejected: ' + e.message); }
+  await ctx.resume();
+
+  say('RESULT ctx.sampleRate=' + ctx.sampleRate);
+  say('RESULT ctx.baseLatency=' + (ctx.baseLatency !== undefined ? (ctx.baseLatency * 1000).toFixed(1) : 'n/a'));
+  say('RESULT ctx.outputLatency=' + (ctx.outputLatency !== undefined ? (ctx.outputLatency * 1000).toFixed(1) : 'n/a'));
+
+  // What the current code builds: ScriptProcessor(1024). Its buffer cannot emit
+  // until full, so bufferSize/sampleRate is added mic delay, one for one.
+  for (const n of [1024, 512, 256]) {
+    try {
+      const sp = ctx.createScriptProcessor(n, 1, 1);
+      say('RESULT scriptProcessor.' + n + '.bufferSize=' + sp.bufferSize +
+          ' ms=' + (sp.bufferSize / ctx.sampleRate * 1000).toFixed(1));
+      sp.disconnect();
+    } catch (e) {
+      say('RESULT scriptProcessor.' + n + '=unsupported (' + e.message + ')');
+    }
+  }
+
+  // The alternative: an AudioWorklet, whose render quantum is fixed at 128
+  // frames and which runs on the audio thread instead of the main thread.
+  if (ctx.audioWorklet) {
+    const src = `
+      class P extends AudioWorkletProcessor {
+        constructor() { super(); this.n = 0; }
+        process(inputs) {
+          const ch = inputs[0] && inputs[0][0];
+          if (ch && this.n++ === 0) this.port.postMessage({ quantum: ch.length });
+          return true;
+        }
+      }
+      registerProcessor('probe', P);
+    `;
+    const url = URL.createObjectURL(new Blob([src], { type: 'application/javascript' }));
+    try {
+      await ctx.audioWorklet.addModule(url);
+      say('RESULT audioWorklet=supported');
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const node = new AudioWorkletNode(ctx, 'probe');
+      const q = await new Promise((res, rej) => {
+        node.port.onmessage = (e) => res(e.data.quantum);
+        setTimeout(() => rej(new Error('no process() callback')), 4000);
+        ctx.createMediaStreamSource(stream).connect(node);
+        node.connect(ctx.destination);
+      });
+      say('RESULT audioWorklet.quantum=' + q +
+          ' ms=' + (q / ctx.sampleRate * 1000).toFixed(1));
+      const t = stream.getAudioTracks()[0].getSettings();
+      say('RESULT micTrack.sampleRate=' + (t.sampleRate || 'n/a') +
+          ' latency=' + (t.latency !== undefined ? (t.latency * 1000).toFixed(1) : 'n/a'));
+    } catch (e) {
+      say('RESULT audioWorklet=failed (' + e.message + ')');
+    }
+  } else {
+    say('RESULT audioWorklet=absent');
+  }
+  say('DONE');
+}
+
+// Posted back rather than left in the DOM: --dump-dom fires at load, long
+// before the async audio probing finishes, so the collecting server is what
+// actually gets the results.
+main().catch((e) => say('FATAL ' + e.message))
+  .finally(() => {
+    say('DONE');
+    fetch('/result', { method: 'POST', body: L.join('\n') }).catch(() => {});
+  });
+</script>
+</body>

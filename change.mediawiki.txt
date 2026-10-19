@@ -1,0 +1,12 @@
+== Changelog — v26.04 (Since December 2025) ==
+
+* '''Kernel & system updates''' — Updated kernel to 6.12.74, mac80211 to 6.12.61, python3 to 3.13.9 with related packages (PAM-based auth replacing deprecated <code>spwd</code>), and system version to 26.04.
+* '''Fibocom FM350-GL 5G modem support''' — Full support including signal strength, temperature monitoring, IMEI, carrier/operator display, serving cell info, roaming preference, 4G/5G network mode and band selection, WWAN power off toggle via rfkill, network stats tracking, and hex-encoded operator name decoding.
+* '''SMS reliability''' — Switched to PDU mode for all modems, fixed FM350-GL serial port handling, prompt detection, and response timeouts.
+* '''Web terminal''' — Added web-based terminal (<code>/terminal</code>) with persistent PTY sessions, fullscreen toggle, disconnect/reconnect, JetBrains Mono font, and mobile viewport optimization.
+* '''Direct Power Mode & TCP BBR v3''' — Added power-on mode options for battery-free and quick-response applications (auto power-on when adapter connected, no battery required). Added TCP BBR v3 support with congestion control configuration in General Settings.
+* '''Battery history & power event logging''' — Battery history chart with SQLite storage, fixed voltage scale, area fill, watt display, and power on/off event timeline. Persistent power event logging with voltage, current, SOC data, and DC plug/unplug tracking.
+* '''Idle & low battery shutdown''' — Live idle shutdown countdown timer, low battery shutdown support, WiFi client idle monitoring (OR mode), battery-only auto-shutdown option, and 2% SOC tolerance for SOC estimation jumps.
+* '''General Settings & timer page redesign''' — New General Settings page with language, timezone, hostname, and LuCI sync. Redesigned timer page with modern split-panel layout, compact full-width panes, and clarified Car/UPS mode descriptions.
+* '''Dashboard & header improvements''' — Active WAN shown first, public IPv6 detection, modem temperature display, 5G/4G indicator in network icon row, status-aware rendering, gateway underline, and optimized mobile header layout.
+* '''Performance & UI/UX polish''' — Native Python ubus/uci wrappers, non-blocking IO caching, CPU powersave disabling big cores (A72), 3-month static asset caching, temperature and wattage charts, tab state preserved across refresh, single-language notifications, improved icons, Wiki and Community footer buttons, smart phone formatting, and verbose firmware upgrade progress.

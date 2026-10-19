@@ -1,0 +1,139 @@
+{% extends '_base.html' %}
+{% block page_title %}{{locales["modem_log_title"]}}{% endblock %}
+{% block html_head %}
+<style>
+  #modem-log-pane {
+    background: #1a1a2e;
+    color: #d8dee9;
+    font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    line-height: 1.45;
+    height: calc(100vh - 210px);
+    min-height: 300px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+    padding: 8px 10px;
+    border-radius: 0.25rem;
+  }
+</style>
+{% endblock %}
+{% block content %}
+<div class="container mx-auto w-full pt-14 pb-6 sm:pt-24 sm:pb-8 md:pt-28 lg:px-4" x-data="modem_log" x-init="init()">
+  <div class="flex items-center justify-between px-3 py-4">
+    <h1 class="font-bold uppercase text-gray-600">{{locales["modem_log_title"]}}</h1>
+    <a href="/device_control" class="text-sm text-pcatblue underline hover:no-underline">{{locales["tab_device_control"]}}</a>
+  </div>
+
+  <div class="rounded border bg-white shadow">
+    <!-- source header: one source today (the cellular modem); this bar is
+         where more sources will appear later, dev-tools style -->
+    <div class="flex flex-wrap items-center gap-2 border-b px-3 py-2 text-xs">
+      <span class="rounded-full bg-gray-800 px-2 py-0.5 font-medium text-white" x-text="source.id || 'modem'"></span>
+      <span class="text-gray-600" x-show="source.exec" x-text="source.exec"></span>
+      <span class="rounded bg-gray-100 px-1.5 py-0.5 text-gray-500" x-show="source.usb_id" x-text="'USB ' + source.usb_id"></span>
+      <template x-for="dev in source.dev_paths"><span class="rounded bg-blue-50 px-1.5 py-0.5 text-pcatblue" x-text="dev"></span></template>
+      <template x-for="dev in source.netdevs"><span class="rounded bg-green-50 px-1.5 py-0.5 text-green-700" x-text="dev"></span></template>
+      <span class="ml-auto text-gray-400" x-text="buffer_info()"></span>
+      <button type="button" class="rounded border border-gray-200 px-2 py-0.5 text-gray-600 hover:bg-gray-100"
+              @click="paused = !paused"
+              x-text="paused ? '{{locales['modem_log_resume']}}' : '{{locales['modem_log_pause']}}'"></button>
+      <button type="button" class="rounded border border-gray-200 px-2 py-0.5 text-gray-600 hover:bg-gray-100"
+              @click="clear_view()">{{locales["modem_log_clear"]}}</button>
+      <button type="button" class="rounded border border-gray-200 px-2 py-0.5 text-gray-600 hover:bg-gray-100"
+              @click="download_log()">{{locales["modem_log_download"]}}</button>
+    </div>
+
+    <div class="p-2">
+      <div id="modem-log-pane" x-ref="pane"><span x-text="log_text"></span><span x-show="!log_text && !error_text" class="text-gray-500">{{locales["modem_log_empty"]}}</span><span x-show="error_text" class="text-red-400" x-text="error_text"></span></div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block bottom %}
+<script>
+  document.addEventListener("alpine:init", () => {
+    Alpine.store("app").set_page("settings");
+
+    Alpine.data("modem_log", () => ({
+      log_text: "",
+      error_text: "",
+      next_offset: null,
+      total_offset: 0,
+      tail_offset: 0,
+      paused: false,
+      fetching: false,
+      source: { id: "modem", exec: "", usb_id: "", dev_paths: [], netdevs: [] },
+
+      init() {
+        this.fetch_log();
+        setInterval(() => {
+          if (document.hidden || this.paused || this.fetching) return;
+          this.fetch_log();
+        }, 2000);
+      },
+
+      fetch_log() {
+        this.fetching = true;
+        const url = this.next_offset === null
+          ? "/api/v1/modem/log.json"
+          : "/api/v1/modem/log.json?offset=" + this.next_offset;
+        fetch(url)
+          .then((response) => response.json())
+          .then((data) => {
+            this.fetching = false;
+            if (data.status !== "ok") {
+              this.error_text = data.message || "{{locales['modem_log_unavailable']}}";
+              return;
+            }
+            this.error_text = "";
+            this.source = data.source || this.source;
+            this.total_offset = data.total_offset || 0;
+            this.tail_offset = data.tail_offset || 0;
+            if (this.next_offset !== null && data.offset > this.next_offset) {
+              // the ring dropped data between polls; note the gap
+              this.log_text += "\n--- {{locales['modem_log_gap']}} ---\n";
+            }
+            if (data.log) {
+              this.log_text += data.log;
+              // keep the DOM bounded: show at most ~1MB in the pane
+              if (this.log_text.length > 1048576) {
+                this.log_text = this.log_text.slice(-1048576);
+              }
+              this.$nextTick(() => {
+                const pane = this.$refs.pane;
+                if (pane) pane.scrollTop = pane.scrollHeight;
+              });
+            }
+            this.next_offset = data.next_offset;
+          })
+          .catch(() => {
+            this.fetching = false;
+          });
+      },
+
+      buffer_info() {
+        const size = this.total_offset - this.tail_offset;
+        if (size <= 0) return "";
+        if (size > 1048576) return (size / 1048576).toFixed(1) + " MB";
+        if (size > 1024) return (size / 1024).toFixed(0) + " KB";
+        return size + " B";
+      },
+
+      clear_view() {
+        this.log_text = "";
+      },
+
+      download_log() {
+        const blob = new Blob([this.log_text], { type: "text/plain" });
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = "modem-log.txt";
+        a.click();
+        URL.revokeObjectURL(a.href);
+      },
+    }));
+  });
+</script>
+{% endblock %}

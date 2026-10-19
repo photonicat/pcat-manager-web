@@ -1,0 +1,115 @@
+<div class="mt-4 space-y-6">
+  <!-- Auto-mount -->
+  <div class="rounded-lg bg-white shadow">
+    <div class="border-b border-gray-100 px-4 py-3">
+      <h3 class="font-semibold text-gray-700">{{locales.disks_automount}}</h3>
+      <p class="mt-0.5 text-xs text-gray-400">{{locales.settings_automount_help}}</p>
+    </div>
+    <div class="divide-y divide-gray-50">
+      <template x-for="row in automountRows()" :key="row.part.dev">
+        <div class="flex flex-wrap items-center gap-3 px-4 py-3 text-sm">
+          <div class="min-w-0 flex-1">
+            <div class="font-medium text-gray-700">
+              <span x-text="row.bus"></span>
+              <span class="text-gray-400">·</span>
+              <span class="font-mono text-xs" x-text="row.part.dev.replace('/dev/','')"></span>
+              <span x-show="row.part.label" class="ml-1 text-xs text-gray-500" x-text="'(' + row.part.label + ')'"></span>
+            </div>
+            <div class="text-xs text-gray-400">
+              <span x-text="row.part.fs || '{{locales.disks_unformatted}}'"></span>
+              <span x-show="row.part.mounted"> · <span x-text="row.part.mountpoint"></span></span>
+            </div>
+          </div>
+          <label class="flex cursor-pointer items-center gap-2 text-sm text-gray-600">
+            <input type="checkbox" class="h-4 w-4 rounded"
+              :checked="row.part.automount"
+              :disabled="!row.part.fs || !row.part.uuid"
+              @change="diskAutomount(row.part, $event.target.checked)" />
+            <span>{{locales.disks_automount}}</span>
+          </label>
+        </div>
+      </template>
+      <div x-show="!automountRows().length" class="px-4 py-6 text-center text-sm text-gray-400">
+        {{locales.settings_automount_empty}}
+      </div>
+    </div>
+  </div>
+
+  <!-- Disk health / SMART -->
+  <div class="rounded-lg bg-white shadow">
+    <div class="border-b border-gray-100 px-4 py-3">
+      <h3 class="font-semibold text-gray-700">{{locales.disks_smart}}</h3>
+      <p class="mt-0.5 text-xs text-gray-400">{{locales.settings_smart_help}}</p>
+    </div>
+
+    <div x-show="!tools.smart" class="px-4 py-6 text-center text-sm text-gray-400">
+      {{locales.settings_smart_missing}}
+    </div>
+
+    <div x-show="tools.smart" class="divide-y divide-gray-100">
+      <template x-for="disk in smartDisks()" :key="disk.dev">
+        <div class="px-4 py-4">
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <div class="min-w-0">
+              <div class="font-medium text-gray-700">
+                <span x-text="busLabel(disk.bus)"></span>
+                <span class="font-mono text-xs text-gray-400" x-text="disk.dev"></span>
+              </div>
+              <div class="truncate text-xs text-gray-400" x-text="disk.model || ''"></div>
+            </div>
+            <button type="button" @click="loadSmart(disk)" :disabled="smartLoading == disk.dev"
+              class="rounded border border-gray-300 px-3 py-1 text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-50">
+              <span x-show="smartLoading != disk.dev">{{locales.settings_smart_refresh}}</span>
+              <span x-show="smartLoading == disk.dev">…</span>
+            </button>
+          </div>
+
+          <template x-if="smartData[disk.dev]">
+            <div class="mt-3 text-sm">
+              <div class="flex flex-wrap items-center gap-4">
+                <span x-show="smartData[disk.dev].health == 'ok'" class="font-semibold text-green-600">♥ {{locales.disks_health_ok}}</span>
+                <span x-show="smartData[disk.dev].health == 'fail'" class="font-semibold text-red-600">♥ {{locales.disks_health_fail}}</span>
+                <span x-show="smartData[disk.dev].health == 'na'" class="text-gray-400">{{locales.disks_health_na}}</span>
+                <span x-show="smartData[disk.dev].temp_c != null" class="text-gray-500">
+                  {{locales.settings_smart_temp}}: <span x-text="smartData[disk.dev].temp_c"></span>°C
+                </span>
+                <span x-show="smartData[disk.dev].power_on_hours != null" class="text-gray-500">
+                  {{locales.settings_smart_hours}}: <span x-text="smartData[disk.dev].power_on_hours"></span> h
+                </span>
+              </div>
+              <div x-show="smartData[disk.dev].error" class="mt-2 text-xs text-red-500" x-text="smartData[disk.dev].error"></div>
+              <div class="mt-3 max-h-80 overflow-y-auto" x-show="smartData[disk.dev].attrs && smartData[disk.dev].attrs.length">
+                <table class="w-full text-xs">
+                  <thead>
+                    <tr class="text-left text-gray-400">
+                      <th class="sticky top-0 bg-white py-1 pr-2">ID</th>
+                      <th class="sticky top-0 bg-white py-1 pr-2">{{locales.settings_smart_attr}}</th>
+                      <th class="sticky top-0 bg-white py-1 text-right">{{locales.settings_smart_raw}}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <template x-for="a in smartData[disk.dev].attrs" :key="a.id + '-' + a.name">
+                      <tr class="border-t border-gray-50">
+                        <td class="py-1 pr-2 text-gray-400" x-text="a.id"></td>
+                        <td class="py-1 pr-2 text-gray-600" x-text="a.name"></td>
+                        <td class="py-1 text-right font-mono text-gray-500" x-text="a.raw"></td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+              <div x-show="!smartData[disk.dev].attrs || !smartData[disk.dev].attrs.length"
+                class="mt-2 text-xs text-gray-400">{{locales.settings_smart_no_attrs}}</div>
+            </div>
+          </template>
+          <div x-show="!smartData[disk.dev] && smartLoading != disk.dev" class="mt-2 text-xs text-gray-400">
+            {{locales.settings_smart_click}}
+          </div>
+        </div>
+      </template>
+      <div x-show="!smartDisks().length" class="px-4 py-6 text-center text-sm text-gray-400">
+        {{locales.settings_smart_empty}}
+      </div>
+    </div>
+  </div>
+</div>

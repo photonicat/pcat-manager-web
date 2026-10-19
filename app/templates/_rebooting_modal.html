@@ -1,12 +1,34 @@
 <!-- reboot modal -->
-<div id="reboot_dlg" class="modal" x-cloak x-show="$store.app.system_status >= 20 && $store.app.system_status < 30" tabindex="-1">
+<!-- One overlay for every way the device goes down: reboot (server-announced
+     via system_status), MCU/firmware update and power-off (client-announced
+     via $store.app.begin_restart_watch, because the server dies before it can
+     tell us). restart_cause picks the wording; the status machinery
+     (20 = going down, 25 = down, 30 = back -> reload) is shared. -->
+<div id="reboot_dlg" class="modal" x-cloak x-show="$store.app.system_status >= 20 && $store.app.system_status <= 30" tabindex="-1">
   <section class="modal-main w-full sm:w-1/2">
     <div class="p-6 text-center">
-      <p x-show="$store.app.system_status === 20" class="text-xl font-semibold">{{locales["rebooting_tip_message_0"]}}</p>
-      <p x-show="$store.app.system_status === 25" class="text-xl font-semibold">{{locales["rebooting_tip_message_1"]}}</p>
-      <div class="mt-4 text-2xl font-semibold text-gray-400" x-text="$store.app.reboot_timer_count"></div>
+      <template x-if="$store.app.restart_cause === 'update'">
+        <p x-show="$store.app.system_status === 20 || $store.app.system_status === 25" class="text-xl font-semibold">{{locales["updating_tip_message"]}}</p>
+      </template>
+      <template x-if="$store.app.restart_cause === 'shutdown'">
+        <div>
+          <p x-show="$store.app.system_status === 20" class="text-xl font-semibold">{{locales["poweroff_tip_message"]}}</p>
+          <p x-show="$store.app.system_status === 25" class="text-xl font-semibold">{{locales["poweroff_tip_message_off"]}}</p>
+        </div>
+      </template>
+      <template x-if="$store.app.restart_cause !== 'update' && $store.app.restart_cause !== 'shutdown'">
+        <div>
+          <p x-show="$store.app.system_status === 20" class="text-xl font-semibold">{{locales["rebooting_tip_message_0"]}}</p>
+          <p x-show="$store.app.system_status === 25" class="text-xl font-semibold">{{locales["rebooting_tip_message_1"]}}</p>
+        </div>
+      </template>
+      <p x-show="$store.app.system_status === 30" class="text-xl font-semibold">{{locales["rebooting_tip_message_back"]}}</p>
+      <div class="mt-4 text-2xl font-semibold text-gray-400"
+           x-show="!($store.app.restart_cause === 'shutdown' && $store.app.system_status >= 25)"
+           x-text="$store.app.reboot_elapsed_text()"></div>
     </div>
-    <div class="flex items-center justify-center space-x-4 rounded-b border-t border-gray-200 p-4">
+    <div class="flex items-center justify-center space-x-4 rounded-b border-t border-gray-200 p-4"
+         x-show="!($store.app.restart_cause === 'shutdown' && $store.app.system_status >= 25)">
       <img src="/static/loading.gif" />
     </div>
   </section>

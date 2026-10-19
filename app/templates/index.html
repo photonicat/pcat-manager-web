@@ -1,4 +1,5 @@
-{% extends '_base.html' %} {% block content %}
+{% extends '_base.html' %}
+{% block page_title %}{{locales["nav_dashboard"]}}{% endblock %} {% block content %}
 <div class="container mx-auto w-full pt-10 pb-12 sm:pt-24 sm:pb-12 md:pt-28 lg:px-4">
   <div class="flex items-center justify-between">
     <h1 class="px-1 py-4 font-bold uppercase text-gray-600">{{locales["nav_dashboard"]}}</h1>
@@ -24,13 +25,16 @@
             <template x-if="connection === 'mobile'">
               <tr>
                 <td>
-                  {{locales["wan_cellular"]}}<span x-show="wwan_powered" class="ml-1 text-xs text-green-600">🟢</span>
+                  {{locales["wan_cellular"]}}<span x-show="isActiveEgress('mobile')" class="ml-1 text-xs text-green-600">🟢</span>
                 </td>
-                <td class="text-right font-semibold" :class="wwan_powered ? 'text-green-600' : 'text-gray-500'">
+                <td class="text-right font-semibold" :class="isActiveEgress('mobile') ? 'text-green-600' : 'text-gray-500'">
                   <span x-show="!wwan_powered" class="text-gray-500">{{locales["wwan_powered_off"]}}</span>
+                  <!-- SIM-less modems still camp on a cell (emergency-only), so the
+                       reported RAT ("3G") would read as a usable connection; say No SIM instead. -->
+                  <span x-show="wwan_powered && sim_state === 'absent'" class="text-gray-500">{{locales["no_sim_card"]}}</span>
                   <span x-show="wwan_powered && !sim_interface_enabled"></span>
-                  <span x-show="wwan_powered && sim_interface_enabled && (carrier === '' || carrier === 'none')" x-text="'{{locales['connected']}}'"></span>
-                  <span x-show="wwan_powered && sim_interface_enabled && carrier !== '' && carrier !== 'none'" :title="'{{locales['signal_strength_tooltip']}}'" class="cursor-help">
+                  <span x-show="wwan_powered && sim_interface_enabled && sim_state !== 'absent' && (carrier === '' || carrier === 'none')" x-text="'{{locales['connected']}}'"></span>
+                  <span x-show="wwan_powered && sim_interface_enabled && sim_state !== 'absent' && carrier !== '' && carrier !== 'none'" :title="'{{locales['signal_strength_tooltip']}}'" class="cursor-help">
                     <span x-text="carrier" class="mr-2"></span>
                     <span x-text="enhanced_operator_name" class="mr-2" x-show="enhanced_operator_name"></span>
                     <span x-text="modem_signal_strength + '%'" x-show="modem_signal_strength && modem_signal_strength > 0"></span>
@@ -42,9 +46,9 @@
             <tr>
               <td>
                 {{locales["wan_ethernet"]}}
-                <span x-show="isWanEthernetConnected()" class="ml-1 text-xs text-green-600">🟢</span>
+                <span x-show="isActiveEgress('wan')" class="ml-1 text-xs text-green-600">🟢</span>
               </td>
-              <td class="text-right font-semibold" :class="{'text-green-600': isWanEthernetConnected(), 'text-gray-500': !isWanEthernetConnected()}">
+              <td class="text-right font-semibold" :class="{'text-green-600': isActiveEgress('wan'), 'text-gray-500': !isActiveEgress('wan')}">
                 <span x-text="getWanEthernetStatus()"></span>
               </td>
             </tr>
@@ -54,8 +58,9 @@
                 <td>{{locales["wan_cellular"]}}</td>
                 <td class="text-right font-semibold">
                   <span x-show="!wwan_powered" class="text-gray-500">{{locales["wwan_powered_off"]}}</span>
+                  <span x-show="wwan_powered && sim_state === 'absent'" class="text-gray-500">{{locales["no_sim_card"]}}</span>
                   <span x-show="wwan_powered && !sim_interface_enabled"></span>
-                  <span x-show="wwan_powered" :title="'{{locales['signal_strength_tooltip']}}'" class="cursor-help">
+                  <span x-show="wwan_powered && sim_state !== 'absent'" :title="'{{locales['signal_strength_tooltip']}}'" class="cursor-help">
                     <span x-text="carrier" class="mr-2"></span>
                     <span x-text="enhanced_operator_name" class="mr-2" x-show="enhanced_operator_name"></span>
                     <span x-text="modem_signal_strength + '%'" x-show="modem_signal_strength && modem_signal_strength > 0"></span>
@@ -63,12 +68,25 @@
                 </td>
               </tr>
             </template>
+            <!-- WAN (WiFi) — Smart WAN upstream relay -->
+            <template x-if="wifi_wan_active">
+              <tr>
+                <td>
+                  {{locales["wan_wifi"]}}
+                  <span x-show="isActiveEgress('wifi')" class="ml-1 text-xs text-green-600">🟢</span>
+                </td>
+                <td class="text-right font-semibold" :class="isActiveEgress('wifi') ? 'text-green-600' : 'text-gray-500'">
+                  <span x-show="wifi_wan_state.connected || wifi_wan_state.associated" x-text="wifi_wan_state.ssid"></span>
+                  <span x-show="!wifi_wan_state.connected && !wifi_wan_state.associated" x-text="'{{locales['wifi_wan_standby']}}'"></span>
+                </td>
+              </tr>
+            </template>
             <!-- LAN Ethernet Interface -->
             <tr x-show="lan_interface_enabled" class="order-3">
               <td>
-                {{locales["lan_ethernet"]}}<span x-show="isLanEthernetConnected()" class="ml-1 text-xs text-green-600">🟢</span>
+                {{locales["lan_ethernet"]}}<span x-show="isActiveEgress('lan')" class="ml-1 text-xs text-green-600">🟢</span>
               </td>
-              <td class="text-right font-semibold" :class="{'text-green-600': isLanEthernetConnected(), 'text-gray-500': !isLanEthernetConnected()}">
+              <td class="text-right font-semibold" :class="{'text-green-600': isActiveEgress('lan'), 'text-gray-500': !isActiveEgress('lan')}">
                 <span x-text="getLanEthernetStatus()"></span>
               </td>
             </tr>
@@ -109,6 +127,7 @@
                 <div class="flex justify-end">
                   <div x-text="model"></div>
                   <div x-show="modem_model !== ''" class="ml-2">(<span x-text="modem_model"></span>)</div>
+                  <div x-show="hw_variant !== ''" class="ml-2">(<span x-text="hw_variant"></span>)</div>
                 </div>
               </td>
             </tr>
@@ -128,10 +147,7 @@
               <td>{{locales["machine_sn"]}}</td>
               <td class="text-right font-semibold">
                 <span x-text="machine_sn"></span>
-                <span x-show="machine_sn && machine_sn !== 'DEV-UNKNOWN' && machine_sn !== 'N/A'" x-cloak>
-                  <span x-show="machine_sn_verified" class="ml-1 text-xs text-green-600" title="Verified">&#10003;</span>
-                  <span x-show="!machine_sn_verified" class="ml-1 text-xs text-red-500" title="Invalid signature">(invalid)</span>
-                </span>
+                <span x-show="machine_sn && machine_sn !== 'DEV-UNKNOWN' && machine_sn !== 'N/A' && !machine_sn_verified" x-cloak class="ml-1 text-xs text-red-500" title="Invalid signature">(invalid)</span>
               </td>
             </tr>
           </tbody>
@@ -170,9 +186,41 @@
               <td><span x-text="getDeviceTypeTranslation(wifi_interface.device_type)"></span> {{locales["wifi"]}}</td>
               <td class="text-right font-semibold text-gray-400">
                 <div class="flex items-center justify-end" >
-                  <span x-text="wifi_interface.ssid"></span>
-                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4 ml-2">
+                  <!-- A radio serving as the upstream STA has its own AP parked
+                       (apply_config disables default_radioN), so wifi_interface.ssid
+                       is a stale name for an AP that is not broadcasting. Show what
+                       the radio is really doing: the upstream hotspot while joined,
+                       Standby while the STA is enabled but out of range. -->
+                  <!-- Upstream radio: same broadcast-wave language as the AP
+                       rows, but the waves sit upright (concentric arcs about a
+                       vertical axis, not the tilted corner fan) with an arrow
+                       beside them for direction. Both rows otherwise carry the
+                       same glyph, which made the hotspot this device JOINS look
+                       identical to one it BROADCASTS. Indigo matches the
+                       upstream accent already used on /device_control. -->
+                  <span x-show="wifi_interface.wifi_wan"
+                        class="mr-2 rounded-full bg-indigo-50 px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide text-indigo-600">{{locales["wifi_upstream_badge"]}}</span>
+                  <span x-text="wifiRadioLabel(wifi_interface)"
+                        :class="wifi_interface.wifi_wan ? 'text-indigo-600' : ''"></span>
+                  <svg x-show="!wifi_interface.wifi_wan" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4 ml-2">
                     <path stroke-linecap="round" stroke-linejoin="round" d="M12.75 19.5v-.75a7.5 7.5 0 00-7.5-7.5H4.5m0-6.75h.75c7.87 0 14.25 6.38 14.25 14.25v.75M6 18.75a.75.75 0 11-1.5 0 .75.75 0 011.5 0z" />
+                  </svg>
+                  <!-- Built on static/wifi_active.svg (the house 28x16 filled
+                       wave fan) rather than a stroked Heroicon, so it matches
+                       the rest of the UI's Wi-Fi language. Same four arcs,
+                       recoloured, with a full-height uplink arrow standing
+                       inside the body at x=18.5 (the fan spans x=4..24, so
+                       this sits about two thirds across, over its right
+                       flank). The white under-stroke knocks a gap around the
+                       arrow so it stays legible against the solid arcs -- at
+                       20px a plain overlap turns into a smudge. That halo
+                       assumes the white card background this row sits on. -->
+                  <svg x-show="wifi_interface.wifi_wan" x-cloak xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 28 16" class="h-5 ml-2 text-indigo-600" style="width:auto">
+                    <path d="M4 3.5529C6.82855 1.24919 10.3597 -0.00539646 14 1.74488e-05C17.7887 1.74488e-05 21.2679 1.33068 24 3.5529L22.3333 5.62668C19.9761 3.70715 17.0335 2.66192 14 2.66668C10.8435 2.66668 7.94341 3.77601 5.66667 5.62668L4 3.5529ZM6.77719 7.01068C8.82016 5.34668 11.3707 4.44049 14 4.44446C16.7356 4.44446 19.2485 5.40534 21.2228 7.00979L19.5561 9.08445C17.9845 7.80464 16.0225 7.10781 14 7.11112C11.8957 7.11112 9.96286 7.85068 8.44386 9.08445L6.77719 7.00979V7.01068ZM9.55526 10.4685C10.8124 9.44436 12.3819 8.88659 14 8.8889C15.6835 8.8889 17.2299 9.48001 18.4447 10.4676L16.7781 12.5422C15.9922 11.9024 15.0113 11.554 14 11.5556C12.9888 11.554 12.0078 11.9024 11.2219 12.5422L9.55526 10.4676V10.4685ZM12.3333 13.9262C12.8046 13.542 13.3932 13.3326 14 13.3333C14.6313 13.3333 15.2113 13.5556 15.6667 13.9253L14 16L12.3333 13.9262Z" fill="currentColor"/>
+                    <path d="M18.5 15.4V1.6" stroke="#fff" stroke-width="3.6" stroke-linecap="round"/>
+                    <path d="M15.7 4.6L18.5 1.5 21.3 4.6" stroke="#fff" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/>
+                    <path d="M18.5 15V1.8" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>
+                    <path d="M16 4.5L18.5 1.7 21 4.5" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
                   </svg>
                 </div>
               </td>
@@ -189,13 +237,7 @@
       <div class="px-4 pt-1.5 pb-1">
         <table class="list-info w-full p-5 text-gray-700">
           <tbody>
-            <tr>
-              <td>{{locales["battery_status"]}}</td>
-              <td class="flex justify-end text-right font-semibold">
-                <div x-html="charge_percent_status"></div>
-                <div class="ml-2" x-html="battery_charging_status"></div>
-              </td>
-            </tr>
+            <!-- Battery SoC row removed: the top-bar battery icon already shows it -->
             <tr>
               <td>
                 {% if board_name == "photonicat2" %}
@@ -224,7 +266,14 @@
               <td>{{locales["sd_card"]}}</td>
               <td class="text-right font-semibold text-gray-400">
                 <div x-cloak x-show="sd_state === 0" class="flex justify-end">{{locales["sd_not_exist"]}}</div>
-                <div x-cloak x-show="sd_state === 1" class="flex justify-end">{{locales["sd_exist"]}}</div>
+                <div x-cloak x-show="sd_state === 1" class="flex justify-end" x-text="disk_line(sd_info, '{{locales["sd_exist"]}}')"></div>
+              </td>
+            </tr>
+            <tr>
+              <td>{{locales["nvme_disk"]}}</td>
+              <td class="text-right font-semibold text-gray-400">
+                <div x-cloak x-show="!nvme.present" class="flex justify-end">{{locales["nvme_not_exist"]}}</div>
+                <div x-cloak x-show="nvme.present" class="flex justify-end" x-text="disk_line(nvme, '')"></div>
               </td>
             </tr>
             <tr class="border-none">
@@ -282,6 +331,9 @@
             this.dhcp_clients_count = data.dhcp_clients_count;
             this.wifi_clients_count = data.wifi_clients_count;
             this.wifi_interfaces = data.wifi_interfaces;
+            this.wifi_wan_active = data.wifi_wan_active || false;
+            this.wifi_wan_state = data.wifi_wan_state || {};
+            this.active_egress = data.active_egress || "";
 
             this.on_charging = data.on_charging;
             this.charge_percent = data.charge_percent;
@@ -292,6 +344,9 @@
             this.board_temperature = data.board_temperature;
             this.battery_remaining_time = data.battery_remaining_time;
             this.sd_state = data.sd_state;
+            this.sd_info = data.sd_info || this.sd_info;
+            this.hw_variant = data.hw_variant || "";
+            this.nvme = data.nvme || this.nvme;
             this.sim_state = data.sim_state;
             this.sim_ccid = data.sim_ccid || '';
             this.sim_cimi = data.sim_cimi || '';
@@ -330,11 +385,15 @@
           });
       },
       init() {
-        
+
         this.fetchStatus();
         setInterval(() => {
+          if (document.hidden) return; // skip polling in background tabs
           this.fetchStatus();
         }, 4000);
+        document.addEventListener("visibilitychange", () => {
+          if (!document.hidden) this.fetchStatus();
+        });
       },
 
       // Helper methods for ethernet status display
@@ -364,6 +423,13 @@
 
       isLanEthernetConnected() {
         return this.lan_interface_enabled && this.lan_carrier;
+      },
+
+      // Exactly one egress carries the default route at a time. Only that one
+      // gets the bright-green 🟢 dot + green text; connected-but-standby links
+      // (e.g. a WiFi backup while on ethernet) stay neutral/gray.
+      isActiveEgress(kind) {
+        return this.active_egress === kind;
       },
 
       connection: "",
@@ -396,6 +462,9 @@
       dhcp_clients_count: "",
       wifi_clients_count: "",
       wifi_interfaces: [],
+      wifi_wan_active: false,
+      wifi_wan_state: {},
+      active_egress: "",
 
       on_charging: false,
       charge_percent: null,
@@ -406,6 +475,10 @@
       board_temperature: null,
       battery_remaining_time: null,
       sd_state: "",
+      sd_info: { present: false, model: "", size: null, free: null },
+      hw_variant: "",
+      // NVMe SSD in the M.2 slot; absent on models shipped without one.
+      nvme: { present: false, model: "", size: null, free: null },
       sim_state: "",
       sim_ccid: "",
       sim_cimi: "",
@@ -482,6 +555,29 @@
           };
         }
         return null;
+      },
+
+      // Decimal GB (1e9), the unit drives are sold in, so the reported size
+      // matches the capacity printed on the SSD rather than df's GiB.
+      formatGB(bytes) {
+        const gb = bytes / 1e9;
+        return (gb >= 100 ? gb.toFixed(0) : gb.toFixed(1)) + " GB";
+      },
+      // One-line disk summary: "SanDisk 43/128GB" (used/total, decimal GB).
+      // Used is omitted when the disk is unmounted — nothing to measure.
+      disk_line(info, fallback) {
+        if (!info || !info.present) return fallback;
+        const gb = (b) => (b / 1e9) >= 100 ? (b / 1e9).toFixed(0) : (b / 1e9).toFixed(1);
+        const parts = [];
+        if (info.model) parts.push(info.model);
+        if (info.size) {
+          if (info.free !== null && info.free !== undefined) {
+            parts.push(gb(info.size - info.free) + "/" + gb(info.size) + "GB");
+          } else {
+            parts.push(gb(info.size) + "GB");
+          }
+        }
+        return parts.length ? parts.join(" ") : fallback;
       },
 
       formatMbps(val) {
@@ -604,6 +700,21 @@
           return "-";
         }
         return `${(this.battery_wattage).toFixed(2)} W`;
+      },
+
+      // What a radio row should read. Normally its AP SSID, but a radio doing
+      // upstream-STA duty has that AP parked, so the configured name describes
+      // nothing that is on the air: report the joined upstream instead, and
+      // Standby when the STA is enabled but not associated (out of range,
+      // between sites) rather than a stale name implying a live link.
+      wifiRadioLabel(wifi_interface) {
+        if (!wifi_interface) return "";
+        if (wifi_interface.wifi_wan) {
+          return wifi_interface.wifi_wan_associated && wifi_interface.wifi_wan_ssid
+            ? wifi_interface.wifi_wan_ssid
+            : "{{locales['wifi_wan_standby']}}";
+        }
+        return wifi_interface.ssid;
       },
 
       getDeviceTypeTranslation(deviceType) {

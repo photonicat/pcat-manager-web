@@ -22,12 +22,16 @@ class PtySession:
 
     SCROLLBACK_MAX = 32768  # Keep last 32KB of output for reconnect replay
 
-    def __init__(self, session_id, cols=80, rows=24):
+    def __init__(self, session_id, cols=80, rows=24, command=None):
         self.session_id = session_id
         self.master_fd = None
         self.pid = None
         self.cols = cols
         self.rows = rows
+        # Optional argv to exec instead of a login shell (e.g. lxc-attach
+        # for the container console). Only trusted, server-built argv lists
+        # reach this — the socket API never passes a raw command string.
+        self.command = command
         self.created_at = time.time()
         self.last_active = time.time()
         self._alive = False
@@ -46,6 +50,8 @@ class PtySession:
             env['LINES'] = str(self.rows)
             env.setdefault('HOME', '/root')
             env.setdefault('PATH', '/usr/sbin:/usr/bin:/sbin:/bin')
+            if self.command:
+                os.execvpe(self.command[0], list(self.command), env)
             shell = '/bin/sh'
             if os.path.exists('/bin/bash'):
                 shell = '/bin/bash'
@@ -158,8 +164,9 @@ class TerminalManager:
         self._sessions = {}
         self._lock = threading.Lock()
 
-    def get_or_create(self, session_id, cols=80, rows=24):
-        """Get an existing session or create a new one."""
+    def get_or_create(self, session_id, cols=80, rows=24, command=None):
+        """Get an existing session or create a new one. `command` only
+        applies when a new session is spawned."""
         with self._lock:
             sess = self._sessions.get(session_id)
             if sess and sess.is_alive:
@@ -167,7 +174,7 @@ class TerminalManager:
             # Clean up dead session if it exists
             if sess:
                 sess.kill()
-            sess = PtySession(session_id, cols, rows)
+            sess = PtySession(session_id, cols, rows, command=command)
             self._sessions[session_id] = sess
             return sess
 

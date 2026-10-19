@@ -1,0 +1,155 @@
+<!doctype html>
+<!-- Throwaway preview for the dashboard "upstream WiFi" icon.
+     Not shipped: make.py copies app/templates, this lives in misc/. -->
+<html lang="en"><head><meta charset="utf-8">
+<title>Upstream Wi-Fi icon — arrow at 2/3 across the body</title>
+<style>
+  body { font: 14px/1.5 -apple-system, "Titillium Web", sans-serif; color:#374151;
+         margin:0; padding:26px 30px; background:#f3f4f6; }
+  h1 { font-size:17px; margin:0 0 4px; color:#00274D; }
+  p.sub { margin:0 0 18px; color:#6b7280; font-size:13px; max-width:760px; }
+  code { background:#eef2ff; color:#4f46e5; padding:0 3px; border-radius:3px; font-size:12px; }
+  .card { background:#fff; border:1px solid #e5e7eb; border-radius:6px;
+          box-shadow:0 1px 2px rgba(0,0,0,.05); overflow:hidden; margin-bottom:16px; max-width:820px; }
+  .card > h2 { font-size:12px; font-weight:600; color:#00274D; margin:0;
+               padding:8px 13px; border-bottom:1px solid #e5e7eb; background:#fafafa; }
+  .variants { display:flex; flex-wrap:wrap; }
+  .variants > div { flex:1; min-width:150px; padding:16px 10px; text-align:center;
+                    border-right:1px solid #f3f4f6; border-bottom:1px solid #f3f4f6; }
+  .variants b { display:block; font-size:11.5px; color:#00274D; margin-bottom:10px; }
+  .variants .glyph { height:44px; display:flex; align-items:center; justify-content:center; }
+  .variants svg { height:40px; width:auto; }
+  .variants em { display:block; font-style:normal; font-size:10.5px; color:#9ca3af; margin-top:9px; }
+  .rowdemo { padding:6px 13px 12px; }
+  .rowdemo .r { display:flex; align-items:center; justify-content:flex-end; gap:0;
+                border-bottom:1px solid #f3f4f6; padding:7px 0; font-size:13px;
+                font-weight:600; color:#9ca3af; }
+  .rowdemo .r:last-child { border-bottom:0; }
+  .rowdemo .lbl { margin-right:auto; font-weight:400; color:#374151; }
+  .rowdemo svg.wifi { width:16px; height:16px; margin-left:8px; }
+  .rowdemo svg.us { height:20px; width:auto; margin-left:8px; }
+  .up { color:#4f46e5; }
+  .tag { background:#eef2ff;color:#4f46e5;font-size:10px;font-weight:600;padding:1px 6px;
+         border-radius:9999px;margin-right:7px;text-transform:uppercase;letter-spacing:.03em; }
+  .note { padding:8px 13px; font-size:11.5px; color:#6b7280; background:#fafafa; border-top:1px solid #f3f4f6; }
+</style></head><body>
+
+<h1>Arrow at 2/3 across the icon body</h1>
+<p class="sub">The wave fan occupies <code>x = 4 … 24</code>, so two-thirds across is <code>x ≈ 17.3</code> —
+the arrow now sits <b>inside</b> the glyph over the right flank of the arcs, not out to its right.
+Each variant carries a white halo so the arrow stays readable where it crosses the fill.
+Base art is <code>static/wifi_active.svg</code>, untouched.</p>
+
+<div class="card">
+  <h2>Variants — all arrows inside the body</h2>
+  <div class="variants">
+
+    <div><b>A · x=17.3, full height</b>
+      <div class="glyph"><svg viewBox="0 0 28 16" fill="none" xmlns="http://www.w3.org/2000/svg" style="color:#4f46e5">
+        <path d="M4 3.5529C6.82855 1.24919 10.3597 -0.00539646 14 1.74488e-05C17.7887 1.74488e-05 21.2679 1.33068 24 3.5529L22.3333 5.62668C19.9761 3.70715 17.0335 2.66192 14 2.66668C10.8435 2.66668 7.94341 3.77601 5.66667 5.62668L4 3.5529ZM6.77719 7.01068C8.82016 5.34668 11.3707 4.44049 14 4.44446C16.7356 4.44446 19.2485 5.40534 21.2228 7.00979L19.5561 9.08445C17.9845 7.80464 16.0225 7.10781 14 7.11112C11.8957 7.11112 9.96286 7.85068 8.44386 9.08445L6.77719 7.00979V7.01068ZM9.55526 10.4685C10.8124 9.44436 12.3819 8.88659 14 8.8889C15.6835 8.8889 17.2299 9.48001 18.4447 10.4676L16.7781 12.5422C15.9922 11.9024 15.0113 11.554 14 11.5556C12.9888 11.554 12.0078 11.9024 11.2219 12.5422L9.55526 10.4676V10.4685ZM12.3333 13.9262C12.8046 13.542 13.3932 13.3326 14 13.3333C14.6313 13.3333 15.2113 13.5556 15.6667 13.9253L14 16L12.3333 13.9262Z" fill="currentColor"/>
+        <path d="M17.3 15.4V1.6" stroke="#fff" stroke-width="3.6" stroke-linecap="round"/>
+        <path d="M14.5 4.6L17.3 1.5 20.1 4.6" stroke="#fff" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M17.3 15V1.8" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>
+        <path d="M14.8 4.5L17.3 1.7 19.8 4.5" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg></div>
+      <em>spans the whole fan</em>
+    </div>
+
+    <div><b>B · x=17.3, short</b>
+      <div class="glyph"><svg viewBox="0 0 28 16" fill="none" xmlns="http://www.w3.org/2000/svg" style="color:#4f46e5">
+        <path d="M4 3.5529C6.82855 1.24919 10.3597 -0.00539646 14 1.74488e-05C17.7887 1.74488e-05 21.2679 1.33068 24 3.5529L22.3333 5.62668C19.9761 3.70715 17.0335 2.66192 14 2.66668C10.8435 2.66668 7.94341 3.77601 5.66667 5.62668L4 3.5529ZM6.77719 7.01068C8.82016 5.34668 11.3707 4.44049 14 4.44446C16.7356 4.44446 19.2485 5.40534 21.2228 7.00979L19.5561 9.08445C17.9845 7.80464 16.0225 7.10781 14 7.11112C11.8957 7.11112 9.96286 7.85068 8.44386 9.08445L6.77719 7.00979V7.01068ZM9.55526 10.4685C10.8124 9.44436 12.3819 8.88659 14 8.8889C15.6835 8.8889 17.2299 9.48001 18.4447 10.4676L16.7781 12.5422C15.9922 11.9024 15.0113 11.554 14 11.5556C12.9888 11.554 12.0078 11.9024 11.2219 12.5422L9.55526 10.4676V10.4685ZM12.3333 13.9262C12.8046 13.542 13.3932 13.3326 14 13.3333C14.6313 13.3333 15.2113 13.5556 15.6667 13.9253L14 16L12.3333 13.9262Z" fill="currentColor"/>
+        <path d="M17.3 14.6V4.4" stroke="#fff" stroke-width="3.6" stroke-linecap="round"/>
+        <path d="M14.8 7.2L17.3 4.3 19.8 7.2" stroke="#fff" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M17.3 14.2V4.6" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>
+        <path d="M15 7.1L17.3 4.5 19.6 7.1" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg></div>
+      <em>tucked inside the arcs</em>
+    </div>
+
+    <div><b>C · x=18.5, full height</b>
+      <div class="glyph"><svg viewBox="0 0 28 16" fill="none" xmlns="http://www.w3.org/2000/svg" style="color:#4f46e5">
+        <path d="M4 3.5529C6.82855 1.24919 10.3597 -0.00539646 14 1.74488e-05C17.7887 1.74488e-05 21.2679 1.33068 24 3.5529L22.3333 5.62668C19.9761 3.70715 17.0335 2.66192 14 2.66668C10.8435 2.66668 7.94341 3.77601 5.66667 5.62668L4 3.5529ZM6.77719 7.01068C8.82016 5.34668 11.3707 4.44049 14 4.44446C16.7356 4.44446 19.2485 5.40534 21.2228 7.00979L19.5561 9.08445C17.9845 7.80464 16.0225 7.10781 14 7.11112C11.8957 7.11112 9.96286 7.85068 8.44386 9.08445L6.77719 7.00979V7.01068ZM9.55526 10.4685C10.8124 9.44436 12.3819 8.88659 14 8.8889C15.6835 8.8889 17.2299 9.48001 18.4447 10.4676L16.7781 12.5422C15.9922 11.9024 15.0113 11.554 14 11.5556C12.9888 11.554 12.0078 11.9024 11.2219 12.5422L9.55526 10.4676V10.4685ZM12.3333 13.9262C12.8046 13.542 13.3932 13.3326 14 13.3333C14.6313 13.3333 15.2113 13.5556 15.6667 13.9253L14 16L12.3333 13.9262Z" fill="currentColor"/>
+        <path d="M18.5 15.4V1.6" stroke="#fff" stroke-width="3.6" stroke-linecap="round"/>
+        <path d="M15.7 4.6L18.5 1.5 21.3 4.6" stroke="#fff" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M18.5 15V1.8" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>
+        <path d="M16 4.5L18.5 1.7 21 4.5" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg></div>
+      <em>a touch further right</em>
+    </div>
+
+    <div><b>D · x=17.3, thin arrow</b>
+      <div class="glyph"><svg viewBox="0 0 28 16" fill="none" xmlns="http://www.w3.org/2000/svg" style="color:#4f46e5">
+        <path d="M4 3.5529C6.82855 1.24919 10.3597 -0.00539646 14 1.74488e-05C17.7887 1.74488e-05 21.2679 1.33068 24 3.5529L22.3333 5.62668C19.9761 3.70715 17.0335 2.66192 14 2.66668C10.8435 2.66668 7.94341 3.77601 5.66667 5.62668L4 3.5529ZM6.77719 7.01068C8.82016 5.34668 11.3707 4.44049 14 4.44446C16.7356 4.44446 19.2485 5.40534 21.2228 7.00979L19.5561 9.08445C17.9845 7.80464 16.0225 7.10781 14 7.11112C11.8957 7.11112 9.96286 7.85068 8.44386 9.08445L6.77719 7.00979V7.01068ZM9.55526 10.4685C10.8124 9.44436 12.3819 8.88659 14 8.8889C15.6835 8.8889 17.2299 9.48001 18.4447 10.4676L16.7781 12.5422C15.9922 11.9024 15.0113 11.554 14 11.5556C12.9888 11.554 12.0078 11.9024 11.2219 12.5422L9.55526 10.4676V10.4685ZM12.3333 13.9262C12.8046 13.542 13.3932 13.3326 14 13.3333C14.6313 13.3333 15.2113 13.5556 15.6667 13.9253L14 16L12.3333 13.9262Z" fill="currentColor"/>
+        <path d="M17.3 15.4V1.6" stroke="#fff" stroke-width="3.2" stroke-linecap="round"/>
+        <path d="M15 4.4L17.3 1.5 19.6 4.4" stroke="#fff" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M17.3 15V1.8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+        <path d="M15.3 4.3L17.3 1.7 19.3 4.3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg></div>
+      <em>lighter stroke</em>
+    </div>
+
+    <div><b>E · x=17.3, no halo</b>
+      <div class="glyph"><svg viewBox="0 0 28 16" fill="none" xmlns="http://www.w3.org/2000/svg" style="color:#4f46e5">
+        <path d="M4 3.5529C6.82855 1.24919 10.3597 -0.00539646 14 1.74488e-05C17.7887 1.74488e-05 21.2679 1.33068 24 3.5529L22.3333 5.62668C19.9761 3.70715 17.0335 2.66192 14 2.66668C10.8435 2.66668 7.94341 3.77601 5.66667 5.62668L4 3.5529ZM6.77719 7.01068C8.82016 5.34668 11.3707 4.44049 14 4.44446C16.7356 4.44446 19.2485 5.40534 21.2228 7.00979L19.5561 9.08445C17.9845 7.80464 16.0225 7.10781 14 7.11112C11.8957 7.11112 9.96286 7.85068 8.44386 9.08445L6.77719 7.00979V7.01068ZM9.55526 10.4685C10.8124 9.44436 12.3819 8.88659 14 8.8889C15.6835 8.8889 17.2299 9.48001 18.4447 10.4676L16.7781 12.5422C15.9922 11.9024 15.0113 11.554 14 11.5556C12.9888 11.554 12.0078 11.9024 11.2219 12.5422L9.55526 10.4676V10.4685ZM12.3333 13.9262C12.8046 13.542 13.3932 13.3326 14 13.3333C14.6313 13.3333 15.2113 13.5556 15.6667 13.9253L14 16L12.3333 13.9262Z" fill="currentColor"/>
+        <path d="M17.3 15V1.8" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>
+        <path d="M14.8 4.5L17.3 1.7 19.8 4.5" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg></div>
+      <em>solid overlap, no gap</em>
+    </div>
+
+    <div><b>F · x=17.3, arrow knocked out</b>
+      <div class="glyph"><svg viewBox="0 0 28 16" fill="none" xmlns="http://www.w3.org/2000/svg" style="color:#4f46e5">
+        <path d="M4 3.5529C6.82855 1.24919 10.3597 -0.00539646 14 1.74488e-05C17.7887 1.74488e-05 21.2679 1.33068 24 3.5529L22.3333 5.62668C19.9761 3.70715 17.0335 2.66192 14 2.66668C10.8435 2.66668 7.94341 3.77601 5.66667 5.62668L4 3.5529ZM6.77719 7.01068C8.82016 5.34668 11.3707 4.44049 14 4.44446C16.7356 4.44446 19.2485 5.40534 21.2228 7.00979L19.5561 9.08445C17.9845 7.80464 16.0225 7.10781 14 7.11112C11.8957 7.11112 9.96286 7.85068 8.44386 9.08445L6.77719 7.00979V7.01068ZM9.55526 10.4685C10.8124 9.44436 12.3819 8.88659 14 8.8889C15.6835 8.8889 17.2299 9.48001 18.4447 10.4676L16.7781 12.5422C15.9922 11.9024 15.0113 11.554 14 11.5556C12.9888 11.554 12.0078 11.9024 11.2219 12.5422L9.55526 10.4676V10.4685ZM12.3333 13.9262C12.8046 13.542 13.3932 13.3326 14 13.3333C14.6313 13.3333 15.2113 13.5556 15.6667 13.9253L14 16L12.3333 13.9262Z" fill="currentColor"/>
+        <path d="M17.3 15.2V1.7" stroke="#fff" stroke-width="2.6" stroke-linecap="round"/>
+        <path d="M14.9 4.5L17.3 1.6 19.7 4.5" stroke="#fff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg></div>
+      <em>arrow as white cut-out</em>
+    </div>
+
+  </div>
+  <div class="note">Grey vertical guide for reference: the fan runs x=4…24, so 2/3 across = x≈17.3.</div>
+</div>
+
+<div class="card">
+  <h2>In the dashboard row (20px, actual size)</h2>
+  <div class="rowdemo">
+    <div class="r"><span class="lbl">Onboard Wi-Fi</span><span>photonicat2-a4f1</span>
+      <svg class="wifi" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12.75 19.5v-.75a7.5 7.5 0 00-7.5-7.5H4.5m0-6.75h.75c7.87 0 14.25 6.38 14.25 14.25v.75M6 18.75a.75.75 0 11-1.5 0 .75.75 0 011.5 0z"/></svg>
+    </div>
+    <div class="r"><span class="lbl">PCIE Wi-Fi · A</span><span class="tag">Upstream</span><span class="up">c2h2_xhome_ubnt_5G</span>
+      <svg class="us up" viewBox="0 0 28 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M4 3.5529C6.82855 1.24919 10.3597 -0.00539646 14 1.74488e-05C17.7887 1.74488e-05 21.2679 1.33068 24 3.5529L22.3333 5.62668C19.9761 3.70715 17.0335 2.66192 14 2.66668C10.8435 2.66668 7.94341 3.77601 5.66667 5.62668L4 3.5529ZM6.77719 7.01068C8.82016 5.34668 11.3707 4.44049 14 4.44446C16.7356 4.44446 19.2485 5.40534 21.2228 7.00979L19.5561 9.08445C17.9845 7.80464 16.0225 7.10781 14 7.11112C11.8957 7.11112 9.96286 7.85068 8.44386 9.08445L6.77719 7.00979V7.01068ZM9.55526 10.4685C10.8124 9.44436 12.3819 8.88659 14 8.8889C15.6835 8.8889 17.2299 9.48001 18.4447 10.4676L16.7781 12.5422C15.9922 11.9024 15.0113 11.554 14 11.5556C12.9888 11.554 12.0078 11.9024 11.2219 12.5422L9.55526 10.4676V10.4685ZM12.3333 13.9262C12.8046 13.542 13.3932 13.3326 14 13.3333C14.6313 13.3333 15.2113 13.5556 15.6667 13.9253L14 16L12.3333 13.9262Z" fill="currentColor"/>
+        <path d="M17.3 15.4V1.6" stroke="#fff" stroke-width="3.6" stroke-linecap="round"/>
+        <path d="M14.5 4.6L17.3 1.5 20.1 4.6" stroke="#fff" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M17.3 15V1.8" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>
+        <path d="M14.8 4.5L17.3 1.7 19.8 4.5" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
+    <div class="r"><span class="lbl">PCIE Wi-Fi · B</span><span class="tag">Upstream</span><span class="up">c2h2_xhome_ubnt_5G</span>
+      <svg class="us up" viewBox="0 0 28 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M4 3.5529C6.82855 1.24919 10.3597 -0.00539646 14 1.74488e-05C17.7887 1.74488e-05 21.2679 1.33068 24 3.5529L22.3333 5.62668C19.9761 3.70715 17.0335 2.66192 14 2.66668C10.8435 2.66668 7.94341 3.77601 5.66667 5.62668L4 3.5529ZM6.77719 7.01068C8.82016 5.34668 11.3707 4.44049 14 4.44446C16.7356 4.44446 19.2485 5.40534 21.2228 7.00979L19.5561 9.08445C17.9845 7.80464 16.0225 7.10781 14 7.11112C11.8957 7.11112 9.96286 7.85068 8.44386 9.08445L6.77719 7.00979V7.01068ZM9.55526 10.4685C10.8124 9.44436 12.3819 8.88659 14 8.8889C15.6835 8.8889 17.2299 9.48001 18.4447 10.4676L16.7781 12.5422C15.9922 11.9024 15.0113 11.554 14 11.5556C12.9888 11.554 12.0078 11.9024 11.2219 12.5422L9.55526 10.4676V10.4685ZM12.3333 13.9262C12.8046 13.542 13.3932 13.3326 14 13.3333C14.6313 13.3333 15.2113 13.5556 15.6667 13.9253L14 16L12.3333 13.9262Z" fill="currentColor"/>
+        <path d="M17.3 14.6V4.4" stroke="#fff" stroke-width="3.6" stroke-linecap="round"/>
+        <path d="M14.8 7.2L17.3 4.3 19.8 7.2" stroke="#fff" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M17.3 14.2V4.6" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>
+        <path d="M15 7.1L17.3 4.5 19.6 7.1" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
+    <div class="r"><span class="lbl">PCIE Wi-Fi · E</span><span class="tag">Upstream</span><span class="up">c2h2_xhome_ubnt_5G</span>
+      <svg class="us up" viewBox="0 0 28 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M4 3.5529C6.82855 1.24919 10.3597 -0.00539646 14 1.74488e-05C17.7887 1.74488e-05 21.2679 1.33068 24 3.5529L22.3333 5.62668C19.9761 3.70715 17.0335 2.66192 14 2.66668C10.8435 2.66668 7.94341 3.77601 5.66667 5.62668L4 3.5529ZM6.77719 7.01068C8.82016 5.34668 11.3707 4.44049 14 4.44446C16.7356 4.44446 19.2485 5.40534 21.2228 7.00979L19.5561 9.08445C17.9845 7.80464 16.0225 7.10781 14 7.11112C11.8957 7.11112 9.96286 7.85068 8.44386 9.08445L6.77719 7.00979V7.01068ZM9.55526 10.4685C10.8124 9.44436 12.3819 8.88659 14 8.8889C15.6835 8.8889 17.2299 9.48001 18.4447 10.4676L16.7781 12.5422C15.9922 11.9024 15.0113 11.554 14 11.5556C12.9888 11.554 12.0078 11.9024 11.2219 12.5422L9.55526 10.4676V10.4685ZM12.3333 13.9262C12.8046 13.542 13.3932 13.3326 14 13.3333C14.6313 13.3333 15.2113 13.5556 15.6667 13.9253L14 16L12.3333 13.9262Z" fill="currentColor"/>
+        <path d="M17.3 15V1.8" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>
+        <path d="M14.8 4.5L17.3 1.7 19.8 4.5" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
+    <div class="r"><span class="lbl">PCIE Wi-Fi · F</span><span class="tag">Upstream</span><span class="up">c2h2_xhome_ubnt_5G</span>
+      <svg class="us up" viewBox="0 0 28 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M4 3.5529C6.82855 1.24919 10.3597 -0.00539646 14 1.74488e-05C17.7887 1.74488e-05 21.2679 1.33068 24 3.5529L22.3333 5.62668C19.9761 3.70715 17.0335 2.66192 14 2.66668C10.8435 2.66668 7.94341 3.77601 5.66667 5.62668L4 3.5529ZM6.77719 7.01068C8.82016 5.34668 11.3707 4.44049 14 4.44446C16.7356 4.44446 19.2485 5.40534 21.2228 7.00979L19.5561 9.08445C17.9845 7.80464 16.0225 7.10781 14 7.11112C11.8957 7.11112 9.96286 7.85068 8.44386 9.08445L6.77719 7.00979V7.01068ZM9.55526 10.4685C10.8124 9.44436 12.3819 8.88659 14 8.8889C15.6835 8.8889 17.2299 9.48001 18.4447 10.4676L16.7781 12.5422C15.9922 11.9024 15.0113 11.554 14 11.5556C12.9888 11.554 12.0078 11.9024 11.2219 12.5422L9.55526 10.4676V10.4685ZM12.3333 13.9262C12.8046 13.542 13.3932 13.3326 14 13.3333C14.6313 13.3333 15.2113 13.5556 15.6667 13.9253L14 16L12.3333 13.9262Z" fill="currentColor"/>
+        <path d="M17.3 15.2V1.7" stroke="#fff" stroke-width="2.6" stroke-linecap="round"/>
+        <path d="M14.9 4.5L17.3 1.6 19.7 4.5" stroke="#fff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
+  </div>
+  <div class="note">Onboard row unchanged for comparison. Say a letter and I'll ship it.</div>
+</div>
+
+</body></html>

@@ -1,4 +1,5 @@
 {% extends '_base.html' %}
+{% block page_title %}{{locales["tab_device_control"]}}{% endblock %}
 {% block content %}
 <div class="container mx-auto w-full pt-14 pb-6 sm:pt-24 sm:pb-8 md:pt-28 lg:px-4" x-data="adv_settings" x-init="init()">
   <div class="flex items-center justify-between">
@@ -62,62 +63,214 @@
       <div class="p-5 flex-1 flex flex-col" x-show="tab_page === 'network_mode'" >
         <div>
         <div class="mb-4 flex flex-col space-y-4">
-          <div class="flex items-center text-gray-700">
+          <!-- WAN priority table: the failover order is fixed (wired > WiFi >
+               cellular); the switch enables/disables a connection -->
+          <div class="flex flex-wrap items-center gap-y-1 text-gray-700">
             <img src="/static/inapp/Multi-WAN.svg" class="mr-2 h-6 w-6" />
             <span class="font-medium">{{locales["card_network_mode"]}}</span>
+            <span class="ml-3 text-xs text-gray-400">{{locales["wan_priority_hint"]}}</span>
+            <button type="button"
+                    class="ml-1.5 flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full border border-gray-300 text-[10px] leading-none text-gray-400 hover:border-gray-400 hover:text-gray-600"
+                    title="{{locales['wan_priority_help']}}"
+                    @click="wan_help_open = !wan_help_open">?</button>
           </div>
-          
-          <!-- 4-Button Network Mode Selection -->
-          <div class="flex items-center space-x-4">
-            <div class="flex space-x-3">
-              <!-- Auto Button -->
-              <button 
-                type="button"
-                @click="network_mode = 'auto'"
-                :class="network_mode === 'auto' ? 'bg-green-100 border-green-300 text-green-700' : 'bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100'"
-                class="flex flex-col items-center justify-center w-20 h-16 rounded-lg border-2 transition-all duration-200 cursor-pointer">
-                <img src="/static/inapp/Multi-WAN.svg" class="w-5 h-5 mb-1" />
-                <span class="text-xs font-medium">{{locales["network_mode_auto_short"]}}</span>
-              </button>
-              
-              <!-- Eth Only Button -->
-              <button 
-                type="button"
-                @click="network_mode = 'eth_only'"
-                :class="network_mode === 'eth_only' ? 'bg-blue-100 border-blue-300 text-blue-700' : 'bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100'"
-                class="flex flex-col items-center justify-center w-20 h-16 rounded-lg border-2 transition-all duration-200 cursor-pointer">
-                <img src="/static/eth_active.svg" class="w-5 h-5 mb-1" />
-                <span class="text-xs font-medium">{{locales["network_mode_eth_only_short"]}}</span>
-              </button>
-              
-              <!-- Cell Only Button -->
-              <button 
-                type="button"
-                @click="network_mode = 'cell_only'"
-                :class="network_mode === 'cell_only' ? 'bg-orange-100 border-orange-300 text-orange-700' : 'bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100'"
-                class="flex flex-col items-center justify-center w-20 h-16 rounded-lg border-2 transition-all duration-200 cursor-pointer">
-                <img src="{% if is_em05_modem %}/static/inapp/4G.svg{% else %}/static/inapp/5G.svg{% endif %}" class="w-5 h-5 mb-1" />
-                <span class="text-xs font-medium">{{locales["network_mode_cell_only_short"]}}</span>
-              </button>
-              
-              <!-- All Off Button -->
-              <button 
-                type="button"
-                @click="network_mode = 'all_off'"
-                :class="network_mode === 'all_off' ? 'bg-gray-800 border-gray-600 text-white' : 'bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100'"
-                class="flex flex-col items-center justify-center w-20 h-16 rounded-lg border-2 transition-all duration-200 cursor-pointer">
-                <img src="/static/airplane.svg" class="w-5 h-5 mb-1" />
-                <span class="text-xs font-medium">{{locales["network_mode_all_off_short"]}}</span>
+          <div x-show="wan_help_open" x-cloak class="text-xs text-gray-400">{{locales["wan_priority_help"]}}</div>
+          <div class="overflow-hidden rounded-lg border border-gray-200">
+            <template x-for="(slot, idx) in wan_priority" :key="slot.id">
+              <div class="flex items-center gap-2 border-b border-gray-100 bg-white px-2 py-2 last:border-b-0">
+                <div class="flex flex-shrink-0 items-center gap-2">
+                  <span class="w-4 text-center text-xs text-gray-400" x-text="idx + 1"></span>
+                  <img :src="slot_icon(slot)" class="h-6 w-6" :class="slot.enabled && !slot_locked(slot) ? '' : 'opacity-40'" />
+                </div>
+                <div class="min-w-0 flex-1">
+                  <div class="flex flex-wrap items-center gap-2">
+                    <span class="text-sm font-medium text-gray-700" x-text="slot_label(slot.id)"></span>
+                    <span x-show="slot.id === active_slot && slot.up" x-cloak class="rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700">{{locales["wan_priority_active"]}}</span>
+                    <span x-show="!slot.exists && slot.id !== 'wifi'" x-cloak class="text-xs text-gray-400">{{locales["wan_priority_absent"]}}</span>
+                    <!-- The WiFi slot "exists" only with two live radios. Say
+                         which card is missing: a bare "not detected" next to a
+                         lone Onboard button read as "the upstream is set to
+                         onboard and not found" when it was the PCIe card
+                         (ath12k) that had dropped off the bus. -->
+                    <span x-show="!slot.exists && slot.id === 'wifi'" x-cloak class="text-xs text-amber-600" x-text="wifi_absent_label()"></span>
+                    <!-- upstream WiFi radio selector. A missing radio keeps
+                         its button (disabled) while it is the saved choice, so
+                         the selection stays visible instead of silently
+                         appearing to switch to the other card. -->
+                    <div x-show="slot.id === 'wifi'" class="flex items-center gap-1">
+                      <button type="button" x-show="wifi_radios.onboard || wifi_radio === 'onboard'"
+                              class="rounded border px-2 py-0.5 text-xs"
+                              :class="(wifi_radio === 'onboard' ? 'border-pcatblue bg-blue-50 text-pcatblue' : 'border-gray-200 text-gray-500 hover:bg-gray-50') + (wifi_radios.onboard ? '' : ' cursor-not-allowed opacity-50 line-through')"
+                              :disabled="!wifi_radios.onboard"
+                              :title="wifi_radios.onboard ? '' : wifi_absent_label()"
+                              @click="set_wifi_radio('onboard')">{{locales["wifi_radio_onboard"]}}</button>
+                      <button type="button" x-show="wifi_radios.pcie || wifi_radio === 'pcie'"
+                              class="rounded border px-2 py-0.5 text-xs"
+                              :class="(wifi_radio === 'pcie' ? 'border-pcatblue bg-blue-50 text-pcatblue' : 'border-gray-200 text-gray-500 hover:bg-gray-50') + (wifi_radios.pcie ? '' : ' cursor-not-allowed opacity-50 line-through')"
+                              :disabled="!wifi_radios.pcie"
+                              :title="wifi_radios.pcie ? '' : wifi_absent_label()"
+                              @click="set_wifi_radio('pcie')">{{locales["wifi_radio_pcie"]}}</button>
+                    </div>
+                  </div>
+                  <div class="truncate text-xs text-gray-400" x-text="slot_detail(slot)"></div>
+                </div>
+                <!-- Health. A "login required" slot is tappable: it is demoted
+                     (so egress works) and that is exactly why its login page
+                     cannot be reached — tapping holds this connection up as
+                     the primary one for 15 minutes so the portal answers. -->
+                <button type="button" class="flex-shrink-0 text-xs"
+                        :class="health_color(slot)"
+                        :disabled="!health_clickable(slot)"
+                        :title="health_title(slot)"
+                        @click="start_portal_login(slot)"
+                        x-text="health_label(slot)"></button>
+                <label class="relative flex flex-shrink-0 items-center" :class="slot_locked(slot) ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'" :title="slot_locked_tip(slot)">
+                  <input class="peer sr-only" type="checkbox" :checked="slot.enabled && !slot_locked(slot)" :disabled="slot_locked(slot)" @change="toggle_slot(slot, $event)" />
+                  <div class="h-6 w-11 rounded-full border-2 border-gray-200 bg-gray-200 after:absolute after:top-0.5 after:left-0.5 after:h-5 after:w-5 after:rounded-full after:border after:border-gray-300 after:bg-white after:shadow-sm after:transition-all after:duration-300 peer-checked:border-blue-600 peer-checked:bg-blue-600 peer-checked:after:translate-x-full peer-checked:after:border-white"></div>
+                </label>
+              </div>
+            </template>
+          </div>
+
+          <!-- Captive-portal login window: while it runs, the chosen
+               connection is the primary one so its login page answers.
+               Everything here is a way out of it — open the page, give up
+               now, or just wait for the countdown. -->
+          <div x-show="portal_login_running()" x-cloak
+               class="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-700">
+            <div class="flex flex-wrap items-center gap-2">
+              <span class="font-medium" x-text="portal_login_title()"></span>
+              <span class="font-mono" x-text="portal_login_countdown()"></span>
+              <a x-show="portal_login_url()" x-cloak :href="portal_login_url()"
+                 target="_blank" rel="noopener"
+                 class="font-medium underline">{{locales.wan_portal_login_open}}</a>
+              <button type="button"
+                      class="rounded border border-amber-300 bg-white px-2 py-0.5 font-medium hover:bg-gray-50 disabled:opacity-60"
+                      :disabled="portal_login_busy"
+                      @click="cancel_portal_login()">{{locales.wan_portal_login_cancel}}</button>
+            </div>
+            <p class="mt-1">{{locales.wan_portal_login_help}}</p>
+          </div>
+          <p x-show="portal_login_error" x-cloak class="text-xs text-red-500" x-text="portal_login_error"></p>
+
+          <!-- Live WAN iface metrics table lives on /dev (diagnostics). -->
+
+          <!-- Upstream WiFi panel (shown while the WiFi slot is enabled and
+               two radios exist to relay with) -->
+          <div x-show="wifi_slot_enabled() && wifi_upstream_capable()" x-cloak class="rounded-lg border border-indigo-200 bg-indigo-50 p-3 text-sm">
+            <div class="mb-2 flex items-center justify-between gap-2">
+              <div class="flex min-w-0 items-center gap-3">
+                <span class="flex-shrink-0 font-medium text-gray-700">{{locales["wifi_wan_title"]}}</span>
+                <button type="button" x-show="wifi_saved_networks.length > 0"
+                        class="flex min-w-0 items-center gap-1 text-xs text-pcatblue hover:underline"
+                        @click="wifi_saved_open = !wifi_saved_open">
+                  <span class="truncate" x-text="saved_networks_summary()"></span>
+                  <svg class="h-3 w-3 flex-shrink-0 transition-transform" :class="wifi_saved_open ? 'rotate-180' : ''" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 10.94l3.71-3.71a.75.75 0 111.06 1.06l-4.24 4.24a.75.75 0 01-1.06 0L5.23 8.29a.75.75 0 01.02-1.08z" clip-rule="evenodd"/></svg>
+                </button>
+              </div>
+              <button type="button"
+                      class="flex-shrink-0 rounded bg-pcatblue px-3 py-1 text-xs font-medium text-white hover:bg-pcatblue-400 disabled:opacity-60"
+                      :disabled="wifi_scanning"
+                      @click="open_wifi_scan()">
+                <span x-show="!wifi_scanning">{{locales["wifi_wan_scan"]}}</span>
+                <span x-show="wifi_scanning">{{locales["wifi_wan_scanning"]}}</span>
               </button>
             </div>
-          </div>
-          
-          <!-- Help text -->
-          <div class="text-left text-sm text-gray-400">
-            <span x-show="network_mode === 'auto'">{{locales["network_mode_auto_help"]}}</span>
-            <span x-show="network_mode === 'eth_only'">{{locales["network_mode_eth_only_help"]}}</span>
-            <span x-show="network_mode === 'cell_only'">{{locales["network_mode_cell_only_help"]}}</span>
-            <span x-show="network_mode === 'all_off'">{{locales["network_mode_all_off_short_help"]}}</span>
+
+            <!-- current upstream -->
+            <div x-show="wifi_wan.configured" class="flex items-center justify-between">
+              <div class="flex items-center space-x-2 min-w-0">
+                <span class="inline-block h-2 w-2 flex-shrink-0 rounded-full" :class="wifi_wan_status_color()"></span>
+                <!-- Only show the SSID while actually associated; a disassociated
+                     STA keeps its stale configured name, so show Standby instead. -->
+                <span class="truncate font-medium text-gray-700" x-text="wifi_wan.associated ? wifi_wan.ssid : '{{locales['wifi_wan_standby']}}'"></span>
+                <img x-show="wifi_wan.signal !== null && wifi_wan.signal !== undefined" :src="wifi_wan_signal_img()" :title="wifi_wan.signal + ' dBm'" class="h-4 w-auto flex-shrink-0" />
+                <span class="flex-shrink-0 text-xs text-gray-500" x-text="wifi_wan_state_text()"></span>
+                <span class="hidden sm:inline text-xs text-gray-500" x-text="wifi_wan_detail_text()"></span>
+                <span x-show="wifi_wan.captive_portal" x-cloak class="flex-shrink-0 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700">{{locales["wifi_wan_captive_portal"]}}</span>
+                <span x-show="wifi_wan.random_mac" x-cloak class="hidden sm:inline flex-shrink-0 rounded bg-gray-100 px-1 text-xs text-gray-500" title="{{locales['wifi_wan_random_mac']}}">MAC🎲</span>
+              </div>
+              <button type="button" class="flex-shrink-0 text-xs text-red-500 underline hover:no-underline"
+                      @click="forget_wifi(wifi_wan.ssid)">{{locales["wifi_wan_forget"]}}</button>
+            </div>
+            <div x-show="wifi_wan.captive_portal" x-cloak class="mt-1 text-xs text-amber-600">{{locales["wifi_wan_captive_portal_help"]}}
+              <a x-show="wifi_wan.portal_url" x-cloak :href="wifi_wan.portal_url" target="_blank" rel="noopener" class="font-medium text-amber-700 underline">{{locales["wifi_wan_captive_portal_open"]}}</a>
+            </div>
+            <div x-show="!wifi_wan.configured" class="text-gray-500">{{locales["wifi_wan_not_configured"]}}</div>
+            <div x-show="wifi_connect_error && !wifi_scan_open" class="mt-1 text-xs text-red-500" x-text="wifi_connect_error"></div>
+
+            <!-- saved networks, expanded from the count in the header line -->
+            <div x-show="wifi_saved_open && wifi_saved_networks.length > 0" x-cloak class="mt-2 flex flex-wrap gap-2">
+              <template x-for="net in wifi_saved_networks" :key="net.ssid">
+                <span class="inline-flex items-center rounded-full border border-gray-300 bg-white px-2 py-0.5 text-xs">
+                  <button type="button" class="hover:text-pcatblue" @click="connect_saved(net)" x-text="net.ssid"></button>
+                  <button type="button" class="ml-1 text-gray-400 hover:text-red-500" @click="forget_wifi(net.ssid)">&times;</button>
+                </span>
+              </template>
+            </div>
+
+            <!-- hidden network join: opened from the scan dialog (or the EAP flow) -->
+            <div x-show="wifi_hidden_open" x-cloak class="mt-2">
+              <div class="flex items-center justify-between">
+                <span class="text-xs font-medium text-gray-600">{{locales["wifi_wan_hidden_join"]}}</span>
+                <button type="button" class="text-gray-400 hover:text-gray-600" @click="wifi_hidden_open = false">&times;</button>
+              </div>
+              <div class="mt-2 space-y-2">
+                <div class="flex flex-wrap gap-2">
+                  <input type="text" maxlength="32" class="w-44 rounded border-gray-300 text-sm" placeholder="{{locales['wifi_wan_hidden_ssid']}}" x-model="wifi_hidden.ssid" />
+                  <select class="rounded border-gray-300 text-sm" x-model="wifi_hidden.band" title="{{locales['wifi_wan_band']}}">
+                    <option value="2g">2.4G</option>
+                    <option value="5g">5G</option>
+                  </select>
+                  <select class="rounded border-gray-300 text-sm" x-model="wifi_hidden.encryption" title="{{locales['wifi_wan_encryption']}}">
+                    <option value="psk2">WPA2</option>
+                    <option value="sae">WPA3</option>
+                    <option value="psk">WPA</option>
+                    <option value="none">{{locales["wifi_wan_open"]}}</option>
+                    <option value="eap" x-show="wifi_eap_supported">{{locales["wifi_wan_enterprise"]}}</option>
+                  </select>
+                </div>
+                <!-- Enterprise (802.1x) fields -->
+                <div x-show="wifi_hidden.encryption === 'eap'" x-cloak class="flex flex-wrap gap-2">
+                  <select class="rounded border-gray-300 text-sm" x-model="wifi_hidden.eap_type" title="{{locales['wifi_wan_eap_type']}}">
+                    <option value="peap">PEAP</option>
+                    <option value="ttls">TTLS</option>
+                  </select>
+                  <input type="text" maxlength="128" class="w-44 rounded border-gray-300 text-sm" placeholder="{{locales['wifi_wan_identity']}}" x-model="wifi_hidden.identity" />
+                  <input type="text" maxlength="128" class="w-44 rounded border-gray-300 text-sm" placeholder="{{locales['wifi_wan_anon_identity']}}" x-model="wifi_hidden.anon_identity" />
+                  <input type="text" maxlength="256" class="w-44 rounded border-gray-300 text-sm" placeholder="{{locales['wifi_wan_ca_cert']}}" x-model="wifi_hidden.ca_cert" />
+                </div>
+                <div class="flex flex-wrap gap-2">
+                  <input type="password" maxlength="128" class="w-44 rounded border-gray-300 text-sm" placeholder="{{locales['wifi_wan_password']}}"
+                         x-model="wifi_hidden.password" :disabled="wifi_hidden.encryption === 'none'" />
+                  <button type="button"
+                          class="rounded bg-pcatblue px-3 py-1 text-xs font-medium text-white hover:bg-pcatblue-400 disabled:opacity-60"
+                          :disabled="wifi_connecting || !wifi_hidden.ssid"
+                          @click="connect_hidden()">
+                    <span x-show="!wifi_connecting">{{locales["wifi_wan_connect"]}}</span>
+                    <span x-show="wifi_connecting">{{locales["wifi_wan_connecting"]}}</span>
+                  </button>
+                </div>
+                <!-- privacy + captive-portal options -->
+                <label class="flex items-center gap-2 text-xs text-gray-600">
+                  <input type="checkbox" class="rounded border-gray-300" x-model="wifi_hidden.random_mac" :disabled="wifi_hidden.custom_mac !== ''" />
+                  <span title="{{locales['wifi_wan_random_mac_help']}}">{{locales["wifi_wan_random_mac"]}}</span>
+                </label>
+                <input type="text" class="w-44 rounded border-gray-300 px-2 py-1 text-xs" maxlength="17"
+                       placeholder="{{locales['wifi_wan_custom_mac']}}" x-model="wifi_hidden.custom_mac"
+                       title="{{locales['wifi_wan_custom_mac_help']}}" />
+                <div class="w-full">
+                  <button type="button" class="flex items-center gap-1.5 text-xs text-gray-400 hover:text-gray-600" @click="hidden_login_cmd_open = !hidden_login_cmd_open">
+                    <span class="flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full border border-gray-300 text-[10px] leading-none">?</span>
+                    <span>{{locales["wifi_wan_login_cmd"]}}</span>
+                  </button>
+                  <div x-show="hidden_login_cmd_open" x-cloak class="mt-1">
+                    <p class="mb-1 text-xs text-gray-400">{{locales["wifi_wan_login_cmd_explain"]}}</p>
+                    <input type="text" maxlength="1024" class="w-full rounded border-gray-300 text-xs" placeholder="{{locales['wifi_wan_login_cmd']}}" x-model="wifi_hidden.login_cmd" />
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -125,24 +278,9 @@
 
       <!-- start of nic,wifi control -->
       <div>
-        <!-- DON'T DELETE: WAN NIC Control -->
-        <!-- <div class="mb-6 flex space-x-2 items-center sm:space-x-4">
-          <div class="flex flex-col flex-wrap">
-            <div class="flex items-center w-40 text-gray-700 mb-2"><img :src="wan_enabled ? '/static/eth_active.svg' : '/static/eth_inactive.svg'" class="mr-2 h-6 w-6"/>{{locales["wan_interface"]}}</div>
-            <label class="relative flex cursor-pointer items-center">
-              <input class="peer sr-only" type="checkbox" x-model="wan_enabled" />
-              <div
-                class="h-6 w-11 rounded-full border-2 border-gray-200 bg-gray-200 after:absolute after:top-0.5 after:left-0.5 after:h-5 after:w-5 after:rounded-full after:border after:border-gray-300 after:bg-white after:shadow-sm after:transition-all after:duration-300 peer-checked:border-blue-600 peer-checked:bg-blue-600 peer-checked:after:translate-x-full peer-checked:after:border-white"
-              ></div>
-              <span class="ml-2 select-none text-base text-gray-400" x-text="wan_enabled ? '{{locales['common_enable']}}' : '{{locales['common_disable']}}'"></span>
-            </label>
-          </div>
-          <div class="ml-4 flex-1 text-left text-sm text-gray-400">{{locales["wan_toggle_help_text"]}}</div>
-        </div> -->
-
         <div class="mb-6">
           <div class="flex items-start space-x-2 sm:space-x-4">
-            <div class="flex flex-col flex-wrap">
+            <div class="flex w-40 flex-shrink-0 flex-col">
               <div class="flex items-center w-40 text-gray-700 mb-2"><img src="{% if is_em05_modem %}/static/inapp/4G.svg{% else %}/static/inapp/5G.svg{% endif %}" class="mr-2 h-6 w-6"/>{{locales["wwan_power"]}}</div>
               <label class="relative flex cursor-pointer items-center" :class="wwan_powered === 'unknown' ? 'opacity-60' : ''">
                 <input class="peer sr-only" type="checkbox" :checked="wwan_powered === true" @change="toggle_wwan_power($event.target.checked)" :disabled="wwan_powered === 'unknown' || wwan_power_saving" />
@@ -157,58 +295,90 @@
                 </svg>
               </label>
             </div>
-            <div class="flex-1 text-left text-sm text-gray-400 pt-1">{{locales["wwan_power_help_text"]}}</div>
-          </div>
-        </div>
-
-        <div class="mb-6">
-          <div class="flex items-start space-x-2 sm:space-x-4">
-            <div class="flex flex-col flex-wrap">
-              <div class="flex items-center w-40 text-gray-700 mb-2"><img :src="getInterfaceIcon(lan_enabled, '/static/eth_active.svg', '/static/eth_inactive.svg')" class="mr-2 h-6 w-6"/>LAN NIC</div>
-              <label class="relative flex cursor-pointer items-center" :class="isInterfaceUnknown(lan_enabled) ? 'opacity-60' : ''">
-                <input class="peer sr-only" type="checkbox" :checked="isInterfaceChecked(lan_enabled)" @change="lan_enabled = $event.target.checked" :disabled="isInterfaceUnknown(lan_enabled)" />
-                <div
-                  :class="isInterfaceUnknown(lan_enabled) ? 'border-yellow-300 bg-yellow-100' : (lan_enabled ? 'border-blue-600 bg-blue-600' : 'border-gray-200 bg-gray-200')"
-                  class="h-6 w-11 rounded-full border-2 after:absolute after:top-0.5 after:left-0.5 after:h-5 after:w-5 after:rounded-full after:border after:border-gray-300 after:bg-white after:shadow-sm after:transition-all after:duration-300 peer-checked:after:translate-x-full peer-checked:after:border-white"
-                ></div>
-                <span class="ml-2 select-none text-base" :class="isInterfaceUnknown(lan_enabled) ? 'text-yellow-600' : 'text-gray-400'" x-text="getInterfaceStateText(lan_enabled)"></span>
-              </label>
+            <div class="flex-1 text-left text-sm text-gray-400 pt-1">
+              {{locales["wwan_power_help_text"]}}
             </div>
-            <div class="flex-1 text-left text-sm text-gray-400 pt-1">{{locales["lan_interface_toggle_help_text"]}}</div>
           </div>
         </div>
 
         <div class="mb-6">
           <div class="flex items-start space-x-2 sm:space-x-4">
-            <div class="flex flex-col flex-wrap">
+            <div class="flex w-40 flex-shrink-0 flex-col">
+              <div class="flex items-center w-40 text-gray-700 mb-2"><img :src="getInterfaceIcon(lan_mode !== 'off' && lan_mode !== 'unknown', '/static/eth_active.svg', '/static/eth_inactive.svg')" class="mr-2 h-6 w-6"/>LAN NIC</div>
+              <div class="inline-flex self-start rounded-lg bg-gray-100 p-1" :class="lan_mode === 'unknown' ? 'opacity-60' : ''">
+                <template x-for="m in nic_modes" :key="m">
+                  <button type="button"
+                          class="rounded-md px-2.5 py-1 text-sm font-medium transition-all duration-150"
+                          :class="lan_mode === m ? 'bg-pcatblue text-white shadow' : 'text-gray-500 hover:text-gray-700'"
+                          :disabled="lan_mode === 'unknown'"
+                          :title="nic_mode_tip(m)"
+                          @click="lan_mode = m; lan_enabled = (m !== 'off')"
+                          x-text="nic_mode_label(m)"></button>
+                </template>
+              </div>
+            </div>
+            <!-- pcat1 has no "auto" to describe: it ships without eth-powersave. -->
+            <div class="flex-1 text-left text-sm text-gray-400 pt-1">{% if is_photonicat2 %}{{locales["lan_interface_toggle_help_text"]}}{% else %}{{locales["lan_interface_toggle_help_text_pcat1"]}}{% endif %}</div>
+          </div>
+        </div>
+
+        <div class="mb-6">
+          <div class="flex items-start space-x-2 sm:space-x-4">
+            <div class="flex w-40 flex-shrink-0 flex-col">
+              <div class="flex items-center w-40 text-gray-700 mb-2"><img :src="getInterfaceIcon(wan_mode !== 'off' && wan_mode !== 'unknown', '/static/eth_active.svg', '/static/eth_inactive.svg')" class="mr-2 h-6 w-6"/>{{locales["wan_interface"]}}</div>
+              <div class="inline-flex self-start rounded-lg bg-gray-100 p-1" :class="wan_mode === 'unknown' ? 'opacity-60' : ''">
+                <template x-for="m in nic_modes" :key="m">
+                  <button type="button"
+                          class="rounded-md px-2.5 py-1 text-sm font-medium transition-all duration-150"
+                          :class="wan_mode === m ? 'bg-pcatblue text-white shadow' : 'text-gray-500 hover:text-gray-700'"
+                          :disabled="wan_mode === 'unknown'"
+                          :title="nic_mode_tip(m)"
+                          @click="wan_mode = m"
+                          x-text="nic_mode_label(m)"></button>
+                </template>
+              </div>
+            </div>
+            <div class="flex-1 text-left text-sm text-gray-400 pt-1">{{locales["wan_nic_help_text"]}}</div>
+          </div>
+        </div>
+
+        <div class="mb-6">
+          <div class="flex items-start space-x-2 sm:space-x-4">
+            <div class="flex w-40 flex-shrink-0 flex-col">
               <div class="flex items-center w-40 text-gray-700 mb-2"><img :src="getInterfaceIcon(onboard_wifi_enabled, '/static/wifi_active.svg', '/static/wifi_inactive.svg')" class="mr-2 h-6 w-6"/>Onboard WiFi</div>
-              <label class="relative flex cursor-pointer items-center" :class="isInterfaceUnknown(onboard_wifi_enabled) ? 'opacity-60' : ''">
-                <input class="peer sr-only" type="checkbox" :checked="isInterfaceChecked(onboard_wifi_enabled)" @change="onboard_wifi_enabled = $event.target.checked" :disabled="isInterfaceUnknown(onboard_wifi_enabled)" />
+              <label class="relative flex cursor-pointer items-center" :class="isInterfaceUnknown(onboard_wifi_enabled) || wifi_upstream_uses('onboard') ? 'opacity-60' : ''">
+                <input class="peer sr-only" type="checkbox" :checked="isInterfaceChecked(onboard_wifi_enabled) || wifi_upstream_uses('onboard')" @change="onboard_wifi_enabled = $event.target.checked" :disabled="isInterfaceUnknown(onboard_wifi_enabled) || wifi_upstream_uses('onboard')" />
                 <div
                   :class="isInterfaceUnknown(onboard_wifi_enabled) ? 'border-yellow-300 bg-yellow-100' : (onboard_wifi_enabled ? 'border-blue-600 bg-blue-600' : 'border-gray-200 bg-gray-200')"
                   class="h-6 w-11 rounded-full border-2 after:absolute after:top-0.5 after:left-0.5 after:h-5 after:w-5 after:rounded-full after:border after:border-gray-300 after:bg-white after:shadow-sm after:transition-all after:duration-300 peer-checked:after:translate-x-full peer-checked:after:border-white"
                 ></div>
-                <span class="ml-2 select-none text-base" :class="isInterfaceUnknown(onboard_wifi_enabled) ? 'text-yellow-600' : 'text-gray-400'" x-text="getInterfaceStateText(onboard_wifi_enabled)"></span>
+                <span class="ml-2 select-none text-base" :class="isInterfaceUnknown(onboard_wifi_enabled) ? 'text-yellow-600' : (wifi_upstream_uses('onboard') ? 'text-indigo-500' : 'text-gray-400')" x-text="wifi_state_text('onboard', onboard_wifi_enabled)"></span>
               </label>
             </div>
-            <div class="flex-1 text-left text-sm text-gray-400 pt-1">{{locales["onboard_wifi_toggle_help_text"]}}</div>
+            <div class="flex-1 text-left text-sm text-gray-400 pt-1">
+              <span x-show="!wifi_upstream_uses('onboard')">{{locales["onboard_wifi_toggle_help_text"]}}</span>
+              <span x-show="wifi_upstream_uses('onboard')" class="text-indigo-500">{{locales["wifi_wan_radio_in_use"]}}</span>
+            </div>
           </div>
         </div>
 
         <div class="mb-6">
           <div class="flex items-start space-x-2 sm:space-x-4">
-            <div class="flex flex-col flex-wrap">
+            <div class="flex w-40 flex-shrink-0 flex-col">
               <div class="flex items-center w-40 text-gray-700 mb-2"><img :src="getInterfaceIcon(pcie_wifi_enabled, '/static/wifi_active.svg', '/static/wifi_inactive.svg')" class="mr-2 h-6 w-6"/>PCIE WiFi</div>
-              <label class="relative flex cursor-pointer items-center" :class="isInterfaceUnknown(pcie_wifi_enabled) ? 'opacity-60' : ''">
-                <input class="peer sr-only" type="checkbox" :checked="isInterfaceChecked(pcie_wifi_enabled)" @change="pcie_wifi_enabled = $event.target.checked" :disabled="isInterfaceUnknown(pcie_wifi_enabled)" />
+              <label class="relative flex cursor-pointer items-center" :class="isInterfaceUnknown(pcie_wifi_enabled) || wifi_upstream_uses('pcie') ? 'opacity-60' : ''">
+                <input class="peer sr-only" type="checkbox" :checked="isInterfaceChecked(pcie_wifi_enabled) || wifi_upstream_uses('pcie')" @change="pcie_wifi_enabled = $event.target.checked" :disabled="isInterfaceUnknown(pcie_wifi_enabled) || wifi_upstream_uses('pcie')" />
                 <div
                   :class="isInterfaceUnknown(pcie_wifi_enabled) ? 'border-yellow-300 bg-yellow-100' : (pcie_wifi_enabled ? 'border-blue-600 bg-blue-600' : 'border-gray-200 bg-gray-200')"
                   class="h-6 w-11 rounded-full border-2 after:absolute after:top-0.5 after:left-0.5 after:h-5 after:w-5 after:rounded-full after:border after:border-gray-300 after:bg-white after:shadow-sm after:transition-all after:duration-300 peer-checked:after:translate-x-full peer-checked:after:border-white"
                 ></div>
-                <span class="ml-2 select-none text-base" :class="isInterfaceUnknown(pcie_wifi_enabled) ? 'text-yellow-600' : 'text-gray-400'" x-text="getInterfaceStateText(pcie_wifi_enabled)"></span>
+                <span class="ml-2 select-none text-base" :class="isInterfaceUnknown(pcie_wifi_enabled) ? 'text-yellow-600' : (wifi_upstream_uses('pcie') ? 'text-indigo-500' : 'text-gray-400')" x-text="wifi_state_text('pcie', pcie_wifi_enabled)"></span>
               </label>
             </div>
-            <div class="flex-1 text-left text-sm text-gray-400 pt-1">{{locales["pcie_wifi_toggle_help_text"]}}</div>
+            <div class="flex-1 text-left text-sm text-gray-400 pt-1">
+              <span x-show="!wifi_upstream_uses('pcie')">{{locales["pcie_wifi_toggle_help_text"]}}</span>
+              <span x-show="wifi_upstream_uses('pcie')" class="text-indigo-500">{{locales["wifi_wan_radio_in_use"]}}</span>
+            </div>
           </div>
         </div>
 
@@ -310,6 +480,7 @@
       </div>
       <div class="p-5 flex-1 flex flex-col justify-between">
         <div>
+        {% if is_photonicat2 %}
         <!-- Power LED Control -->
         <div class="mb-6 flex space-x-2 items-start sm:space-x-4">
           <div class="flex flex-col flex-wrap">
@@ -495,6 +666,7 @@
             <div class="flex-1 text-sm text-gray-500">{{locales["beeper_on_end_time"]}}</div>
           </div>
         </div>
+        {% endif %}
         <div class="mb-6 flex space-x-2 items-center sm:space-x-4" x-show="cpu_data_loaded">
           <div class="flex flex-col flex-wrap">
             <div class="flex items-center w-40 text-gray-700 mb-2"><img src="/static/inapp/Eco.svg" class="mr-2 h-6 w-6" />{{locales["cpu_powersave"]}}</div>
@@ -503,8 +675,13 @@
               <div class="h-6 w-11 rounded-full border-2 border-gray-200 bg-gray-200 after:absolute after:top-0.5 after:left-0.5 after:h-5 after:w-5 after:rounded-full after:border after:border-gray-300 after:bg-white after:shadow-sm after:transition-all after:duration-300 peer-checked:border-blue-600 peer-checked:bg-blue-600 peer-checked:after:translate-x-full peer-checked:after:border-white"></div>
               <span class="ml-2 select-none text-base text-gray-400" x-text="cpu_scheduling_enabled ? '{{locales['common_enable']}}' : '{{locales['common_disable']}}'"></span>
             </label>
+            <div x-cloak x-show="cpu_scheduling_enabled" class="mt-1 text-xs"
+                 :class="cpu_scheduling_active ? 'text-green-600' : 'text-gray-400'"
+                 x-text="cpu_scheduling_active ? '{{locales['cpu_powersave_active']}}' : '{{locales['cpu_powersave_inactive']}}'"></div>
           </div>
-          <div class="ml-4 flex-1 text-left text-sm text-gray-400">{{locales["cpu_powersave_help_text"]}}</div>
+          <!-- RK3576 parks its A72 cores; RK3568 has four equal A55 cores and
+               falls back to the powersave governor, so describe what actually happens. -->
+          <div class="ml-4 flex-1 text-left text-sm text-gray-400">{% if is_photonicat2 %}{{locales["cpu_powersave_help_text"]}}{% else %}{{locales["cpu_powersave_help_text_pcat1"]}}{% endif %}</div>
         </div>
         {% if locales["oem_name"] and locales["oem_name"]|length > 2 and "photonicat 2" in locales["oem_name"]|lower %}
         <!-- Fan Control -->
@@ -575,8 +752,9 @@
                   type="range"
                   min="0"
                   max="9"
-                  x-model="fan_speed"
-                  @input="save_fan_speed()"
+                  step="1"
+                  x-model.number="fan_speed"
+                  @input="debouncedSaveFanSpeed()"
                   class="fan-slider w-48"
                 />
                 <span class="text-sm text-gray-600 whitespace-nowrap" x-text="fan_speed + '/9'"></span>
@@ -595,6 +773,7 @@
 
         {% endif %}
 
+        {% if is_photonicat2 %}
         <!-- Battery Charge Limit -->
         <div class="mb-6 flex space-x-2 items-start sm:space-x-4" x-show="charge_limit_loaded">
           <div class="flex flex-col w-full">
@@ -613,11 +792,11 @@
                 type="range"
                 min="80"
                 max="100"
-                step="5"
+                step="1"
                 x-model="charge_limit"
-                @change="save_charge_limit()"
+                @input="debounced_save_charge_limit()"
                 class="charge-limit-slider flex-1 h-2 rounded-lg appearance-none cursor-pointer"
-                :style="'background: linear-gradient(to right, #22c55e 0%, #22c55e ' + ((charge_limit - 80) * 5) + '%, #e5e7eb ' + ((charge_limit - 80) * 5) + '%, #e5e7eb 100%)'"
+                :style="'background: linear-gradient(to right, #22c55e 0%, #22c55e ' + ((charge_limit - 80) * 5) + '%, var(--pcat-track, #e5e7eb) ' + ((charge_limit - 80) * 5) + '%, var(--pcat-track, #e5e7eb) 100%)'"
               />
               <span class="text-xs font-medium text-gray-500 w-10">100%</span>
             </div>
@@ -627,6 +806,7 @@
             </div>
           </div>
         </div>
+        {% endif %}
 
         </div>
 
@@ -719,7 +899,7 @@
 
         <!-- Restart Confirmation Modal -->
         <div class="modal" x-cloak x-show="restart_modal_open">
-          <section class="modal-main w-full sm:w-1/2" @click.outside="restart_modal_open = true">
+          <section class="modal-main w-full sm:w-1/2" @click.outside="restart_modal_open = false">
             <div class="flex items-start justify-between rounded-t border-b p-3">
               <h3 class="text-base font-semibold text-gray-900 lg:text-xl">{{locales["operation_tip"]}}</h3>
               <button type="button" class="bg-transparent ml-auto inline-flex items-center rounded-lg p-1.5 text-sm text-gray-400 hover:bg-gray-200 hover:text-gray-900" @click="restart_modal_open = false">
@@ -790,6 +970,114 @@
     <!--/grow bg-white -->
   </div>
   <!--/w-full grid -->
+
+  <!-- Smart WAN Confirmation Modal -->
+  <div class="modal" x-cloak x-show="wifi_confirm_open">
+    <section class="modal-main w-full sm:w-1/2" @click.outside="wifi_confirm_open = false">
+      <div class="flex items-start justify-between rounded-t border-b p-3">
+        <h3 class="text-base font-semibold text-gray-900 lg:text-xl">{{locales["wifi_wan_confirm_title"]}}</h3>
+        <button type="button" class="bg-transparent ml-auto inline-flex items-center rounded-lg p-1.5 text-sm text-gray-400 hover:bg-gray-200 hover:text-gray-900" @click="wifi_confirm_open = false">
+          <svg class="h-5 w-5" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
+            <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd"></path>
+          </svg>
+        </button>
+      </div>
+      <div class="space-y-3 p-6 text-sm text-gray-700">
+        <p>{{locales["wifi_wan_confirm_body"]}}</p>
+        <p class="text-gray-500">{{locales["wifi_wan_confirm_body2"]}}</p>
+      </div>
+      <div class="flex items-center justify-end space-x-4 rounded-b border-t border-gray-200 p-4">
+        <button type="button" class="rounded-lg border border-gray-200 bg-white px-5 py-2.5 text-sm font-medium text-gray-500 hover:bg-gray-100 hover:text-gray-900 focus:z-10 focus:ring-4 focus:ring-gray-300" @click="wifi_confirm_open = false">
+          {{locales["common_no"]}}
+        </button>
+        <button type="button" class="hover:bg-blue-800 focus:ring-blue-300 rounded-lg bg-blue-700 px-5 py-2.5 text-center text-sm font-medium text-white focus:ring-4" @click="confirm_wifi_slot()">
+          {{locales["wifi_wan_confirm_ok"]}}
+        </button>
+      </div>
+    </section>
+  </div>
+
+  <!-- Smart WAN Scan Modal -->
+  <div class="modal" x-cloak x-show="wifi_scan_open">
+    <section class="modal-main w-full sm:w-2/3 lg:w-1/2" @click.outside="close_wifi_scan()">
+      <div class="flex items-start justify-between rounded-t border-b p-3">
+        <h3 class="text-base font-semibold text-gray-900 lg:text-xl">{{locales["wifi_wan_title"]}}</h3>
+        <button type="button" class="bg-transparent ml-auto inline-flex items-center rounded-lg p-1.5 text-sm text-gray-400 hover:bg-gray-200 hover:text-gray-900" @click="close_wifi_scan()">
+          <svg class="h-5 w-5" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
+            <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd"></path>
+          </svg>
+        </button>
+      </div>
+      <div class="max-h-96 overflow-y-auto p-4">
+        <div x-show="wifi_scanning" class="flex items-center justify-center py-8 text-gray-500">
+          <svg class="animate-spin mr-3 h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+          </svg>
+          <span>{{locales["wifi_wan_scanning"]}}</span>
+        </div>
+        <div x-show="!wifi_scanning && wifi_scan_error" class="py-4 text-center text-sm text-red-500" x-text="wifi_scan_error"></div>
+        <div x-show="!wifi_scanning" class="divide-y divide-gray-100">
+          <template x-for="net in wifi_scan_results" :key="net.ssid + '|' + net.band">
+            <div>
+              <div class="flex items-center justify-between py-2" :class="net.supported ? 'cursor-pointer hover:bg-gray-50' : 'opacity-50'" @click="select_wifi(net)">
+                <div class="flex min-w-0 items-center space-x-2">
+                  <img :src="scan_signal_img(net)" class="h-4 w-auto flex-shrink-0" />
+                  <span class="truncate text-sm font-medium text-gray-700" x-text="net.ssid"></span>
+                  <span class="flex-shrink-0 rounded bg-gray-100 px-1 text-xs text-gray-500" x-text="wifi_band_label(net.band)"></span>
+                  <svg x-show="net.encryption !== 'none'" class="h-3 w-3 flex-shrink-0 text-gray-400" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
+                    <path fill-rule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clip-rule="evenodd"></path>
+                  </svg>
+                  <span x-show="net.saved" class="flex-shrink-0 text-xs text-green-600">{{locales["wifi_wan_saved"]}}</span>
+                  <span x-show="!net.supported" class="flex-shrink-0 text-xs text-gray-400">{{locales["wifi_wan_unsupported"]}}</span>
+                </div>
+                <span class="ml-2 flex-shrink-0 text-xs text-gray-400" x-text="net.signal + ' dBm'"></span>
+              </div>
+              <div x-show="wifi_selected && wifi_selected.ssid === net.ssid && wifi_selected.band === net.band" x-cloak class="flex flex-wrap items-center gap-2 pb-3 pl-6">
+                <input type="password" maxlength="63" class="w-48 rounded border-gray-300 text-sm" placeholder="{{locales['wifi_wan_password']}}" x-model="wifi_password" @keyup.enter="connect_selected()" />
+                <button type="button" class="rounded bg-pcatblue px-3 py-1.5 text-xs font-medium text-white hover:bg-pcatblue-400 disabled:opacity-60" :disabled="wifi_connecting || wifi_password.length < 8" @click="connect_selected()">
+                  <span x-show="!wifi_connecting">{{locales["wifi_wan_connect"]}}</span>
+                  <span x-show="wifi_connecting">{{locales["wifi_wan_connecting"]}}</span>
+                </button>
+                <label class="flex items-center gap-1 text-xs text-gray-500">
+                  <input type="checkbox" class="rounded border-gray-300" x-model="wifi_random_mac" :disabled="wifi_custom_mac !== ''" />
+                  <span title="{{locales['wifi_wan_random_mac_help']}}">{{locales["wifi_wan_random_mac"]}}</span>
+                </label>
+                <input type="text" class="w-44 rounded border-gray-300 px-2 py-1 text-xs" maxlength="17"
+                       placeholder="{{locales['wifi_wan_custom_mac']}}" x-model="wifi_custom_mac"
+                       title="{{locales['wifi_wan_custom_mac_help']}}" />
+                <div class="w-full">
+                  <button type="button" class="flex items-center gap-1.5 text-xs text-gray-400 hover:text-gray-600" @click="scan_login_cmd_open = !scan_login_cmd_open">
+                    <span class="flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full border border-gray-300 text-[10px] leading-none">?</span>
+                    <span>{{locales["wifi_wan_login_cmd"]}}</span>
+                  </button>
+                  <div x-show="scan_login_cmd_open" x-cloak class="mt-1">
+                    <p class="mb-1 text-xs text-gray-400">{{locales["wifi_wan_login_cmd_explain"]}}</p>
+                    <input type="text" maxlength="1024" class="w-full rounded border-gray-300 text-xs" placeholder="{{locales['wifi_wan_login_cmd']}}" x-model="wifi_login_cmd" />
+                  </div>
+                </div>
+              </div>
+            </div>
+          </template>
+        </div>
+        <div x-show="wifi_connect_error && wifi_scan_open" class="mt-2 text-center text-xs text-red-500" x-text="wifi_connect_error"></div>
+        <div x-show="wifi_connecting" class="mt-2 flex items-center justify-center text-xs text-gray-500">
+          <svg class="animate-spin mr-2 h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+          </svg>
+          <span>{{locales["wifi_wan_connecting"]}}</span>
+        </div>
+      </div>
+      <div class="flex items-center justify-between rounded-b border-t border-gray-200 p-3">
+        <button type="button" class="text-sm text-pcatblue underline hover:no-underline" @click="open_hidden_from_scan()">{{locales["wifi_wan_hidden_join"]}}</button>
+        <div class="flex items-center space-x-4">
+          <button type="button" class="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-500 hover:bg-gray-100 hover:text-gray-900 disabled:opacity-60" :disabled="wifi_scanning" @click="start_wifi_scan()">{{locales["wifi_wan_rescan"]}}</button>
+          <button type="button" class="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-500 hover:bg-gray-100 hover:text-gray-900" @click="close_wifi_scan()">{{locales["wifi_wan_cancel"]}}</button>
+        </div>
+      </div>
+    </section>
+  </div>
 </div>
 <!--/container.w-full-->
 {% endblock %}
@@ -802,23 +1090,52 @@
     Alpine.data("adv_settings", () => ({
       init() {
         this.fetch_network_mode();
+        this.fetch_wan_priority();
         this.fetch_wwan_power();
         this.fetch_apn_settings();
         this.fetch_cpu_scheduling();
         this.fetch_fan_mode();
         this.fetch_fan_speed();
         this.fetch_actual_fan_speed();
+        {% if is_photonicat2 %}
         this.fetch_power_led_settings();
         this.fetch_beeper_settings();
         this.fetch_power_led_status();
         this.fetch_beeper_status();
         this.fetch_charge_limit();
+        // The first fetch fires an async web->daemon->MCU refresh; fetch
+        // again shortly after so the slider starts on the MCU's actual value.
+        setTimeout(() => this.fetch_charge_limit(), 2000);
+        {% endif %}
+        this.fetch_wifi_wan();
         setInterval(() => {
+          if (document.hidden) return; // skip polling in background tabs
           this.fetch_cpu_scheduling();
           this.fetch_actual_fan_speed();
+          {% if is_photonicat2 %}
           this.fetch_power_led_status();
           this.fetch_beeper_status();
+          {% endif %}
+          if (!this.saving_network) {
+            this.fetch_wan_priority();
+          }
+          if (this.wifi_slot_enabled() && !this.wifi_connecting) {
+            this.fetch_wifi_wan();
+          }
         }, 5000);
+        {% if is_photonicat2 %}
+        // Keep the charge limit mirrored to the MCU: each fetch triggers an
+        // MCU re-query and applies the answer (unless the user is adjusting).
+        setInterval(() => {
+          if (document.hidden) return;
+          this.fetch_charge_limit();
+        }, 30000);
+        {% endif %}
+        // Smooth countdown for a captive-portal login window; the 5s poll
+        // above re-syncs it to the device's own clock.
+        setInterval(() => {
+          if (this.portal_remaining > 0) this.portal_remaining -= 1;
+        }, 1000);
       },
       tab_page: (window.location.hash && ["network_mode", "apn_setup"].includes(window.location.hash.substring(1))) ? window.location.hash.substring(1) : "network_mode",
       modal_open: false,
@@ -829,6 +1146,9 @@
       shutting_down: false,
       saving_network: false,
       cpu_scheduling_enabled: false,
+      // Live core state. Differs from the preference above while on DC, where
+      // powersave is enabled but deliberately not engaged.
+      cpu_scheduling_active: false,
       cpu_data_loaded: false,
       fan_mode: "smart_quiet",
       fan_speed: 5,
@@ -846,10 +1166,13 @@
       saving_beeper: false,
       charge_limit: 100,
       charge_limit_loaded: false,
+      charge_limit_touch_ms: 0,   // last time the user moved the slider
 
       // Timeout IDs for debounced saves
+      chargeLimitTimeoutId: null,
       powerLedTimeoutId: null,
       beeperTimeoutId: null,
+      fanSpeedTimeoutId: null,
 
       // Notification state
       notification: {
@@ -860,14 +1183,588 @@
         type: 'info' // 'success', 'error', 'info'
       },
 
-      network_mode: "auto", // "auto", "eth_only", "cell_only"
+      network_mode: "auto", // legacy modes or "priority" (WAN priority table)
       wan_enabled: "unknown",
+      wan_mode: "unknown",
       sim_enabled: "unknown",
       lan_enabled: "unknown",
+      lan_mode: "unknown",
       onboard_wifi_enabled: "unknown",
       pcie_wifi_enabled: "unknown",
       wwan_powered: "unknown",
       wwan_power_saving: false,
+
+      // WAN priority table
+      wan_priority: [],
+      active_slot: "",
+      wifi_radio: "onboard",
+      wifi_radios: { onboard: true, pcie: false },
+      priority_dirty: false,
+      slot_labels: {
+        wan: "{{locales['wan_slot_wan']}}",
+        wifi: "{{locales['wan_slot_wifi']}}",
+        cellular: "{{locales['wan_slot_cellular']}}",
+      },
+      health_texts: {
+        online: "{{locales['wan_health_online']}}",
+        offline: "{{locales['wan_health_offline']}}",
+        portal: "{{locales['wan_health_portal']}}",
+        down: "{{locales['wan_health_down']}}",
+      },
+
+      // Captive-portal login window (see wan_manager.start_portal_login)
+      portal_login: { slot: "", remaining: 0, window: 900 },
+      portal_remaining: 0, // ticks down locally between the 5s polls
+      portal_login_busy: false,
+      portal_login_error: "",
+      portal_texts: {
+        tip: "{{locales.wan_portal_login_tip}}",
+        active: "{{locales.wan_portal_login_active}}",
+      },
+
+      // Smart WAN upstream WiFi state
+      wifi_wan: { configured: false, sta_enabled: false, ssid: "", encryption: "none", random_mac: false, band: "", associated: false, connected: false, internet: null, captive_portal: false, portal_url: "", ip: "", ip6: "", signal: null, bitrate: null, uptime: 0 },
+      onboard_wifi_exists: false,
+      pcie_wifi_exists: false,
+      wifi_eap_supported: false,
+      wifi_confirm_open: false,
+      wifi_saved_networks: [],
+      wifi_saved_open: false,
+      wan_help_open: false,
+      wifi_scan_open: false,
+      wifi_scanning: false,
+      wifi_scan_results: [],
+      wifi_scan_error: "",
+      wifi_selected: null,
+      wifi_password: "",
+      wifi_random_mac: false,
+      wifi_custom_mac: "",
+      wifi_login_cmd: "",
+      scan_login_cmd_open: false,
+      hidden_login_cmd_open: false,
+      wifi_connecting: false,
+      wifi_connect_error: "",
+      wifi_hidden_open: false,
+      wifi_hidden: { ssid: "", band: "2g", encryption: "psk2", password: "", eap_type: "peap", identity: "", anon_identity: "", ca_cert: "", random_mac: false, custom_mac: "", login_cmd: "" },
+
+      // ── WAN priority table helpers ──
+      fetch_wan_priority() {
+        fetch("/api/v1/wan_priority.json")
+          .then((response) => response.json())
+          .then((data) => {
+            if (data.status !== "ok") return;
+            this.active_slot = data.active_slot || "";
+            this.wifi_radios = data.wifi_radios || this.wifi_radios;
+            // The window lives on the device, so a reload (or a second
+            // browser) picks up the countdown already in progress.
+            this.set_portal_login(data.portal_login);
+            if (!this.priority_dirty) {
+              this.wan_priority = data.priority || [];
+              this.wifi_radio = data.wifi_radio || "onboard";
+            } else {
+              // keep the user's unsaved order/toggles; merge live status only
+              const by_id = {};
+              (data.priority || []).forEach((row) => (by_id[row.id] = row));
+              this.wan_priority.forEach((row) => {
+                const live = by_id[row.id];
+                if (live) {
+                  row.exists = live.exists;
+                  row.up = live.up;
+                  row.device = live.device;
+                  row.ip = live.ip;
+                  row.health = live.health;
+                  row.metric = live.metric;
+                  row.metric_uci = live.metric_uci;
+                  row.metric_route = live.metric_route;
+                  row.demoted = live.demoted;
+                }
+              });
+            }
+          })
+          .catch(() => {});
+      },
+
+      slot_label(id) {
+        return this.slot_labels[id] || id;
+      },
+
+      // "PCIe WiFi not detected" / "Onboard WiFi not detected": which of the
+      // two radios the upstream relay is waiting for. Falls back to the plain
+      // absent text if the API reports both alive (a transient between polls).
+      wifi_absent_label() {
+        const missing = [];
+        if (!this.wifi_radios.onboard) missing.push('{{locales["wifi_radio_onboard"]}}');
+        if (!this.wifi_radios.pcie) missing.push('{{locales["wifi_radio_pcie"]}}');
+        if (!missing.length) return '{{locales["wan_priority_absent"]}}';
+        return '{{locales["wifi_radio_absent"]}}'.replace("%s", missing.join(" / "));
+      },
+
+      cellular_icon: "{% if is_em05_modem %}/static/inapp/4G.svg{% else %}/static/inapp/5G.svg{% endif %}",
+
+      slot_icon(slot) {
+        if (slot.id === "cellular") return this.cellular_icon;
+        const base = slot.id === "wifi" ? "wifi" : "eth";
+        const on = slot.enabled && slot.up;
+        return "/static/" + base + (on ? "_active.svg" : "_inactive.svg");
+      },
+
+      slot_detail(slot) {
+        // WiFi upstream row already has an icon, so the signal is shown as
+        // plain dBm here (the arc fan is used on the connected card / scan list).
+        // Append live metrics (ladder / UCI / route) so a brief dialer steal is
+        // visible on the row itself without opening a shell.
+        const parts = [];
+        if (slot.id === "wifi" && this.wifi_wan && this.wifi_wan.ssid) {
+          parts.push(this.wifi_wan.ssid);
+          if (this.wifi_wan.signal) parts.push(this.wifi_wan.signal + " dBm");
+        }
+        if (slot.device) parts.push(slot.device);
+        if (slot.ip) parts.push(slot.ip);
+        const mParts = [];
+        if (slot.metric != null) mParts.push("m" + slot.metric);
+        if (slot.metric_uci != null && slot.metric_uci !== slot.metric) {
+          mParts.push("uci " + slot.metric_uci);
+        }
+        if (slot.metric_route != null) mParts.push("rt " + slot.metric_route);
+        if (mParts.length) parts.push(mParts.join("/"));
+        return parts.join("  ");
+      },
+
+      health_label(slot) {
+        if (!slot.enabled) return "";
+        return this.health_texts[slot.health] || "";
+      },
+
+      health_color(slot) {
+        let color = "text-gray-400";
+        if (!slot.enabled) color = "text-gray-300";
+        else if (slot.health === "online") color = "text-green-600";
+        else if (slot.health === "portal") color = "text-amber-600";
+        else if (slot.health === "offline") color = "text-red-500";
+        // The health cell is a <button> so one state can be tapped; the others
+        // must not pretend to be (the CSS preflight makes every button a
+        // pointer). The underline marks the one that is.
+        return this.health_clickable(slot)
+          ? color + " underline cursor-pointer"
+          : color + " cursor-default";
+      },
+
+      // ── captive-portal login window ──
+      // Only a portal-locked connection has a login page to reach, and only
+      // one window runs at a time (the backend enforces both).
+      health_clickable(slot) {
+        return !!(slot.enabled && slot.health === "portal" && !this.portal_login.slot);
+      },
+
+      health_title(slot) {
+        return this.health_clickable(slot) ? this.portal_texts.tip : "";
+      },
+
+      portal_login_running() {
+        return !!this.portal_login.slot && this.portal_remaining > 0;
+      },
+
+      portal_login_title() {
+        return this.slot_label(this.portal_login.slot) + " · " + this.portal_texts.active;
+      },
+
+      portal_login_countdown() {
+        const left = Math.max(0, this.portal_remaining);
+        const mm = Math.floor(left / 60);
+        const ss = left % 60;
+        return mm + ":" + String(ss).padStart(2, "0");
+      },
+
+      // Login page captured by the probe on the held connection, when it
+      // redirected somewhere we could pin down.
+      portal_login_url() {
+        const slot = this.wan_priority.find((s) => s.id === this.portal_login.slot);
+        return (slot && slot.portal_url) || "";
+      },
+
+      start_portal_login(slot) {
+        if (!this.health_clickable(slot) || this.portal_login_busy) return;
+        this.portal_login_busy = true;
+        this.portal_login_error = "";
+        fetch("/api/v1/wan_portal_login.json", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "start", slot: slot.id }),
+        })
+          .then((response) => response.json())
+          .then((data) => {
+            if (data.status !== "ok") {
+              this.portal_login_error = data.message || "";
+              return;
+            }
+            this.set_portal_login(data.portal_login);
+          })
+          .catch(() => {})
+          .finally(() => {
+            this.portal_login_busy = false;
+            this.fetch_wan_priority();
+          });
+      },
+
+      cancel_portal_login() {
+        this.portal_login_busy = true;
+        fetch("/api/v1/wan_portal_login.json", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "cancel" }),
+        })
+          .then((response) => response.json())
+          .then((data) => this.set_portal_login((data || {}).portal_login))
+          .catch(() => {})
+          .finally(() => {
+            this.portal_login_busy = false;
+            this.fetch_wan_priority();
+          });
+      },
+
+      set_portal_login(state) {
+        this.portal_login = state || { slot: "", remaining: 0, window: 900 };
+        this.portal_remaining = this.portal_login.remaining || 0;
+      },
+
+      set_wifi_radio(cls) {
+        if (this.wifi_radio === cls) return;
+        this.wifi_radio = cls;
+        this.priority_dirty = true;
+      },
+
+      toggle_slot(slot, ev) {
+        const checked = ev.target.checked;
+        // Enabling the WiFi upstream parks that radio's own hotspot; confirm
+        // first (same warning the old Smart WAN button showed).
+        if (slot.id === "wifi" && checked && !slot.enabled) {
+          ev.target.checked = false; // keep the switch off until confirmed
+          this.wifi_confirm_open = true;
+          return;
+        }
+        slot.enabled = checked;
+        this.priority_dirty = true;
+      },
+
+      confirm_wifi_slot() {
+        this.wifi_confirm_open = false;
+        const slot = this.wan_priority.find((s) => s.id === "wifi");
+        if (slot) slot.enabled = true;
+        this.priority_dirty = true;
+      },
+
+      wifi_slot_enabled() {
+        const slot = this.wan_priority.find((s) => s.id === "wifi");
+        return !!(slot && slot.enabled);
+      },
+
+      // A parked WAN port cannot carry the uplink, so while the WAN NIC is
+      // off its priority slot is locked and shown off. The underlying enabled
+      // flag is left alone: the backend remembers it and puts the slot back
+      // when the NIC returns to auto/on.
+      wan_slot_locked(slot) {
+        return slot.id === "wan" && this.wan_mode === "off";
+      },
+
+      // WiFi upstream relays: one radio joins the upstream network, the other
+      // keeps serving this device's own hotspot. With one radio the relay
+      // would park the only AP (and this page with it), so the slot is locked
+      // unless both radios are alive. The backend enforces the same rule.
+      wifi_upstream_capable() {
+        return !!(this.wifi_radios.onboard && this.wifi_radios.pcie);
+      },
+
+      wifi_slot_locked(slot) {
+        return slot.id === "wifi" && !this.wifi_upstream_capable();
+      },
+
+      slot_locked(slot) {
+        return this.wan_slot_locked(slot) || this.wifi_slot_locked(slot);
+      },
+
+      slot_locked_tip(slot) {
+        if (this.wan_slot_locked(slot)) return '{{locales["wan_slot_locked_tip"]}}';
+        if (this.wifi_slot_locked(slot)) return '{{locales["wifi_slot_locked_tip"]}}';
+        return "";
+      },
+
+      saved_networks_summary() {
+        return '{{locales["wifi_wan_saved_count"]}}'.replace("%d", this.wifi_saved_networks.length);
+      },
+
+      open_hidden_from_scan() {
+        this.close_wifi_scan();
+        this.wifi_hidden_open = true;
+      },
+
+      wifi_upstream_uses(cls) {
+        return this.wifi_slot_enabled() && this.wifi_radio === cls;
+      },
+
+      // A relaying radio is not "Disabled" — its hotspot is paused while it
+      // carries the upstream link; label it as such.
+      wifi_state_text(cls, state) {
+        if (this.wifi_upstream_uses(cls)) return "{{locales['wifi_state_upstream']}}";
+        return this.getInterfaceStateText(state);
+      },
+
+      fetch_wifi_wan() {
+        fetch("/api/v1/wifi_wan.json")
+          .then((response) => response.json())
+          .then((data) => {
+            if (data.status === "ok") {
+              this.wifi_wan = data.state;
+              this.wifi_saved_networks = data.saved_networks || [];
+              this.wifi_eap_supported = !!data.eap_supported;
+            }
+          })
+          .catch(() => {});
+      },
+
+      open_wifi_scan() {
+        this.wifi_scan_open = true;
+        this.wifi_connect_error = "";
+        this.start_wifi_scan();
+      },
+
+      close_wifi_scan() {
+        this.wifi_scan_open = false;
+        this.wifi_selected = null;
+        this.wifi_password = "";
+        this.wifi_login_cmd = "";
+      },
+
+      start_wifi_scan() {
+        this.wifi_scanning = true;
+        this.wifi_scan_error = "";
+        this.wifi_scan_results = [];
+        this.wifi_selected = null;
+        this.wifi_login_cmd = "";
+        fetch("/api/v1/wifi_wan/scan.json")
+          .then((response) => response.json())
+          .then((data) => {
+            this.wifi_scanning = false;
+            if (data.status === "ok") {
+              this.wifi_scan_results = data.networks || [];
+              if (this.wifi_scan_results.length === 0) {
+                this.wifi_scan_error = "{{locales['wifi_wan_no_results']}}";
+              }
+            } else {
+              this.wifi_scan_error = "{{locales['wifi_wan_scan_failed']}}";
+            }
+          })
+          .catch(() => {
+            this.wifi_scanning = false;
+            this.wifi_scan_error = "{{locales['wifi_wan_scan_failed']}}";
+          });
+      },
+
+      select_wifi(net) {
+        if (!net.supported || this.wifi_connecting) return;
+        this.wifi_connect_error = "";
+        if (net.encryption === "eap") {
+          // Enterprise needs a username/identity: route to the advanced form,
+          // prefilled, so the user can fill in identity + password.
+          this.close_wifi_scan();
+          this.wifi_hidden_open = true;
+          this.wifi_hidden.ssid = net.ssid;
+          this.wifi_hidden.band = net.band || "2g";
+          this.wifi_hidden.encryption = "eap";
+          return;
+        }
+        if (net.encryption === "none") {
+          this.connect_wifi({ ssid: net.ssid, encryption: "none", band: net.band, channel: net.channel, random_mac: this.wifi_random_mac, custom_mac: this.wifi_custom_mac.trim() });
+        } else if (net.saved) {
+          this.connect_wifi({ ssid: net.ssid, band: net.band, channel: net.channel, use_saved: true });
+        } else {
+          this.wifi_selected = net;
+          this.wifi_password = "";
+          this.wifi_login_cmd = "";
+        }
+      },
+
+      connect_selected() {
+        const net = this.wifi_selected;
+        if (!net || this.wifi_connecting) return;
+        if (this.wifi_password.length < 8) {
+          this.wifi_connect_error = "{{locales['wifi_wan_password_short']}}";
+          return;
+        }
+        this.connect_wifi({ ssid: net.ssid, encryption: net.encryption, band: net.band, channel: net.channel, password: this.wifi_password, random_mac: this.wifi_random_mac, custom_mac: this.wifi_custom_mac.trim(), login_cmd: this.wifi_login_cmd });
+      },
+
+      connect_saved(net) {
+        if (this.wifi_connecting) return;
+        this.wifi_connect_error = "";
+        this.connect_wifi({ ssid: net.ssid, use_saved: true });
+      },
+
+      connect_hidden() {
+        if (this.wifi_connecting) return;
+        const h = this.wifi_hidden;
+        if (!h.ssid) return;
+        const payload = { ssid: h.ssid, encryption: h.encryption, band: h.band, password: h.password, random_mac: h.random_mac, custom_mac: (h.custom_mac || "").trim(), login_cmd: h.login_cmd };
+        if (h.encryption === "eap") {
+          if (!h.identity) { this.wifi_connect_error = "{{locales['wifi_wan_identity']}}"; return; }
+          if (!h.password) { this.wifi_connect_error = "{{locales['wifi_wan_password']}}"; return; }
+          payload.eap_type = h.eap_type;
+          payload.identity = h.identity;
+          payload.anonymous_identity = h.anon_identity;
+          payload.ca_cert = h.ca_cert;
+        } else if (h.encryption !== "none" && h.password.length < 8) {
+          this.wifi_connect_error = "{{locales['wifi_wan_password_short']}}";
+          return;
+        }
+        this.connect_wifi(payload);
+      },
+
+      connect_wifi(payload) {
+        this.wifi_connecting = true;
+        this.wifi_connect_error = "";
+        fetch("/api/v1/wifi_wan.json", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        })
+          .then((response) => response.json())
+          .then((data) => {
+            if (data.status === "ok") {
+              // Joining an upstream enables the wifi slot; the server moves the
+              // device into priority mode (the new Smart WAN) if it wasn't
+              // already there.
+              this.network_mode = "priority";
+              const slot = this.wan_priority.find((s) => s.id === "wifi");
+              if (slot) slot.enabled = true;
+              this.poll_wifi_connection();
+            } else {
+              this.wifi_connecting = false;
+              this.wifi_connect_error = data.message || "{{locales['wifi_wan_connect_failed']}}";
+            }
+          })
+          .catch(() => {
+            this.wifi_connecting = false;
+            this.wifi_connect_error = "{{locales['wifi_wan_connect_failed']}}";
+          });
+      },
+
+      poll_wifi_connection() {
+        let attempts = 0;
+        const tick = () => {
+          attempts++;
+          fetch("/api/v1/wifi_wan.json")
+            .then((response) => response.json())
+            .then((data) => {
+              if (data.status === "ok") {
+                this.wifi_wan = data.state;
+                this.wifi_saved_networks = data.saved_networks || [];
+                this.wifi_eap_supported = !!data.eap_supported;
+                if (data.state.connected) {
+                  this.wifi_connecting = false;
+                  this.close_wifi_scan();
+                  this.wifi_hidden_open = false;
+                  this.showNotification(
+                    "Connected to " + data.state.ssid,
+                    "已连接到 " + data.state.ssid,
+                    "success"
+                  );
+                  this.fetch_network_mode();
+                  return;
+                }
+              }
+              if (attempts < 20) {
+                setTimeout(tick, 2000);
+              } else {
+                this.wifi_connecting = false;
+                this.wifi_connect_error = "{{locales['wifi_wan_connect_failed']}}";
+              }
+            })
+            .catch(() => {
+              if (attempts < 20) {
+                setTimeout(tick, 2000);
+              } else {
+                this.wifi_connecting = false;
+              }
+            });
+        };
+        setTimeout(tick, 2000);
+      },
+
+      forget_wifi(ssid) {
+        fetch("/api/v1/wifi_wan/forget.json", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ssid: ssid }),
+        })
+          .then((response) => response.json())
+          .then(() => {
+            this.fetch_wifi_wan();
+          })
+          .catch(() => {});
+      },
+
+      wifi_signal_level(net) {
+        const q = (net.quality || 0) / (net.quality_max || 70);
+        if (q > 0.66) return 3;
+        if (q > 0.4) return 2;
+        return 1;
+      },
+
+      // iPhone-style WiFi fan (concentric arcs) as a 0..4 level from RSSI
+      // (dBm): >=-55 full, -55..-66 three, -66..-77 two, -77..-88 one, else 0.
+      // Renders wifi_sigN.svg — the same progressive gray→dark arc fan used for
+      // the cellular signal in the status bar, so both indicators match.
+      wifi_dbm_to_level(dbm) {
+        if (dbm === null || dbm === undefined) return 0;
+        if (dbm >= -55) return 4;
+        if (dbm >= -66) return 3;
+        if (dbm >= -77) return 2;
+        if (dbm >= -88) return 1;
+        return 0;
+      },
+
+      // <img> src for the connected upstream's signal fan, from its live dBm.
+      wifi_wan_signal_img() {
+        return "/static/wifi_sig" + this.wifi_dbm_to_level(this.wifi_wan.signal) + ".svg";
+      },
+
+      // Fan level for a scanned network: prefer RSSI (dBm), else link quality.
+      scan_signal_img(net) {
+        let level;
+        if (net.signal !== null && net.signal !== undefined && net.signal !== 0) {
+          level = this.wifi_dbm_to_level(net.signal);
+        } else {
+          const q = (net.quality || 0) / (net.quality_max || 70);
+          level = q >= 0.8 ? 4 : q >= 0.6 ? 3 : q >= 0.4 ? 2 : q > 0 ? 1 : 0;
+        }
+        return "/static/wifi_sig" + level + ".svg";
+      },
+
+      wifi_band_label(band) {
+        if (band === "2g") return "2.4G";
+        if (band === "5g") return "5G";
+        if (band === "6g") return "6G";
+        return "";
+      },
+
+      wifi_wan_state_text() {
+        if (this.wifi_connecting) return "{{locales['wifi_wan_connecting']}}";
+        if (this.wifi_wan.connected) return "{{locales['wifi_wan_connected']}}";
+        // Enabled but not joined to any hotspot (out of range / roaming): standby.
+        if (this.wifi_wan.sta_enabled && !this.wifi_wan.associated) return "{{locales['wifi_wan_standby']}}";
+        return "{{locales['wifi_wan_disconnected']}}";
+      },
+
+      wifi_wan_detail_text() {
+        // Signal is shown as the arc fan (wifi_wan_signal_img) with the dBm on
+        // its hover title, so this text is just the IP.
+        return this.wifi_wan.ip || "";
+      },
+
+      wifi_wan_status_color() {
+        if (this.wifi_wan.connected) return "bg-green-500";
+        if (this.wifi_connecting) return "bg-yellow-400 animate-pulse";
+        return "bg-gray-400";
+      },
 
       // Helper function to get display text for interface states
       getInterfaceStateText(state) {
@@ -889,6 +1786,28 @@
       // Helper function to determine if interface is in unknown state
       isInterfaceUnknown(state) {
         return state === "unknown";
+      },
+
+      // WAN and LAN NICs are three-state: auto / on / off. "auto" parks the
+      // PHY and re-probes it on a backoff, but only while the unit runs on
+      // battery -- on the adapter it behaves exactly like "on".
+      //
+      // photonicat 1 does not ship the eth-powersave package that implements
+      // the parking (it is not in armv8.mk's DEVICE_PACKAGES for
+      // ariaboard_photonicat), so "auto" there would be a button that changes
+      // nothing: the selector offers on/off only.
+      nic_modes: {% if is_photonicat2 %}["auto", "on", "off"]{% else %}["on", "off"]{% endif %},
+
+      nic_mode_label(m) {
+        if (m === "auto") return '{{locales["nic_mode_auto"]}}';
+        if (m === "on") return '{{locales["nic_mode_on"]}}';
+        return '{{locales["nic_mode_off"]}}';
+      },
+
+      nic_mode_tip(m) {
+        if (m === "auto") return '{{locales["nic_mode_auto_tip"]}}';
+        if (m === "on") return '{{locales["nic_mode_on_tip"]}}';
+        return '{{locales["nic_mode_off_tip"]}}';
       },
 
       apn_auto_mode: true,
@@ -1012,63 +1931,66 @@
       request_set_network_mode() {
         this.modal_open = false;
         this.saving_network = true;
-        
-        // Set interface states based on network mode
-        let wan_state = this.wan_enabled;
-        let sim_state = this.sim_enabled;
-        
-        if (this.network_mode === 'eth_only') {
-          wan_state = true;
-          sim_state = false;
-        } else if (this.network_mode === 'cell_only') {
-          wan_state = false;
-          sim_state = true;
-        } else if (this.network_mode === 'all_off') {
-          wan_state = false;
-          sim_state = false;
-        } else {
-          // auto mode - keep current states
-          wan_state = this.wan_enabled;
-          sim_state = this.sim_enabled;
-        }
-        
-        post_data = {
-          network_mode: this.network_mode,
-          wan: wan_state,
-          sim: sim_state,
-          lan: this.lan_enabled === "unknown" ? false : this.lan_enabled,
-          onboard_wifi: this.onboard_wifi_enabled === "unknown" ? false : this.onboard_wifi_enabled,
-          pcie_wifi: this.pcie_wifi_enabled === "unknown" ? false : this.pcie_wifi_enabled,
-        };
-        const requestOptions = {
+
+        // 1) Apply the WAN priority table (order + per-slot enable + radio),
+        // 2) then sync the LAN NIC / AP radio toggles via the legacy endpoint
+        //    (which leaves WAN/cellular/STA alone in priority mode).
+        const priority = this.wan_priority.map((s) => ({ id: s.id, enabled: s.enabled === true }));
+        fetch("/api/v1/wan_priority.json", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(post_data),
-        };
-        fetch("/api/v1/network_interfaces.json", requestOptions)
+          body: JSON.stringify({ priority: priority, wifi_radio: this.wifi_radio }),
+        })
           .then((response) => response.json())
           .then((data) => {
-            if (data.status === "ok") {
-              // Keep loading for a few seconds as network changes take time
-              setTimeout(() => {
-                this.saving_network = false;
-                this.showNotification(
-                  "Network settings saved successfully",
-                  "网络设置保存成功",
-                  'success'
-                );
-              }, 6000);
-            } else {
-              this.saving_network = false;
-              this.showNotification(
-                '{{locales["network_settings_warning"]}}',
-                'warning'
-              );
+            if (data.status !== "ok") {
+              throw new Error(data.message || "priority apply failed");
             }
+            this.priority_dirty = false;
+            this.network_mode = "priority";
+            // Only the radio actually relaying the upstream must stay
+            // powered. Forcing BOTH radios on whenever the WiFi slot was
+            // enabled silently discarded the other radio's toggle -- the
+            // switch flipped in the UI and nothing happened. Mirror the
+            // disable logic on the toggles themselves (wifi_upstream_uses):
+            // what is clickable is what gets honored.
+            const post_data = {
+              network_mode: "priority",
+              wan: true,
+              sim: true,
+              lan: this.lan_mode === "unknown" ? true : (this.lan_mode !== "off"),
+              lan_mode: this.lan_mode === "unknown" ? "auto" : this.lan_mode,
+              wan_mode: this.wan_mode === "unknown" ? "auto" : this.wan_mode,
+              onboard_wifi: this.wifi_upstream_uses('onboard') ? true : (this.onboard_wifi_enabled === "unknown" ? false : this.onboard_wifi_enabled),
+              pcie_wifi: this.wifi_upstream_uses('pcie') ? true : (this.pcie_wifi_enabled === "unknown" ? false : this.pcie_wifi_enabled),
+            };
+            return fetch("/api/v1/network_interfaces.json", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(post_data),
+            }).then((response) => response.json());
+          })
+          .then(() => {
+            // Keep loading for a few seconds as network changes take time
+            setTimeout(() => {
+              this.saving_network = false;
+              this.fetch_wan_priority();
+              this.fetch_network_mode();
+              this.showNotification(
+                "Network settings saved successfully",
+                "网络设置保存成功",
+                'success'
+              );
+            }, 5000);
           })
           .catch((error) => {
             this.saving_network = false;
+            // Re-sync the switches with reality: leaving them showing the
+            // failed request looks exactly like a change that applied.
+            this.fetch_wan_priority();
+            this.fetch_network_mode();
             this.showNotification(
+              '{{locales["network_settings_warning"]}}',
               '{{locales["network_settings_warning"]}}',
               'warning'
             );
@@ -1082,11 +2004,15 @@
           .then((data) => {
             // Handle unknown states - if API doesn't return values, keep as unknown
             this.wan_enabled = data.wan_enabled !== undefined ? data.wan_enabled : "unknown";
+            this.wan_mode = data.wan_mode !== undefined ? data.wan_mode : "unknown";
             this.sim_enabled = data.sim_enabled !== undefined ? data.sim_enabled : "unknown";
             this.lan_enabled = data.lan_enabled !== undefined ? data.lan_enabled : "unknown";
+            this.lan_mode = data.lan_mode !== undefined ? data.lan_mode : "unknown";
             this.onboard_wifi_enabled = data.onboard_wifi_enabled !== undefined ? data.onboard_wifi_enabled : "unknown";
             this.pcie_wifi_enabled = data.pcie_wifi_enabled !== undefined ? data.pcie_wifi_enabled : "unknown";
-            
+            this.onboard_wifi_exists = data.onboard_wifi_exists === true;
+            this.pcie_wifi_exists = data.pcie_wifi_exists === true;
+
             // Set network_mode based on the response
             if (data.network_mode) {
               this.network_mode = data.network_mode;
@@ -1188,7 +2114,9 @@
 
             if (data.status == "ok") {
               setTimeout(() => {
-                this.reboot_dlg_open = true;
+                // reboot_dlg_open lives in the _base.html body scope, not this
+                // component — dispatch a window event the reboot modal listens for.
+                window.dispatchEvent(new CustomEvent('open-reboot-dialog'));
               }, 3000);
             }
           })
@@ -1208,6 +2136,7 @@
           .then((response) => response.json())
           .then((data) => {
             this.cpu_scheduling_enabled = data.cpu_scheduling_enabled;
+            this.cpu_scheduling_active = data.cpu_scheduling_active === true;
             this.cpu_data_loaded = true;
           })
           .catch((error) => {
@@ -1291,6 +2220,8 @@
             setTimeout(() => {
               this.saving_power_led = false;
               if (data.status === "ok") {
+                // Re-read PMU status so "Current" matches the LED after a mode toggle
+                this.fetch_power_led_status();
                 if (showNotification) {
                   const mode_text = this.power_led_mode === 'off' ? 'Off' : this.power_led_mode === 'on' ? 'On' : 'Timed';
                   this.showNotification(
@@ -1451,7 +2382,12 @@
       fetch("/api/v1/fan_speed.json")
         .then((response) => response.json())
         .then((data) => {
-          this.fan_speed = data.fan_speed || 5;
+          // Use nullish coalescing so fan_speed=0 is kept (|| 5 treated 0 as missing).
+          const v = data.fan_speed;
+          this.fan_speed = (v === 0 || v === '0') ? 0 : (parseInt(v, 10) || 5);
+          if (this.fan_speed < 0 || this.fan_speed > 9 || Number.isNaN(this.fan_speed)) {
+            this.fan_speed = 5;
+          }
           this.fan_data_loaded = true;
         })
         .catch((error) => {
@@ -1460,9 +2396,25 @@
         });
     },
 
-    save_fan_speed() {
+    // Debounce slider input so rapid drags don't fire a POST per step.
+    // Out-of-order completions of those POSTs previously could leave the
+    // saved preference at an intermediate/default value (issue #107).
+    // This is the only save path for the slider (no instant @change set):
+    // the value commits ~600ms after the user stops moving.
+    debouncedSaveFanSpeed() {
+      clearTimeout(this.fanSpeedTimeoutId);
+      this.fanSpeedTimeoutId = setTimeout(() => {
+        this.save_fan_speed();
+      }, 600);
+    },
+
+    save_fan_speed(showNotification = true) {
+      clearTimeout(this.fanSpeedTimeoutId);
+      const speed = parseInt(this.fan_speed, 10);
+      const fan_speed = (Number.isNaN(speed) || speed < 0 || speed > 9) ? 5 : speed;
+      this.fan_speed = fan_speed;
       const post_data = {
-        fan_speed: this.fan_speed,
+        fan_speed: fan_speed,
       };
       const requestOptions = {
         method: "POST",
@@ -1473,11 +2425,18 @@
         .then((response) => response.json())
         .then((data) => {
           if (data.status === "ok") {
-            this.showNotification(
-              `Fan Speed Set to ${this.fan_speed}/9`,
-              `风扇转速已设为 ${this.fan_speed}/9`,
-              'success'
-            );
+            // Prefer the clamped value echoed by the server when present
+            if (data.fan_speed !== undefined && data.fan_speed !== null) {
+              const saved = parseInt(data.fan_speed, 10);
+              if (!Number.isNaN(saved)) this.fan_speed = saved;
+            }
+            if (showNotification) {
+              this.showNotification(
+                `Fan Speed Set to ${this.fan_speed}/9`,
+                `风扇转速已设为 ${this.fan_speed}/9`,
+                'success'
+              );
+            }
           } else {
             this.showNotification(
               'Failed to save fan speed',
@@ -1563,12 +2522,21 @@
       }, 3000);
     },
     fetch_charge_limit() {
+      // Each GET also makes the daemon re-query the MCU (the source of
+      // truth), so polling this converges the slider on the MCU's actual %.
       fetch("/api/v1/charge_threshold.json")
         .then((response) => response.json())
         .then((data) => {
           // Default to 100% (no limit) when unset or out of the valid 80-100 range.
           let v = parseInt(data.value, 10);
-          this.charge_limit = (v >= 80 && v <= 100) ? v : 100;
+          v = (v >= 80 && v <= 100) ? v : 100;
+          // Don't clobber the slider while the user is adjusting it or a
+          // debounced set is still pending; the MCU value wins when idle.
+          const idle = (Date.now() - this.charge_limit_touch_ms > 5000) &&
+                       this.chargeLimitTimeoutId === null;
+          if (idle) {
+            this.charge_limit = v;
+          }
           this.charge_limit_loaded = true;
         })
         .catch((error) => {
@@ -1577,7 +2545,20 @@
         });
     },
 
+    // Debounce the slider (1% steps): send to the MCU only ~800ms after the
+    // user stops moving, never one POST per step mid-drag.
+    debounced_save_charge_limit() {
+      this.charge_limit_touch_ms = Date.now();
+      clearTimeout(this.chargeLimitTimeoutId);
+      this.chargeLimitTimeoutId = setTimeout(() => {
+        this.chargeLimitTimeoutId = null;
+        this.save_charge_limit();
+      }, 800);
+    },
+
     save_charge_limit() {
+      clearTimeout(this.chargeLimitTimeoutId);
+      this.chargeLimitTimeoutId = null;
       fetch("/api/v1/charge_threshold.json", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1591,6 +2572,11 @@
               `充电限制已设为 ${this.charge_limit}%`,
               'success'
             );
+            // Read back from the MCU ~30s later to confirm what it actually
+            // applied: the first fetch triggers the MCU re-query, the second
+            // applies the fresh answer to the slider.
+            setTimeout(() => this.fetch_charge_limit(), 30000);
+            setTimeout(() => this.fetch_charge_limit(), 32000);
           } else {
             this.showNotification(
               data.message || 'Failed to save charge limit',

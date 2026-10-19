@@ -12,6 +12,14 @@
     <meta name="msapplication-TileColor" content="#0ed3cf" />
     <meta name="theme-color" content="#0ed3cf" />
     <title>Login | {{locales["oem_name"]}} - 配置</title>
+    <!-- Same device-wide appearance as the rest of the UI, so the login page
+         is not the one screen that ignores it. Its own theme cycle stays
+         localStorage-only: this page is unauthenticated and the device-wide
+         write behind it requires a session. -->
+    <script>
+      window.PCAT_DEVICE_THEME = {{ (device_theme if device_theme in ("light", "dark") else None)|tojson }};
+    </script>
+    <script src="/static/theme.js"></script>
     <script type="text/javascript">
       document.addEventListener("DOMContentLoaded", function (event) {
         document.getElementById("openwrt_link").href = "http://" + window.location.hostname + ":8080";
@@ -22,7 +30,7 @@
         document.getElementById("password").focus();
       });
     </script>
-    <script defer src="/static/alpine-3.10.2.js"></script>
+    <script defer src="/static/alpine-3.15.12.js"></script>
     <link rel="stylesheet" href="/static/app.css" />
     <style>[x-cloak]{display:none!important;}</style>
   </head>
@@ -66,6 +74,17 @@
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9"></path>
                 </svg>
               </a>
+              <button type="button"
+                      class="flex items-center rounded p-1 hover:bg-gray-100 focus:ring-2 focus:ring-blue-600"
+                      title="{{locales['theme_toggle_tip']}}"
+                      @click="theme_pref = (window.PcatTheme && PcatTheme.cycle()) || 'auto'">
+                <svg x-show="theme_pref !== 'dark'" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
+                </svg>
+                <svg x-show="theme_pref === 'dark'" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
+                </svg>
+              </button>
             </div>
           </div>
           <div class="my-5 text-sm">
@@ -91,6 +110,7 @@
         Alpine.data("login_form", () => ({
           password_type: "password",
           showTos: false,
+          theme_pref: (window.PcatTheme && PcatTheme.getPref()) || "auto",
         }));
       });
     </script>

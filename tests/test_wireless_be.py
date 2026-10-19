@@ -31,8 +31,9 @@ from pcat_util import command_parser  # noqa: E402
 
 # Modeled after the real /etc/board.json snippet from the photonicat2.
 PCIE_WIFI7_PATH = "soc/22000000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0"
-# Deliberately NOT in command_parser.builtin_wifi_dev (those use xhci-hcd.N.auto)
-# so device_type stays "Unknown" and the test asserts the non-onboard branch.
+# A USB host-controller index that builtin_wifi_dev does not enumerate. The
+# onboard module really does move between instances across boots, so this must
+# still classify as Onboard -- see device_type_for_path.
 USB_WIFI6_PATH = "platform/soc/23000000.usb/xhci-hcd.99.auto/usb1/1-1/1-1.7"
 
 BOARD_JSON_WIFI7 = {
@@ -272,7 +273,9 @@ class ParseUciShowWirelessTests(unittest.TestCase):
 
         # Radio 0: USB, Wi-Fi 6 max, no EHT.
         r0 = by_device["radio0"]
-        self.assertEqual(r0["device_type"], "Unknown")  # not in builtin_wifi_dev list
+        # xhci-hcd.99 is not in builtin_wifi_dev, but it is unmistakably the
+        # onboard USB module; a drifting instance number must not relabel it.
+        self.assertEqual(r0["device_type"], "Onboard")
         self.assertEqual(r0["frequency"], "2g")
         self.assertIn("capabilities", r0)
         self.assertFalse(r0["capabilities"]["is_pcie"])
@@ -309,6 +312,74 @@ class ParseUciShowWirelessTests(unittest.TestCase):
         result = self._run(he80_uci)
         r1 = next(r for r in result if r["device"] == "radio1")
         self.assertEqual(r1["frequency"], "5g_ax")
+
+
+# ---------- upstream STA (WiFi-as-WAN) reporting -----------------------------
+
+
+# radio0 (onboard) carries a wifinet_sta section relaying an upstream hotspot;
+# its own AP is parked. This is the WAN-priority "wifi upstream" layout.
+UCI_WITH_STA = UCI_TWO_RADIOS + b"""\
+wireless.wifinet_sta=wifi-iface
+wireless.wifinet_sta.device='radio0'
+wireless.wifinet_sta.mode='sta'
+wireless.wifinet_sta.network='wan_wifi'
+wireless.wifinet_sta.ssid='HomeHotspot'
+"""
+
+
+class UpstreamStaReportingTests(unittest.TestCase):
+    """parse_uci_show_wireless must present the STA radio as relaying and only
+    report the upstream SSID while it is actually associated — a disassociated
+    STA keeps its stale configured ssid in UCI, which must show as standby."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="parse-sta-test-")
+        self.board_path = _write_board_json(self.tmp, BOARD_JSON_WIFI7)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _run(self, associated, ssid="HomeHotspot"):
+        real_open = open
+
+        def fake_open(p, *a, **kw):
+            if p == "/etc/board.json":
+                return real_open(self.board_path, *a, **kw)
+            return real_open(p, *a, **kw)
+
+        state = {"ssid": ssid, "associated": associated, "connected": associated}
+        with patch.object(command_parser, "uci_show", _fake_uci_show(UCI_WITH_STA)), \
+             patch.object(command_parser, "device_exist", return_value=True), \
+             patch.object(command_parser, "is_wifi_interface_enabled", return_value=True), \
+             patch("builtins.open", side_effect=fake_open):
+            # wifi_wan is imported lazily inside the function; patch on the module.
+            from pcat_util import wifi_wan
+            with patch.object(wifi_wan, "active_sta_radio", return_value="radio0"), \
+                 patch.object(wifi_wan, "get_state", return_value=state):
+                return command_parser.parse_uci_show_wireless(is_mock_data=False)
+
+    def test_associated_reports_upstream_ssid(self):
+        result = self._run(associated=True)
+        r0 = next(r for r in result if r["device"] == "radio0")
+        self.assertTrue(r0["wifi_wan"])
+        self.assertFalse(r0["enabled"], "the relaying radio's own AP is parked")
+        self.assertTrue(r0["wifi_wan_associated"])
+        self.assertEqual(r0["wifi_wan_ssid"], "HomeHotspot")
+
+    def test_disassociated_reports_standby_not_stale_ssid(self):
+        result = self._run(associated=False)
+        r0 = next(r for r in result if r["device"] == "radio0")
+        self.assertTrue(r0["wifi_wan"])
+        self.assertFalse(r0["wifi_wan_associated"])
+        self.assertEqual(r0["wifi_wan_ssid"], "",
+                         "a disassociated STA must not surface its stale configured SSID")
+
+    def test_non_sta_radio_has_no_wifi_wan_fields(self):
+        result = self._run(associated=True)
+        r1 = next(r for r in result if r["device"] == "radio1")
+        self.assertNotIn("wifi_wan", r1)
 
 
 # ---------- POST validation contract (freq_defaults table) -------------------

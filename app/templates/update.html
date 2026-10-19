@@ -1,5 +1,6 @@
-{% extends '_base.html' %} {% block html_head0 %}
-<script defer src="/static/socket.io.js?v={{ cache_bust_version }}"></script>
+{% extends '_base.html' %}
+{% block page_title %}{{locales["nav_update"]}}{% endblock %} {% block html_head0 %}
+<script defer src="/static/pollbus.js?v={{ cache_bust_version }}"></script>
 {% endblock %} {% block content %}
 <div x-data="update">
   <!-- Loading spinner -->
@@ -20,7 +21,9 @@
 
   {% include '_firmware_update.html' %}
 
+  {% if is_photonicat2 %}
   {% include '_mcu_update.html' %}
+  {% endif %}
 
   {% include '_upgrade_confirmation_modal.html' %}
 
@@ -75,6 +78,13 @@
         // back off to once a minute to avoid needless re-renders.
         setInterval(() => { this.now_ts = Math.floor(Date.now() / 1000); }, 1000);
 
+        // A device carrying a user-created partition must be flashed with -p
+        // (do not restore the partition table) or that partition is lost, so
+        // -p is forced on for it. The user can still untick it -- to let a new
+        // bootloader and table land -- after reading the warning that appears
+        // when they do.
+        this.loadUserPartitions();
+
         window.socket = io({ transports: ["polling"], upgrade: false });
         socket.on("connect", function () {
           socket.emit("client_connected", { data: "" });
@@ -86,6 +96,9 @@
             // System is restarting, show reconnection message
             this.upgrade_status.message = 'System is restarting... Attempting to reconnect...';
             this.startReconnectionMonitoring();
+            // Belt and braces: if the socket died before the >=100% restart
+            // event arrived, still raise the restarting overlay.
+            Alpine.store('app').begin_restart_watch('update');
           }
         });
 
@@ -109,15 +122,10 @@
             this.add_download_log(logMessage.trim());
           }
           
-          if (msg.data.includes("ipk installed success.") || msg.data.includes("Packages update completed.") || 
-              msg.data.includes("Archive packages installed successfully.")) {
-            // Add success emoji to download logs (for both downloads and uploads)
+          // Result lines printed by opkg-install.py (same for IPK and APK).
+          if (msg.data.includes("Package installed successfully.")) {
             if (this.downloading_url || this.show_download_logs) {
-              if (msg.data.includes("Archive packages installed successfully.")) {
-                this.add_download_log("✅ Installation completed successfully!");
-              } else if (msg.data.includes("ipk installed success.")) {
-                this.add_download_log("✅ Package installed successfully!");
-              }
+              this.add_download_log("✅ Installation completed successfully!");
             }
             
             this.uploading = false;
@@ -128,11 +136,12 @@
             this.updating_package = "";
             this.get_versions();
             setTimeout(() => {
-              this.reboot_dlg_open = true;
+              // reboot_dlg_open lives in the _base.html body scope, not this
+              // component — dispatch the window event the reboot modal listens for.
+              window.dispatchEvent(new CustomEvent('open-reboot-dialog'));
             }, 2000);
-          } else if (msg.data.includes("installation completed with warnings") || 
-                    msg.data.includes("Archive installation failed") || 
-                    msg.data.includes("ipk installation failed")) {
+          } else if (msg.data.includes("installation completed with warnings") ||
+                    msg.data.includes("installation failed")) {
             // Add appropriate emoji based on status (for both downloads and uploads)
             if (this.downloading_url || this.show_download_logs) {
               if (msg.data.includes("completed with warnings")) {
@@ -175,22 +184,25 @@
                                    (['download', 'verify', 'prepare', 'install', 'restart'].includes(msg.stage) &&
                                     msg.stage !== 'completed' && msg.stage !== 'error');
           
-          // Update keep_config setting from status
-          if (msg.keep_config !== undefined) {
-            this.keep_config = msg.keep_config;
-          }
-          if (msg.keep_config_option !== undefined) {
-            this.keep_config_option = msg.keep_config_option;
+          // Mirror the flags the running upgrade was started with
+          if (Array.isArray(msg.sysupgrade_flags)) {
+            this.sysupgrade_flags = msg.sysupgrade_flags.filter(f => f !== '-n');
           }
                                    
           // If upgrade completed successfully, hide modal and show success
           if (msg.stage === 'completed' || (msg.stage === 'restart' && msg.progress >= 100)) {
             this.firmware_upgrading = false;
-            console.log("Firmware upgrade completed, will reload page in 10 seconds");
-            // Optionally refresh the page after some time to check new firmware version
-            setTimeout(() => {
-              window.location.reload();
-            }, 10000);
+            // Mark that the device is restarting so the post-reload firmware
+            // re-check treats a failed request as "restarting", not an error.
+            // sessionStorage is used because the reload below wipes in-memory state.
+            try {
+              sessionStorage.setItem('firmware_just_updated', String(Date.now()));
+            } catch (e) { /* sessionStorage may be unavailable; ignore */ }
+            // The restarting overlay owns the rest: elapsed timer, probing
+            // until the device answers again, then reload. A fixed-delay
+            // reload here landed mid-restart on a dead device and left the
+            // user on a browser error page.
+            Alpine.store('app').begin_restart_watch('update');
           }
           
           if (cb) cb();
@@ -222,15 +234,19 @@
         });
         
         this.check_ongoing_upgrade();
-        
+        {% if is_photonicat2 %}
+        this.check_ongoing_mcu_update();
+        {% endif %}
+
         // Show page immediately after basic initialization
         setTimeout(() => {
           this.pageReady = true;
-          
+          {% if is_photonicat2 %}
           // Run MCU checks asynchronously after page is visible
           setTimeout(() => {
             this.check_mcu_updates();
           }, 500);
+          {% endif %}
         }, 100);
       },
       pageReady: false,
@@ -250,6 +266,11 @@
       download_url: "",
       downloading_url: false,
       is_valid_download_url: false,
+      // Extensions this firmware can install: its own package format (.ipk or
+      // .apk, never both) plus archives of it.
+      accepted_types: "{{pkg_accept}}".split(","),
+      // HTTPS certificate checks are off by default for package downloads.
+      verify_tls: false,
       show_download_logs: false,
       download_progress: 0,
       download_log_output: "",
@@ -260,8 +281,8 @@
       production_firmware_upgrading: false,
       canceling_firmware_download: false,
       confirming_firmware_upgrade: false,
-      keep_config: true, // For backward compatibility
-      keep_config_option: '-c', // Default to -c flag
+      sysupgrade_flags: ['-c', '-p'], // Ticked flags; default keeps /etc/ and leaves the partition table untouched
+      user_partitions: [], // User-created partitions a -p-less flash would destroy
       download_method: 'wget', // Default to wget
       auto_upgrade: true, // Default to automatic upgrade
       show_debug_info: false,
@@ -291,10 +312,30 @@
       
       // Dev server functionality
       dev_server_reachable: false,
+      // Hardware-test matrix for this exact build (dev server only).
+      hil_loaded: false,
+      hil_loading: false,
+      hil_origin: "",          // report server, derived from the dev download URL
+      hil_version: "",         // the build these results belong to
+      hil_is_installed: false, // ...and whether that is the running one
+      hil_cache: {},           // version string -> matrix, so re-selecting is free
+      hil: { tested: false, checks: [], runs: 0, verdict: '', verdict_label: '',
+             build_label: '', last_tested: '',
+             summary: { pass: 0, fail: 0, skip: 0, untested: 0, error: 0 } },
       dev_firmware_newer: false,
       dev_firmware_info: {},
       dev_versions_same: false,
       dev_firmware_upgrading: false,
+
+      // Version dropdowns (downgrade support for testers): live server
+      // offers the latest + 5 older builds, dev server the latest + 20.
+      dev_versions_list: [],
+      dev_selected_index: "0",
+      prod_versions_list: [],
+      prod_selected_index: "0",
+      dev_changelog: "",
+      dev_changelog_loading: false,
+      dev_changelog_cache: {},
       now_ts: Math.floor(Date.now() / 1000), // live clock for relative "X ago" timestamps
       
       // MCU Update functionality
@@ -306,6 +347,13 @@
       mcu_dev_versions_same: false,
       mcu_dev_info: {},
       mcu_prod_info: {},
+      // MCU version dropdowns: dev offers the latest + 20 older builds with
+      // their upload changelogs, live the latest + 3 previous releases.
+      mcu_dev_versions_list: [],
+      mcu_dev_selected_index: "0",
+      mcu_dev_changelog: "",
+      mcu_prod_versions_list: [],
+      mcu_prod_selected_index: "0",
       mcu_updating: false,
       mcu_dev_updating: false,
       mcu_prod_updating: false,
@@ -317,6 +365,10 @@
         message: '',
         debug_logs: []
       },
+      // Set right after an MCU update completes so the follow-up version
+      // re-check knows the device is restarting (network briefly down) and
+      // shows a "restarting" message instead of a hard error.
+      mcu_just_updated: false,
       show_debug_logs: false,
       
       // Notification system
@@ -355,6 +407,12 @@
           xhr.onload = () => {
             try {
               const resp = JSON.parse(xhr.responseText);
+              if (resp.status !== "ok") {
+                this.add_download_log(`Upload failed: ${resp.message || 'Unknown error'}`);
+                this.showNotification(resp.message || 'Upload failed', resp.message || '上传失败', 'error');
+                this.uploading = false;
+                return;
+              }
               this.add_download_log(`Upload successful: ${resp.file_name}`);
               this.add_download_log("Starting installation...");
               this.uploading = false;
@@ -375,6 +433,9 @@
           };
           
           xhr.open("POST", e.target.action);
+          // XHR isn't covered by the fetch() CSRF wrapper in _base.html; set it here.
+          xhr.setRequestHeader("X-CSRF-Token",
+            document.querySelector('meta[name="csrf-token"]').getAttribute('content'));
           xhr.send(formData);
         } catch (error) {
           console.error('Error starting upload:', error);
@@ -442,12 +503,11 @@
         
         // Check if the file type is acceptable
         const file = files[0];
-        const acceptedTypes = ['.ipk', '.gz', '.xz', '.bz2', '.tar'];
         const fileName = file.name.toLowerCase();
-        const isValidType = acceptedTypes.some(type => fileName.endsWith(type));
+        const isValidType = this.accepted_types.some(type => fileName.endsWith(type));
         
         if (!isValidType) {
-          this.showNotification('Invalid file type. Please select an IPK package file.', '文件类型无效，请选择IPK包文件。', 'error');
+          this.showNotification("{{locales['invalid_package_file']}}", "{{locales['invalid_package_file']}}", 'error');
           return;
         }
         
@@ -469,6 +529,44 @@
       getDownloadButtonText() {
         return this.downloading_url ? '{{locales.downloading or "Downloading..."}}' : '{{locales.download_button}}';
       },
+      // Probe for partitions the stock image does not lay down. Failure is
+      // non-fatal: the modal keeps its default flags and simply shows no
+      // warning, exactly as on a stock-layout device.
+      async loadUserPartitions() {
+        try {
+          const r = await fetch('/api/v1/firmware_user_partitions.json');
+          const d = await r.json();
+          this.user_partitions = Array.isArray(d.partitions) ? d.partitions : [];
+          if (this.user_partitions.length && !this.sysupgrade_flags.includes('-p')) {
+            this.sysupgrade_flags.push('-p');
+          }
+        } catch (e) {
+          this.user_partitions = [];
+        }
+      },
+      // True when the user has extra partitions AND has turned off the flag
+      // that protects them -- the one combination that destroys data.
+      partition_loss_risk() {
+        return this.user_partitions.length > 0 && !this.sysupgrade_flags.includes('-p');
+      },
+      user_partition_summary() {
+        return this.user_partitions
+          .map(p => p.label ? `${p.dev} (${p.label})` : p.dev)
+          .join(', ');
+      },
+      // True while at least one config-preserving flag is ticked.
+      keeps_config() {
+        return this.sysupgrade_flags.includes('-c') || this.sysupgrade_flags.includes('-o');
+      },
+      // Ticked flags in sysupgrade's own order; preserving nothing means -n.
+      sysupgrade_flag_list() {
+        const flags = ['-c', '-o', '-p'].filter(f => this.sysupgrade_flags.includes(f));
+        if (!this.keeps_config()) flags.unshift('-n');
+        return flags;
+      },
+      sysupgrade_command() {
+        return `sysupgrade ${this.sysupgrade_flag_list().join(' ')} <image>`;
+      },
       getUpgradeButtonText() {
         return this.confirming_firmware_upgrade ? '{{locales.starting if locales.starting else "Starting..."}}' : '{{locales.start_upgrade}}';
       },
@@ -488,7 +586,12 @@
         return this.mcu_dev_updating ? '{{locales.mcu_updating if locales.mcu_updating else "Updating..."}}' : '{{locales.mcu_dev_reinstall_button if locales.mcu_dev_reinstall_button else "Reinstall MCU"}}';
       },
       getMcuProdButtonText() {
-        return this.mcu_prod_updating ? '{{locales.mcu_updating if locales.mcu_updating else "Updating..."}}' : '{{locales.mcu_auto_update_button if locales.mcu_auto_update_button else "Update MCU"}}';
+        if (this.mcu_prod_updating) return '{{locales.mcu_updating if locales.mcu_updating else "Updating..."}}';
+        if (!this.mcu_prod_update_available && this.mcu_prod_selected_differs()) return '{{locales.mcu_install_selected_button if locales.mcu_install_selected_button else "Install Selected Version"}}';
+        return '{{locales.mcu_auto_update_button if locales.mcu_auto_update_button else "Update MCU"}}';
+      },
+      getMcuDevInstallSelectedButtonText() {
+        return this.mcu_dev_updating ? '{{locales.mcu_updating if locales.mcu_updating else "Updating..."}}' : '{{locales.mcu_install_selected_button if locales.mcu_install_selected_button else "Install Selected Version"}}';
       },
       getMcuUpgradeButtonText() {
         return this.confirming_mcu_upgrade ? '{{locales.starting if locales.starting else "Starting..."}}' : '{{locales.start_mcu_update if locales.start_mcu_update else "Start Update"}}';
@@ -516,14 +619,14 @@
         }
         
         // Check if it's a supported file extension
-        const supportedExtensions = ['.ipk', '.gz', '.xz', '.bz2', '.tar'];
-        const urlPath = url.toLowerCase();
-        this.is_valid_download_url = supportedExtensions.some(ext => urlPath.endsWith(ext));
+        // Judge the path only: a query string must not hide or fake the extension.
+        const urlPath = new URL(url).pathname.toLowerCase();
+        this.is_valid_download_url = this.accepted_types.some(ext => urlPath.endsWith(ext));
       },
 
       download_from_url() {
         if (!this.download_url || !this.is_valid_download_url) {
-          this.showNotification('Please enter a valid IPK package URL', '请输入有效的IPK包链接', 'error');
+          this.showNotification("{{locales['invalid_package_url']}}", "{{locales['invalid_package_url']}}", 'error');
           return;
         }
 
@@ -548,7 +651,8 @@
               'Content-Type': 'application/json',
             },
             body: JSON.stringify({
-              url: this.download_url
+              url: this.download_url,
+              verify_tls: this.verify_tls
             })
           })
           .then(response => response.json())
@@ -617,7 +721,21 @@
       update(name, full_name, version) {
         this.updating_package = name;
         this.show_log_message = true;
-        window.socket.emit("request_install_package", { package: full_name });
+        window.socket.emit("request_install_package", { package: full_name, verify_tls: this.verify_tls });
+      },
+
+      // True while the device is restarting right after a firmware or MCU
+      // update. During that window the network is briefly down, so a failed
+      // check is expected and should be reported as "restarting", not an error.
+      is_restarting_after_update() {
+        if (this.mcu_just_updated) return true;
+        try {
+          const ts = parseInt(sessionStorage.getItem('firmware_just_updated'), 10);
+          // Only trust the marker for a few minutes so a stale value can't
+          // suppress a genuine error on a much later manual re-check.
+          if (ts && (Date.now() - ts) < 5 * 60 * 1000) return true;
+        } catch (e) { /* sessionStorage may be unavailable; ignore */ }
+        return false;
       },
 
       check_firmware_updates() {
@@ -628,6 +746,10 @@
             if (data.status === "ok") {
               this.firmware_update_available = data.update_available;
               this.firmware_info = data;
+              this.prod_versions_list = data.versions || [];
+              this.prod_selected_index = "0";
+              // Successful check means the device is back online; clear marker.
+              try { sessionStorage.removeItem('firmware_just_updated'); } catch (e) {}
               
               if (data.update_available) {
                 console.log(`Firmware update available: ${data.remote_filename}`);
@@ -642,10 +764,146 @@
           .catch(error => {
             this.firmware_check_completed = true;
             console.error("Error checking firmware updates:", error);
-            this.showNotification('Failed to check firmware updates', '检查固件更新失败', 'error');
+            // If a firmware upgrade just completed, the device is restarting
+            // and the request fails because the network is briefly down. That
+            // is expected, not a real error — show a restarting message.
+            if (this.is_restarting_after_update()) {
+              this.showNotification('Device is restarting after firmware update...', '设备更新后正在重启...', 'info');
+            } else {
+              this.showNotification('Failed to check firmware updates', '检查固件更新失败', 'error');
+            }
           });
       },
 
+      // Hardware-test results for whichever build is selected in the dropdown.
+      //
+      // Follows the selection rather than pinning to the installed build. The
+      // question this panel exists to answer is "should I install this?", and
+      // showing the running build's results beside a *different* build's
+      // version number answers a question nobody asked -- worse, it reads as a
+      // green light for a build that has never been tested.
+      //
+      // Fetched straight from the report server rather than proxied through
+      // the device: this page has to work on firmware older than the harness,
+      // and adding a backend endpoint would make the panel need a matching
+      // app version. The report server sends CORS headers for exactly this.
+      //
+      // The report server lives beside the dev firmware server, so its origin
+      // is taken from the dev download URL we already have -- nothing is
+      // hardcoded, and a different dev server automatically brings its own
+      // report server.
+      hil_origin_from(dev_data) {
+        try {
+          return new URL(dev_data.dev_download_url).origin;
+        } catch (e) {
+          return "";
+        }
+      },
+
+      // The openwrt_version string a build will report once installed -- the
+      // exact key the report server files every run under.
+      hil_version_of(v) {
+        if (!v) return "";
+        return this.format_version_with_hash(v.filename, v.revision, v.hash);
+      },
+
+      load_hil_matrix(version) {
+        if (!version || !this.hil_origin) return Promise.resolve();
+
+        this.hil_version = version;
+        this.hil_is_installed = version === this.dev_firmware_info.local_version;
+
+        // Cached: a tester flicking through the dropdown should not re-fetch,
+        // and the answer for a given build does not change while the page is open.
+        if (version in this.hil_cache) {
+          this.hil = this.hil_cache[version];
+          this.hil_loaded = true;
+          this.hil_loading = false;
+          return Promise.resolve();
+        }
+
+        this.hil_loading = true;
+        this.hil_loaded = false;
+        const lang = (document.documentElement.lang || "en").toLowerCase()
+                       .startsWith("zh") ? "zh" : "en";
+        const url = this.hil_origin + "/pcat-report/api.php?version="
+                    + encodeURIComponent(version) + "&lang=" + lang;
+
+        // Optional decoration: any failure just leaves the panel hidden.
+        return fetch(url)
+          .then(r => r.json())
+          .then(data => {
+            if (!data || data.status !== "ok") return;
+            // The report server omits `summary` on an untested build; the
+            // table binds straight to its counters, so default them here
+            // rather than guarding every binding.
+            const matrix = Object.assign(
+              { summary: { pass: 0, fail: 0, skip: 0, untested: 0, error: 0 },
+                last_tested: "", checks: [], tested: false },
+              data);
+            this.hil_cache[version] = matrix;
+            // Only paint it if this build is still the selected one -- a slow
+            // response for a build the user has already moved off must not
+            // overwrite the one they are now looking at.
+            if (this.hil_version === version) {
+              this.hil = matrix;
+              this.hil_loaded = true;
+            }
+          })
+          .catch(() => { /* report server unreachable; show nothing */ })
+          .finally(() => {
+            if (this.hil_version === version) this.hil_loading = false;
+          });
+      },
+
+      // "Results for R26.04.1 / r7883-b9547cfec3" — say which build these are,
+      // because they are no longer necessarily the running one.
+      hil_version_label() {
+        return this.hil_version || "";
+      },
+
+      hil_loading_label() {
+        return '{{locales["hil_loading"]}}' + ' ' + (this.hil_version || '');
+      },
+
+      // ---- Hardware-test table rendering ----
+      // The checks arrive already sorted by category then name, so the area
+      // column only needs printing on the first row of each run of equal
+      // categories -- that is what turns a flat list into a grouped table.
+      hil_rows() {
+        let previous = null;
+        return (this.hil.checks || []).map(c => {
+          const row = Object.assign({}, c, { first_in_group: c.category !== previous });
+          previous = c.category;
+          return row;
+        });
+      },
+
+      // "6/6" -- how many of this build's runs saw the reported status. Blank
+      // for a check that never ran, where "0/0" would be noise.
+      hil_hits_label(c) {
+        return c.total ? c.hits + '/' + c.total : '';
+      },
+
+      hil_runs_label() {
+        return (this.hil.runs || 0) + ' ' + '{{locales["hil_runs"]}}';
+      },
+
+      hil_last_tested_label() {
+        return '{{locales["hil_last_tested"]}}' + ' ' + (this.hil.last_tested || '');
+      },
+
+      // "24 passed", "1 failed", ... for the count strip above the table.
+      hil_summary_label(kind) {
+        const words = {
+          pass: '{{locales["hil_led_pass"]}}',
+          fail: '{{locales["hil_led_fail"]}}',
+          error: '{{locales["hil_led_error"]}}',
+          untested: '{{locales["hil_led_untested"]}}',
+          skip: '{{locales["hil_led_na"]}}'
+        };
+        return ((this.hil.summary || {})[kind] || 0) + ' ' + (words[kind] || kind);
+      },
       check_dev_server() {
         return fetch("/api/v1/dev_server_check.json")
           .then(response => response.json())
@@ -654,8 +912,18 @@
             if (data.status === "ok" && data.reachable === true) {
               this.dev_server_reachable = true;
               this.dev_firmware_info = data;
-              
-              // Check if versions are actually the same by comparing revision numbers
+              this.dev_versions_list = data.versions || [];
+              this.dev_selected_index = "0";
+              if (this.dev_versions_list.length > 0) {
+                this.fetch_dev_changelog(this.dev_versions_list[0].filename);
+              }
+
+              // Test results follow the dropdown, which starts on the latest
+              // build -- so the page opens on "is the newest one safe to take?"
+              this.hil_origin = this.hil_origin_from(data);
+              this.load_hil_matrix(
+                this.hil_version_of(this.dev_versions_list[0]) || data.local_version);
+
               this.dev_versions_same = data.local_revision === data.dev_revision;
               this.dev_firmware_newer = data.dev_revision > data.local_revision;
               
@@ -681,7 +949,92 @@
           });
       },
 
+      // ---- Version dropdown support (downgrades for testers) ----
+      dev_selected_version() {
+        return this.dev_versions_list[parseInt(this.dev_selected_index, 10)] || null;
+      },
+
+      prod_selected_version() {
+        return this.prod_versions_list[parseInt(this.prod_selected_index, 10)] || null;
+      },
+
+      // True when a live-server version other than the installed one is
+      // selected, which unlocks the downgrade/reflash buttons.
+      prod_selected_differs() {
+        const v = this.prod_selected_version();
+        return !!(v && this.firmware_info.local_revision &&
+                  v.revision !== this.firmware_info.local_revision);
+      },
+
+      on_dev_version_selected() {
+        const v = this.dev_selected_version();
+        if (!v) return;
+        // Point the dev summary cards and action buttons at the selection;
+        // the newer/same/older card states recompute against it.
+        this.dev_firmware_info.dev_filename = v.filename;
+        this.dev_firmware_info.dev_revision = v.revision;
+        this.dev_firmware_info.dev_hash = v.hash;
+        this.dev_firmware_info.dev_download_url = v.download_url;
+        this.dev_firmware_info.dev_build_date = v.build_date || "";
+        this.dev_firmware_info.dev_build_epoch = v.build_epoch || 0;
+        this.dev_firmware_info.dev_sha256_hash = v.sha256_hash || "";
+        this.dev_firmware_info.dev_sha256_available = !!v.sha256_available;
+        this.dev_versions_same = this.dev_firmware_info.local_revision === v.revision;
+        this.dev_firmware_newer = v.revision > this.dev_firmware_info.local_revision;
+        this.fetch_dev_changelog(v.filename);
+        this.load_hil_matrix(this.hil_version_of(v));
+      },
+
+      on_prod_version_selected() {
+        const v = this.prod_selected_version();
+        if (!v) return;
+        this.firmware_info.remote_filename = v.filename;
+        this.firmware_info.remote_revision = v.revision;
+        this.firmware_info.download_url = v.download_url;
+        this.firmware_info.remote_build_date = v.build_date || "";
+        this.firmware_info.remote_build_epoch = v.build_epoch || 0;
+        this.firmware_info.sha256_hash = v.sha256_hash || "";
+        this.firmware_info.sha256_available = !!v.sha256_available;
+      },
+
+      version_option_label(v, i) {
+        const localRev = this.firmware_info.local_revision ||
+                         this.dev_firmware_info.local_revision || 0;
+        let label = 'r' + v.revision + (v.hash ? '-' + v.hash : '');
+        if (v.build_date) label += ' | ' + v.build_date;
+        if (i === 0) label += ' ({{locales.version_latest_tag}})';
+        if (localRev && v.revision === localRev) label += ' ({{locales.version_installed_tag}})';
+        return label;
+      },
+
+      fetch_dev_changelog(filename) {
+        if (filename in this.dev_changelog_cache) {
+          this.dev_changelog = this.dev_changelog_cache[filename];
+          return;
+        }
+        this.dev_changelog = "";
+        this.dev_changelog_loading = true;
+        fetch(`/api/v1/firmware_changelog.json?source=dev&filename=${encodeURIComponent(filename)}`)
+          .then(response => response.json())
+          .then(data => {
+            const text = (data.status === "ok" && data.available) ? data.changelog : "";
+            this.dev_changelog_cache[filename] = text;
+            // Only display it if this build is still the selected one
+            const selected = this.dev_selected_version();
+            if (selected && selected.filename === filename) {
+              this.dev_changelog = text;
+            }
+          })
+          .catch(error => {
+            console.log("Changelog fetch failed:", error);
+          })
+          .finally(() => {
+            this.dev_changelog_loading = false;
+          });
+      },
+
       start_prod_firmware_upgrade() {
+        if (this.other_update_blocks('firmware')) return;
         if (!this.firmware_info.download_url) {
           this.showNotification('No firmware download URL available', '固件下载链接不可用', 'error');
           return;
@@ -697,6 +1050,7 @@
       },
 
       start_dev_firmware_upgrade() {
+        if (this.other_update_blocks('firmware')) return;
         if (!this.dev_firmware_info.dev_download_url) {
           this.showNotification('No dev server firmware download URL available', '开发服务器固件下载链接不可用', 'error');
           return;
@@ -803,6 +1157,7 @@
       },
 
       start_firmware_upgrade() {
+        if (this.other_update_blocks('firmware')) return;
         if (!this.upgrade_firmware_info.download_url) {
           this.showNotification('No firmware download URL available', '固件下载链接不可用', 'error');
           return;
@@ -814,8 +1169,7 @@
           
           console.log("Starting firmware upgrade:", {
             url: this.upgrade_firmware_info.download_url,
-            keep_config: this.keep_config,
-            keep_config_option: this.keep_config_option,
+            sysupgrade_flags: this.sysupgrade_flag_list(),
             download_method: this.download_method
           });
           
@@ -830,16 +1184,15 @@
           };
           this.monotonic_progress = 0;
           
-          // Determine keep_config based on keep_config_option
-          const shouldKeepConfig = this.keep_config_option !== '';
-          
+          const flags = this.sysupgrade_flag_list();
+
           // Show logs expanded by default for firmware upgrades
           this.show_download_logs = true;
           this.download_log_output = "";
           this.add_download_log("🔧 Starting firmware upgrade...");
           this.add_download_log(`📦 Target firmware: ${this.upgrade_firmware_info.download_url.split('/').pop()}`);
           this.add_download_log(`🌐 Source URL: ${this.upgrade_firmware_info.download_url}`);
-          this.add_download_log(`⚙️ Keep config: ${shouldKeepConfig ? 'Yes (' + this.keep_config_option + ')' : 'No (fresh install)'}`);
+          this.add_download_log(`⚙️ Command: sysupgrade ${flags.join(' ')}`);
           this.add_download_log(`📥 Download method: ${this.download_method}`);
           if (this.upgrade_firmware_info.local_version) {
             this.add_download_log(`📋 Current version: ${this.upgrade_firmware_info.local_version}`);
@@ -849,8 +1202,7 @@
           // Emit socket event to start firmware upgrade
           window.socket.emit("request_firmware_upgrade", {
             firmware_url: this.upgrade_firmware_info.download_url,
-            keep_config: shouldKeepConfig, // Set based on whether any preservation option is selected
-            keep_config_option: this.keep_config_option, // Specific option (-c, -o, or empty)
+            sysupgrade_flags: flags,
             download_method: this.download_method
           });
           
@@ -879,9 +1231,10 @@
               // There's an ongoing upgrade, update the UI
               this.upgrade_status = data;
               this.firmware_upgrading = true;
-              this.keep_config = data.keep_config || true;
-              this.keep_config_option = data.keep_config_option || '-c';
-              
+              if (Array.isArray(data.sysupgrade_flags)) {
+                this.sysupgrade_flags = data.sysupgrade_flags.filter(f => f !== '-n');
+              }
+
               // Initialize monotonic progress with current progress
               this.monotonic_progress = data.progress || 0;
               
@@ -894,6 +1247,25 @@
           .catch(error => {
             console.warn("Failed to check ongoing firmware upgrade:", error);
             this.showNotification('Failed to check ongoing firmware upgrade', '检查正在进行的固件升级失败', 'error');
+          });
+      },
+
+      check_ongoing_mcu_update() {
+        // Restore MCU-updating state after a page reload so the firmware
+        // controls stay locked while an MCU update the user started earlier is
+        // still running (mirrors check_ongoing_upgrade for firmware).
+        fetch("/api/v1/mcu_update_status.json")
+          .then(response => response.json())
+          .then(data => {
+            if (data.status === "ok" && data.active) {
+              this.mcu_update_status = data;
+              this.mcu_updating = true;
+              this.poll_mcu_update_status();
+              console.log("Resumed monitoring ongoing MCU update:", data.stage);
+            }
+          })
+          .catch(error => {
+            console.warn("Failed to check ongoing MCU update:", error);
           });
       },
 
@@ -955,7 +1327,58 @@
       hideNotification() {
         this.notification.show = false;
       },
-      
+
+      // ---- Mutual exclusion between firmware and MCU updates ----
+      // The device can only run ONE update at a time. These helpers report
+      // whether either kind is being prepared or is already running, so the
+      // other kind's buttons stay locked out and its requests are refused.
+      firmware_busy() {
+        return this.firmware_upgrading || this.checkpoint_mode ||
+               this.confirming_firmware_upgrade || this.production_firmware_upgrading ||
+               this.dev_firmware_upgrading;
+      },
+
+      mcu_busy() {
+        return this.mcu_updating || this.confirming_mcu_upgrade ||
+               this.mcu_dev_updating || this.mcu_prod_updating;
+      },
+
+      // Returns true (and shows a message) when the user tries to start one
+      // kind of update while the other is still in progress. Callers bail out.
+      other_update_blocks(kind) {
+        if (kind === 'firmware' && this.mcu_busy()) {
+          this.showNotification(
+            'An MCU update is in progress. Please wait for it to finish before upgrading the firmware.',
+            'MCU 更新正在进行中，请等待其完成后再升级固件。', 'error');
+          return true;
+        }
+        if (kind === 'mcu' && this.firmware_busy()) {
+          this.showNotification(
+            'A firmware upgrade is in progress. Please wait for it to finish before updating the MCU.',
+            '固件升级正在进行中，请等待其完成后再更新 MCU。', 'error');
+          return true;
+        }
+        return false;
+      },
+
+      // Gate the MCU confirmation modal on the firmware lock so the user can't
+      // even open it while a firmware upgrade is running.
+      open_mcu_upgrade_modal() {
+        if (this.other_update_blocks('mcu')) return;
+        this.show_mcu_upgrade_modal = true;
+      },
+
+      // Close the firmware upgrade confirmation modal and clear the "arming"
+      // flags. start_dev_firmware_upgrade() sets dev_firmware_upgrading before
+      // opening the modal, so a plain cancel would otherwise leave firmware_busy()
+      // true and keep both the firmware and MCU buttons stuck disabled.
+      cancel_upgrade_modal() {
+        this.show_upgrade_modal = false;
+        this.dev_firmware_upgrading = false;
+        this.production_firmware_upgrading = false;
+        this.confirming_firmware_upgrade = false;
+      },
+
       // MCU Update functions
       check_mcu_updates() {
         this.mcu_checks_loading = true;
@@ -978,6 +1401,9 @@
             if (data.status === "ok" && data.reachable === true) {
               this.mcu_dev_server_reachable = true;
               this.mcu_dev_info = data;
+              this.mcu_dev_versions_list = data.versions || [];
+              this.mcu_dev_selected_index = "0";
+              this.mcu_dev_changelog = this.mcu_dev_versions_list.length > 0 ? (this.mcu_dev_versions_list[0].message || "") : "";
               this.mcu_dev_versions_same = data.local_version === data.dev_version;
               this.mcu_dev_update_available = data.update_available || data.newer_available;
               
@@ -1002,18 +1428,100 @@
           .then(response => response.json())
           .then(data => {
             this.mcu_prod_info = data;
-            
+
             if (data.status === "ok" && data.reachable === true) {
+                this.mcu_prod_versions_list = data.versions || [];
+                this.mcu_prod_selected_index = "0";
                 this.mcu_prod_update_available = data.update_available || data.newer_available;
+                // Successful check means the device is back online.
+                this.mcu_just_updated = false;
             }
           })
           .catch(error => {
             console.error("Error checking production MCU updates:", error);
-            this.showNotification('Failed to check MCU updates', '检查MCU更新失败', 'error');
+            // If a firmware or MCU update just finished, the device is
+            // restarting and the network is briefly unavailable — this is
+            // expected, not a real failure. Show a restarting message.
+            if (this.is_restarting_after_update()) {
+              this.mcu_just_updated = false;
+              this.showNotification('Device is restarting after MCU update...', '设备更新后正在重启...', 'info');
+            } else {
+              this.showNotification('Failed to check MCU updates', '检查MCU更新失败', 'error');
+            }
           });
       },
 
+      // ---- MCU version dropdown support (downgrades for testers) ----
+      mcu_dev_selected_version() {
+        return this.mcu_dev_versions_list[parseInt(this.mcu_dev_selected_index, 10)] || null;
+      },
+
+      mcu_prod_selected_version() {
+        return this.mcu_prod_versions_list[parseInt(this.mcu_prod_selected_index, 10)] || null;
+      },
+
+      // Chronological key embedded in MCU version strings
+      // (<5-char prefix>YYMMDDsss, 14 chars); null when the shape differs.
+      mcu_version_key(version) {
+        if (!version || version.length !== 14) return null;
+        const digits = version.slice(5);
+        return /^[0-9]{9}$/.test(digits) ? parseInt(digits, 10) : null;
+      },
+
+      mcu_version_newer(localVersion, remoteVersion) {
+        if (!remoteVersion) return false;
+        const localKey = this.mcu_version_key(localVersion);
+        const remoteKey = this.mcu_version_key(remoteVersion);
+        if (localKey !== null && remoteKey !== null) return remoteKey > localKey;
+        return remoteVersion > localVersion;
+      },
+
+      // True when a live-server MCU version other than the installed one is
+      // selected, which unlocks the install button for downgrades/reinstalls.
+      // Requires a readable local version so devices whose MCU can't report
+      // one don't get offered an install.
+      mcu_prod_selected_differs() {
+        const v = this.mcu_prod_selected_version();
+        const local = this.mcu_prod_info.local_version;
+        return !!(v && v.version && local && local !== 'Unknown' && v.version !== local);
+      },
+
+      on_mcu_dev_version_selected() {
+        const v = this.mcu_dev_selected_version();
+        if (!v) return;
+        // Point the dev summary cards and update button at the selection;
+        // the newer/same/older card states recompute against it.
+        this.mcu_dev_info.dev_version = v.version;
+        this.mcu_dev_info.dev_firmware_url = v.firmware_url;
+        this.mcu_dev_info.dev_sha256 = v.sha256 || "";
+        this.mcu_dev_info.dev_build_date = v.build_date || "";
+        this.mcu_dev_changelog = v.message || "";
+        this.mcu_dev_versions_same = this.mcu_dev_info.local_version === v.version;
+        this.mcu_dev_update_available = this.mcu_version_newer(this.mcu_dev_info.local_version, v.version);
+      },
+
+      on_mcu_prod_version_selected() {
+        const v = this.mcu_prod_selected_version();
+        if (!v) return;
+        this.mcu_prod_info.prod_version = v.version;
+        this.mcu_prod_info.prod_firmware_url = v.firmware_url;
+        this.mcu_prod_info.prod_sha256 = v.sha256 || "";
+        this.mcu_prod_info.prod_build_date = v.build_date || "";
+        this.mcu_prod_update_available = this.mcu_version_newer(this.mcu_prod_info.local_version, v.version);
+        this.mcu_prod_info.same_version = v.version === this.mcu_prod_info.local_version;
+        this.mcu_prod_info.local_is_newer = !!v.version && !this.mcu_prod_info.same_version && !this.mcu_prod_update_available;
+      },
+
+      mcu_version_option_label(v, i, localVersion) {
+        let label = v.version;
+        if (v.build_date) label += ' | ' + v.build_date;
+        if (i === 0) label += ' ({{locales.version_latest_tag}})';
+        if (localVersion && v.version === localVersion) label += ' ({{locales.version_installed_tag}})';
+        return label;
+      },
+
       start_mcu_dev_update() {
+        if (this.other_update_blocks('mcu')) return;
         if (!this.mcu_dev_info.dev_firmware_url) {
           this.showNotification('No dev MCU firmware URL available', '开发MCU固件下载链接不可用', 'error');
           return;
@@ -1026,6 +1534,7 @@
       },
 
       start_mcu_prod_update() {
+        if (this.other_update_blocks('mcu')) return;
         this.show_mcu_upgrade_modal = false;
         this.confirming_mcu_upgrade = true;
         this.mcu_prod_updating = true;
@@ -1086,7 +1595,17 @@
                 this.reset_mcu_updating_states();
                 this.showNotification('MCU update completed successfully', 'MCU更新成功完成', 'success');
                 clearInterval(pollInterval);
-                
+
+                // Device is restarting after the update, so the network is
+                // briefly down. Flag it so the follow-up re-check treats a
+                // failed request as "restarting" rather than a real error.
+                this.mcu_just_updated = true;
+
+                // Raise the restarting overlay (elapsed timer + auto reload
+                // once the device is back). If the MCU flash turns out not to
+                // restart the device, the watch times out and dismisses.
+                Alpine.store('app').begin_restart_watch('update');
+
                 // Refresh MCU version info
                 setTimeout(() => {
                   this.check_mcu_updates();
@@ -1156,6 +1675,7 @@
       },
 
       start_checkpoint_mode() {
+        if (this.other_update_blocks('firmware')) return;
         if (!this.upgrade_firmware_info.download_url) {
           this.showNotification('No firmware download URL available', '固件下载链接不可用', 'error');
           return;
@@ -1179,8 +1699,6 @@
         // Start download process
         window.socket.emit("request_firmware_checkpoint", {
           firmware_url: this.upgrade_firmware_info.download_url,
-          keep_config: this.keep_config_option !== '',
-          keep_config_option: this.keep_config_option,
           download_method: this.download_method
         });
         
@@ -1218,6 +1736,7 @@
       },
 
       proceedWithInstallation(filePath, sha256) {
+        if (this.other_update_blocks('firmware')) return;
         console.log("Proceeding with firmware installation:", filePath);
         
         this.firmware_upgrading = true;
@@ -1235,8 +1754,7 @@
         window.socket.emit("request_firmware_install_from_checkpoint", {
           file_path: filePath,
           sha256: sha256,
-          keep_config: this.keep_config_option !== '',
-          keep_config_option: this.keep_config_option
+          sysupgrade_flags: this.sysupgrade_flag_list()
         });
       },
 

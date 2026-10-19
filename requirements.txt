@@ -1,10 +1,10 @@
 htmlmin==0.1.12
 flask==3.0.0
-flask_socketio==5.6.1
-python-engineio==4.13.1
-python-socketio==5.16.1
-simple-websocket>=1.0.0
-requests==2.31.0 
+# No socket.io: under granian's WSGI interface websockets are disabled, so it
+# fell back to long-polling and every connected tab permanently held one of the
+# four --blocking-threads request slots (issue #113). Push is now app/pcat_util
+# /event_bus, which is stdlib only.
+requests==2.31.0
 click==8.1.7
 Werkzeug==3.0.1
 Jinja2==3.1.3

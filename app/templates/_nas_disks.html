@@ -1,0 +1,125 @@
+<div class="overflow-hidden rounded-lg bg-white shadow">
+  <template x-if="!disks.length">
+    <div class="p-4 text-center text-sm text-gray-500">{{locales.disks_no_disks}}</div>
+  </template>
+
+  <div class="divide-y divide-gray-100">
+    <template x-for="disk in disks" :key="disk.dev">
+      <div>
+        <!-- disk node -->
+        <div class="flex items-center gap-2 bg-gray-50 px-3 py-2">
+          <img src="/static/nas.svg" class="h-4 w-4 flex-shrink-0" />
+          <div class="min-w-0 flex-1">
+            <span class="text-sm font-semibold text-gray-700" x-text="busLabel(disk.bus)"></span>
+            <span class="text-xs text-gray-400" x-text="nasFormatSize(disk.size_bytes)"></span>
+            <span x-show="disk.protected" class="cursor-help text-xs" title="{{locales.disks_protected_hint}}">🔒</span>
+            <div class="truncate text-xs text-gray-400" x-text="disk.model || disk.dev"></div>
+          </div>
+          <button @click="openPartitions(disk)" title="{{locales.disks_partitions}}"
+            class="flex-shrink-0 rounded px-1.5 py-0.5 text-xs text-gray-400 hover:bg-gray-200 hover:text-gray-600">⚙</button>
+        </div>
+
+        <!-- one-click: turn unused space / blank data partition into a mounted volume -->
+        <div x-show="canUseFreeSpace(disk)" class="flex items-center justify-between gap-2 px-3 pb-2 pt-1">
+          <span class="text-xs text-gray-400">
+            <template x-if="diskFreeGb(disk) >= 1">
+              <span><span x-text="diskFreeGb(disk)"></span> GB {{locales.disks_free_space}}</span>
+            </template>
+            <template x-if="diskFreeGb(disk) < 1">
+              <span>{{locales.disks_use_free_hint}}</span>
+            </template>
+          </span>
+          <button @click="useFreeSpace(disk)" title="{{locales.disks_use_free_hint}}"
+            class="rounded border border-pcatblue px-2 py-0.5 text-xs text-pcatblue hover:bg-blue-50">{{locales.disks_use_free}}</button>
+        </div>
+
+        <!-- partition children, proxmox-tree style -->
+        <template x-for="part in disk.partitions" :key="part.dev">
+          <div class="group relative flex items-center gap-2 py-1.5 pl-9 pr-2"
+            :class="part.mounted && path && path.startsWith(part.mountpoint) ? 'bg-blue-50' : 'hover:bg-gray-50'">
+            <span class="absolute left-4 top-0 h-full w-px bg-gray-200"></span>
+            <span class="absolute left-4 top-1/2 h-px w-3 bg-gray-200"></span>
+            <button @click="part.mounted && loadFiles(part.mountpoint)" class="min-w-0 flex-1 text-left"
+              :class="part.mounted ? 'cursor-pointer' : 'cursor-default'">
+              <div class="flex items-center gap-1 truncate text-xs">
+                <span x-text="part.protected ? '🔒' : (part.mounted ? '📂' : '💾')"></span>
+                <span class="font-medium"
+                  :class="part.mounted && path && path.startsWith(part.mountpoint) ? 'text-pcatblue' : part.mounted ? 'text-gray-700' : 'text-gray-400'"
+                  x-text="part.label || part.dev.replace('/dev/','')"></span>
+                <span class="text-gray-400" x-text="part.fs || (part.protected ? '' : '{{locales.disks_unformatted}}')"></span>
+              </div>
+              <div class="truncate pl-5 text-xs text-gray-400">
+                <span x-text="nasFormatSize(part.size_bytes)"></span>
+                <span x-show="part.mounted && part.avail_bytes !== null">
+                  · <span x-text="nasFormatSize(part.avail_bytes)"></span> {{locales.files_free}}
+                </span>
+              </div>
+            </button>
+            <!-- Mount / format only here. Automount + SMART live under Settings. -->
+            <template x-if="!part.protected">
+              <div class="flex flex-shrink-0 items-center gap-1">
+                <button x-show="!part.mounted && part.fs" @click="diskMount(part, 'mount')" :disabled="busyDev == part.dev"
+                  class="rounded bg-pcatblue px-2 py-0.5 text-xs text-white disabled:opacity-50">{{locales.disks_btn_mount}}</button>
+                <button x-show="!part.mounted" @click="formatDataPart(part, disk)" :disabled="busyDev == part.dev"
+                  class="rounded border border-pcatblue px-2 py-0.5 text-xs text-pcatblue disabled:opacity-50">{{locales.part_btn_format}}</button>
+                <button x-show="part.mounted" @click="diskMount(part, 'unmount')" :disabled="busyDev == part.dev"
+                  title="{{locales.disks_btn_unmount}}"
+                  class="rounded px-1.5 py-0.5 text-xs text-gray-400 opacity-0 hover:bg-gray-200 hover:text-gray-600 group-hover:opacity-100 disabled:opacity-50">⏏</button>
+              </div>
+            </template>
+          </div>
+        </template>
+      </div>
+    </template>
+  </div>
+
+  <!-- Format filesystem chooser (disk tree & data partitions) -->
+  <div x-show="formatModal.open" x-cloak
+    class="fixed inset-0 z-40 flex items-center justify-center bg-black bg-opacity-40 p-4"
+    @click.self="formatModal.open = false" @keydown.escape.window="formatModal.open = false">
+    <div class="w-full max-w-md rounded-lg bg-white p-5 shadow-xl" @click.stop>
+      <div class="flex items-center justify-between">
+        <h3 class="font-bold text-gray-700">{{locales.part_btn_format}}</h3>
+        <button type="button" @click="formatModal.open = false" class="text-2xl leading-none text-gray-400">&times;</button>
+      </div>
+      <p class="mt-1 font-mono text-xs text-gray-400" x-text="formatModal.dev"></p>
+      <p class="mt-2 text-xs text-amber-700">{{locales.confirm_cannot_undo}}</p>
+
+      <div class="mt-4 space-y-3 text-sm">
+        <div>
+          <label class="mb-1 block text-xs font-medium text-gray-500">{{locales.part_fs_type}}</label>
+          <div class="space-y-1.5">
+            <template x-for="opt in formatFsOptions()" :key="opt.id">
+              <label class="flex cursor-pointer items-start gap-2 rounded border px-3 py-2"
+                :class="formatModal.fs == opt.id ? 'border-pcatblue bg-blue-50' : 'border-gray-200 hover:bg-gray-50'"
+                :style="!fsToolAvailable(opt.tool) ? 'opacity:0.45' : ''">
+                <input type="radio" class="mt-1" name="format-fs" :value="opt.id"
+                  x-model="formatModal.fs" :disabled="!fsToolAvailable(opt.tool)" />
+                <span class="min-w-0 flex-1">
+                  <span class="font-medium text-gray-700" x-text="opt.label"></span>
+                  <span x-show="!fsToolAvailable(opt.tool)" class="ml-1 text-xs text-red-500">{{locales.part_fs_not_installed}}</span>
+                  <div class="text-xs text-gray-400" x-text="opt.hint"></div>
+                </span>
+              </label>
+            </template>
+          </div>
+        </div>
+        <div>
+          <label class="mb-1 block text-xs font-medium text-gray-500">{{locales.part_fs_label}}</label>
+          <input x-model="formatModal.label" maxlength="16"
+            class="w-full rounded border border-gray-300 px-2 py-1.5 text-sm"
+            placeholder="pcat-data" />
+        </div>
+      </div>
+
+      <div class="mt-5 flex justify-end gap-2">
+        <button type="button" @click="formatModal.open = false"
+          class="rounded border border-gray-300 px-3 py-1.5 text-sm text-gray-600">{{locales.shares_btn_cancel}}</button>
+        <button type="button" @click="submitFormatModal()"
+          :disabled="formatModal.busy || !fsToolAvailable(formatModal.fs == 'vfat' ? 'vfat' : formatModal.fs)"
+          class="rounded bg-pcatblue px-4 py-1.5 text-sm text-white disabled:opacity-50">{{locales.part_btn_format}}</button>
+      </div>
+    </div>
+  </div>
+
+</div>

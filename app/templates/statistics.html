@@ -1,4 +1,5 @@
-{% extends '_base.html' %} {% block content %}
+{% extends '_base.html' %}
+{% block page_title %}{{locales["nav_statistics"]}}{% endblock %} {% block content %}
 <div class="container mx-auto w-full pt-10 pb-12 sm:pt-24 sm:pb-12 md:pt-28 lg:px-4" x-data="statistics">
   <div class="flex items-center justify-between">
     <h1 class="px-1 py-4 font-bold uppercase text-gray-600">{{locales["nav_statistics"]}}</h1>
@@ -6,6 +7,7 @@
 
   {% include '_notification.html' %}
 
+  <!-- Row 1: Battery history (with uptime) -->
   <!-- Battery History Chart -->
   <div class="mb-4 px-2 lg:px-0">
     <div class="rounded border bg-white shadow">
@@ -38,6 +40,9 @@
             <span class="w-3 h-0.5 bg-green-500 inline-block"></span>
             <span>{{locales.battery_chart_voltage}}</span>
           </label>
+          {% if is_photonicat2 %}
+          <!-- Power needs the gauge's current reading and temperature the MCU's
+               sensor; a Photonicat 1 has neither, so it gets no toggle for them. -->
           <label class="flex items-center space-x-1 cursor-pointer">
             <input type="checkbox" x-model="bat_show_current" class="form-checkbox h-3 w-3 rounded" style="color: #FDE021" />
             <span class="w-3 h-0.5 inline-block" style="background: #FDE021"></span>
@@ -48,6 +53,7 @@
             <span class="w-3 h-0.5 bg-red-500 inline-block"></span>
             <span>{{locales.battery_chart_temp}}</span>
           </label>
+          {% endif %}
           <span class="flex items-center space-x-1">
             <span class="w-0 h-0 inline-block" style="border-left: 4px solid transparent; border-right: 4px solid transparent; border-bottom: 6px solid #22c55e"></span>
             <span>{{locales.battery_chart_power_on}}</span>
@@ -82,103 +88,101 @@
     </div>
   </div>
 
-  <!-- Two column: Device List + Traffic Stats -->
-  <div class="mb-8 flex w-full flex-col space-y-4 px-2 leading-normal text-gray-800 lg:flex-row lg:space-y-0 lg:space-x-4 lg:px-0">
-    <div class="grow">
-      <div class="rounded border bg-white shadow">
-        <div class="border-b p-3">
+  <!-- Row 2: Live throughput (left) + Traffic statistics (right) -->
+  <div class="mb-4 flex w-full flex-col gap-4 px-2 leading-normal text-gray-800 lg:flex-row lg:px-0">
+    <div class="flex min-w-0 lg:flex-[2]">
+      <div class="flex w-full flex-col rounded border bg-white shadow">
+        <div class="border-b p-3 flex items-center justify-between">
           <h5 class="flex items-center font-bold text-gray-600">
-            <svg xmlns="http://www.w3.org/2000/svg" class="mr-2 h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 10h16M4 14h16M4 18h16"></path>
+            <svg xmlns="http://www.w3.org/2000/svg" class="mr-2 h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M3 17l6-6 4 4 8-8m0 0h-5m5 0v5"></path>
             </svg>
-            {{locales["card_device_list"]}}
+            {{locales.card_live_rate}}
+            <span class="ml-2 text-xs font-normal text-gray-400" x-text="rate_egress_label"></span>
           </h5>
+          <div class="flex items-center space-x-4 text-xs">
+            <span class="flex items-center space-x-1">
+              <span class="w-3 h-0.5 bg-blue-500 inline-block"></span>
+              <span class="text-gray-500">{{locales.rate_download}}</span>
+              <span class="font-semibold tabular-nums text-gray-700" x-text="fmtRate(rate_now.down)"></span>
+            </span>
+            <span class="flex items-center space-x-1">
+              <span class="w-3 h-0.5 bg-green-500 inline-block"></span>
+              <span class="text-gray-500">{{locales.rate_upload}}</span>
+              <span class="font-semibold tabular-nums text-gray-700" x-text="fmtRate(rate_now.up)"></span>
+            </span>
+          </div>
         </div>
         <div class="p-3">
-          <table class="whitespace-no-wrap w-full">
-            <thead class="text-sm">
-              <tr>
-                <th class="text-left">{{locales["mac_address"]}}</th>
-                <th class="text-left">{{locales["ip_address"]}}</th>
-                <th class="text-left">{{locales["device_name"]}}</th>
-              </tr>
-            </thead>
-            <tbody class="divide-y bg-white">
-              <template x-for="device in online_devices">
-                <tr class="hover:bg-gray-100">
-                  <td class="py-3 text-left text-sm" x-text="device.mac"></td>
-                  <td class="text-left text-sm" x-text="device.ip"></td>
-                  <td class="text-left text-sm" x-text="device.name"></td>
-                </tr>
-              </template>
-            </tbody>
-          </table>
+          <div class="relative" style="height: 200px">
+            <canvas x-ref="rateCanvas" width="800" height="200" style="width: 100%; height: 200px; display: block"></canvas>
+            <div x-show="rate_no_egress" class="absolute inset-0 flex items-center justify-center text-gray-400 text-sm">{{locales.rate_no_egress}}</div>
+          </div>
+          <div class="mt-1 text-right text-xs text-gray-400">
+            {{locales.rate_window}}
+            <span class="tabular-nums" x-text="fmtRate(rate_peak.down)"></span> &darr; /
+            <span class="tabular-nums" x-text="fmtRate(rate_peak.up)"></span> &uarr;
+          </div>
         </div>
       </div>
     </div>
-    <div class="grow" x-data="{clear_btn_show: true}">
-      <div class="rounded border bg-white shadow">
-        <div class="border-b">
-          <h5 class="flex items-center justify-between px-3 font-bold text-gray-600">
-            <div class="flex">
-              <div class="mr-2 flex p-3">
-                <svg xmlns="http://www.w3.org/2000/svg" class="mr-2 h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                  <path stroke-linecap="round" stroke-linejoin="round" d="M16 8v8m-4-5v5m-4-2v2m-2 4h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
-                </svg>
-                {{locales["card_traffic_stats"]}}
-              </div>
-
-              <div class="flex items-stretch">
-                <button :class="network_type === 'mobile' ? 'border-b-2 border-b-pcatblue' : '' " :disabled="loading.fetchMobileStats || loading.fetchWiredStats" class="flex items-center border-x px-4 hover:bg-gray-100 disabled:bg-gray-50 disabled:cursor-not-allowed" @click="fetch_data_stats('mobile')">
-                  <svg x-show="loading.fetchMobileStats" class="animate-spin -ml-1 mr-2 h-4 w-4 text-gray-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                  </svg>
-                  <span x-text="loading.fetchMobileStats ? 'Loading...' : '{{locales.network_type_mobile}}'"></span>
-                </button>
-              </div>
-              <div class="flex items-stretch">
-                <button :class="network_type === 'wired' ? 'border-b-2 border-b-pcatblue' : '' " :disabled="loading.fetchMobileStats || loading.fetchWiredStats" class="flex items-center border-x px-4 hover:bg-gray-100 disabled:bg-gray-50 disabled:cursor-not-allowed" @click="fetch_data_stats('wired')">
-                  <svg x-show="loading.fetchWiredStats" class="animate-spin -ml-1 mr-2 h-4 w-4 text-gray-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                  </svg>
-                  <span x-text="loading.fetchWiredStats ? 'Loading...' : '{{locales.network_type_wired}}'"></span>
-                </button>
-              </div>
-            </div>
-            <button @click="reset_statics" x-show="clear_btn_show" :disabled="loading.resetStats" :class="loading.resetStats ? 'text-gray-400 cursor-not-allowed' : 'text-gray-600 hover:text-red-600'" class="p-1 rounded transition-colors duration-150">
-              <svg x-show="loading.resetStats" class="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+    <div class="flex min-w-0 lg:flex-1" x-data="{clear_btn_show: true}">
+      <div class="flex w-full flex-col rounded border bg-white shadow">
+        <div class="border-b p-3 flex items-center justify-between">
+          <h5 class="flex items-center font-bold text-gray-600">
+            <svg xmlns="http://www.w3.org/2000/svg" class="mr-2 h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M16 8v8m-4-5v5m-4-2v2m-2 4h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
+            </svg>
+            {{locales["card_traffic_stats"]}}
+            <span class="ml-2" x-show="loading.fetchMobileStats || loading.fetchWiredStats">
+              <svg class="animate-spin h-4 w-4 text-gray-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                 <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
                 <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
               </svg>
-              <svg x-show="!loading.resetStats" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-trash-2">
-                <polyline points="3 6 5 6 21 6"></polyline>
-                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
-                <line x1="10" y1="11" x2="10" y2="17"></line>
-                <line x1="14" y1="11" x2="14" y2="17"></line>
-              </svg>
-            </button>
+            </span>
           </h5>
+          <button @click="reset_statics" x-show="clear_btn_show" :disabled="loading.resetStats" :class="loading.resetStats ? 'text-gray-400 cursor-not-allowed' : 'text-gray-600 hover:text-red-600'" class="p-1 rounded transition-colors duration-150">
+            <svg x-show="loading.resetStats" class="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            <svg x-show="!loading.resetStats" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-trash-2">
+              <polyline points="3 6 5 6 21 6"></polyline>
+              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+              <line x1="10" y1="11" x2="10" y2="17"></line>
+              <line x1="14" y1="11" x2="14" y2="17"></line>
+            </svg>
+          </button>
         </div>
-        <div class="p-3">
-          <table class="whitespace-no-wrap w-full">
+        <div class="flex-1 p-3">
+          <table class="whitespace-no-wrap h-full w-full">
+            <thead>
+              <tr class="text-left text-xs font-semibold uppercase tracking-wide text-gray-400">
+                <th class="pb-2 font-semibold"></th>
+                <th class="pb-2 text-right font-semibold normal-case text-sm">{{locales["network_type_mobile"]}}</th>
+                <th class="pb-2 text-right font-semibold normal-case text-sm">{{locales["network_type_wired"]}}</th>
+              </tr>
+            </thead>
             <tbody class="divide-y bg-white">
-              <tr class="hover:bg-gray-100">
-                <td class="py-3 text-left text-sm">{{locales["today_used"]}}</td>
-                <td class="text-right text-sm" x-text="today_used_size"></td>
+              <tr class="hover:bg-gray-50">
+                <td class="py-3 text-left text-base text-gray-600">{{locales["today_used"]}}</td>
+                <td class="text-right text-base font-semibold tabular-nums text-gray-800" x-text="humanFileSize(live_usage('mobile', 'today_used'), true)"></td>
+                <td class="text-right text-base font-semibold tabular-nums text-gray-800" x-text="humanFileSize(live_usage('wired', 'today_used'), true)"></td>
               </tr>
-              <tr class="hover:bg-gray-100">
-                <td class="py-3 text-left text-sm">{{locales["week_used"]}}</td>
-                <td class="text-right text-sm" x-text="week_used_size"></td>
+              <tr class="hover:bg-gray-50">
+                <td class="py-3 text-left text-base text-gray-600">{{locales["week_used"]}}</td>
+                <td class="text-right text-base font-semibold tabular-nums text-gray-800" x-text="humanFileSize(live_usage('mobile', 'week_used'), true)"></td>
+                <td class="text-right text-base font-semibold tabular-nums text-gray-800" x-text="humanFileSize(live_usage('wired', 'week_used'), true)"></td>
               </tr>
-              <tr class="hover:bg-gray-100">
-                <td class="py-3 text-left text-sm">{{locales["month_used"]}}</td>
-                <td class="text-right text-sm" x-text="month_used_size"></td>
+              <tr class="hover:bg-gray-50">
+                <td class="py-3 text-left text-base text-gray-600">{{locales["month_used"]}}</td>
+                <td class="text-right text-base font-semibold tabular-nums text-gray-800" x-text="humanFileSize(live_usage('mobile', 'month_used'), true)"></td>
+                <td class="text-right text-base font-semibold tabular-nums text-gray-800" x-text="humanFileSize(live_usage('wired', 'month_used'), true)"></td>
               </tr>
-              <tr class="hover:bg-gray-100">
-                <td class="py-3 text-left text-sm">{{locales["last_month_used"]}}</td>
-                <td class="text-right text-sm" x-text="last_month_used_size"></td>
+              <tr class="hover:bg-gray-50">
+                <td class="py-3 text-left text-base text-gray-600">{{locales["last_month_used"]}}</td>
+                <td class="text-right text-base font-semibold tabular-nums text-gray-800" x-text="humanFileSize(live_usage('mobile', 'last_month_used'), true)"></td>
+                <td class="text-right text-base font-semibold tabular-nums text-gray-800" x-text="humanFileSize(live_usage('wired', 'last_month_used'), true)"></td>
               </tr>
             </tbody>
           </table>
@@ -186,6 +190,87 @@
       </div>
     </div>
   </div>
+
+  <!-- Row 2b: system badges (CPU / memory / disks / TCP connections) -->
+  <div class="mb-4 flex flex-wrap gap-4 px-2 lg:px-0">
+    <template x-for="tile in sys_tiles" :key="tile.key">
+      <div class="min-w-0 flex-1 basis-40 rounded border bg-white p-3 shadow">
+        <div class="truncate text-xs text-gray-500" x-text="tile.label"></div>
+        <div class="mt-1 text-2xl font-semibold leading-tight text-gray-800" x-text="tile.value"></div>
+        <div class="mt-1 truncate text-xs text-gray-400" x-text="tile.sub"></div>
+        <!-- Per-core bars (CPU): one vertical bar per core, fill from the bottom -->
+        <div x-show="tile.bars" class="mt-2 flex h-8 items-end gap-0.5">
+          <template x-for="(b, i) in (tile.bars || [])" :key="i">
+            <div class="relative h-8 flex-1 overflow-hidden rounded-sm" :class="b.track" :title="'cpu' + i + ': ' + Math.round(b.pct) + '%'">
+              <div class="absolute inset-x-0 bottom-0 rounded-sm transition-all duration-500" :class="b.fill" :style="'height:' + Math.max(2, Math.min(100, b.pct)) + '%'"></div>
+            </div>
+          </template>
+        </div>
+        <!-- Meter: fill carries severity, the track is a lighter step of the same ramp -->
+        <div x-show="!tile.bars && tile.percent !== null" class="mt-2 h-1.5 w-full overflow-hidden rounded-full" :class="tile.track">
+          <div class="h-1.5 rounded-full transition-all duration-500" :class="tile.fill" :style="'width:' + Math.max(0, Math.min(100, tile.percent || 0)) + '%'"></div>
+        </div>
+      </div>
+    </template>
+  </div>
+
+  <!-- Row 3: Device list (every DHCP lease + Wi-Fi association) -->
+  <div class="mb-4 px-2 lg:px-0">
+    <div class="rounded border bg-white shadow">
+      <div class="border-b p-3 flex items-center justify-between">
+        <h5 class="flex items-center font-bold text-gray-600">
+          <svg xmlns="http://www.w3.org/2000/svg" class="mr-2 h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M4 6h16M4 10h16M4 14h16M4 18h16"></path>
+          </svg>
+          {{locales["card_device_list"]}}
+          <span class="ml-2 text-xs font-normal text-gray-400" x-show="shown_devices.length" x-text="'(' + shown_devices.length + ')'"></span>
+        </h5>
+        <!-- Filter: every lease (DHCP), associated Wi-Fi stations, or both. -->
+        <div class="flex space-x-1">
+          <button @click="set_device_filter('all')" :class="device_filter === 'all' ? 'bg-pcatblue text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'" class="px-3 py-1 text-xs rounded-l-lg font-medium transition-colors">{{locales.filter_all}} <span x-text="online_devices.length"></span></button>
+          <button @click="set_device_filter('wifi')" :class="device_filter === 'wifi' ? 'bg-pcatblue text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'" class="px-3 py-1 text-xs font-medium transition-colors">{{locales.conn_wifi}} <span x-text="wifi_count"></span></button>
+          <button @click="set_device_filter('dhcp')" :class="device_filter === 'dhcp' ? 'bg-pcatblue text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'" class="px-3 py-1 text-xs rounded-r-lg font-medium transition-colors">{{locales.filter_dhcp}} <span x-text="dhcp_count"></span></button>
+        </div>
+      </div>
+      <div class="p-3 overflow-x-auto">
+        <table class="whitespace-no-wrap w-full">
+          <thead>
+            <tr class="text-left text-xs font-semibold uppercase tracking-wide text-gray-400">
+              <th class="pb-2 font-semibold">{{locales["device_name"]}}</th>
+              <th class="pb-2 font-semibold">{{locales["ip_address"]}}</th>
+              <th class="pb-2 font-semibold">{{locales["mac_address"]}}</th>
+              <th class="pb-2 font-semibold">{{locales.conn_type}}</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y bg-white">
+            <template x-for="device in shown_devices" :key="device.mac">
+              <tr class="hover:bg-gray-50">
+                <td class="py-2 pr-2 text-left text-sm">
+                  <span class="font-medium text-gray-700" x-show="device.name" x-text="device.name"></span>
+                  <span class="text-gray-300" x-show="!device.name">&mdash;</span>
+                </td>
+                <td class="py-2 pr-2 text-left text-sm">
+                  <a x-show="device.ip" :href="'http://' + device.ip" target="_blank" rel="noopener"
+                    class="font-mono text-pcatblue hover:underline" x-text="device.ip"></a>
+                  <span class="text-gray-300" x-show="!device.ip">&mdash;</span>
+                </td>
+                <td class="py-2 pr-2 text-left font-mono text-xs uppercase text-gray-400" x-text="device.mac"></td>
+                <td class="py-2 text-left text-xs">
+                  <span x-show="device.wifi" class="rounded bg-blue-50 px-2 py-0.5 text-blue-600">{{locales.conn_wifi}}</span>
+                  <span x-show="!device.wifi" class="rounded bg-gray-100 px-2 py-0.5 text-gray-500">{{locales.conn_wired}}</span>
+                </td>
+              </tr>
+            </template>
+            <tr x-show="!shown_devices.length">
+              <td colspan="4" class="py-4 text-center text-sm text-gray-300">&mdash;</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+
 </div>
 
 <script>
@@ -204,8 +289,111 @@
     return bytes.toFixed(dp) + " " + units[u];
   }
 
+  // Live throughput chart: the last few minutes of download/upload rate. The page
+  // samples cumulative egress counters once a second and keeps only these
+  // in-memory points -- nothing is stored on the device.
+  function niceCeil(v) {
+    if (v <= 0) return 0;
+    const p = Math.pow(10, Math.floor(Math.log10(v)));
+    const m = v / p;
+    const n = m <= 1 ? 1 : m <= 2 ? 2 : m <= 5 ? 5 : 10;
+    return n * p;
+  }
+
+  function fmtBits(bps) {
+    const units = ["bps", "Kbps", "Mbps", "Gbps"];
+    let u = 0;
+    while (bps >= 1000 && u < units.length - 1) {
+      bps /= 1000;
+      u++;
+    }
+    return (u === 0 ? Math.round(bps) : bps.toFixed(bps >= 100 ? 0 : 1)) + " " + units[u];
+  }
+
+  function drawRateChart(canvas, samples, tsMax, windowSec) {
+    if (!canvas) return;
+    const uiDark = document.documentElement.classList.contains("dark");
+    const gridColor = uiDark ? "#26334a" : "#f0f0f0";
+    const textColor = uiDark ? "#8b9bb4" : "#9ca3af";
+    const ctx = canvas.getContext("2d");
+    const dpr = window.devicePixelRatio || 1;
+    const parent = canvas.parentElement;
+    const W = parent ? parent.offsetWidth : canvas.offsetWidth;
+    const H = 200;
+    if (W < 10) return; // not laid out yet
+    canvas.width = W * dpr;
+    canvas.height = H * dpr;
+    canvas.style.width = W + "px";
+    canvas.style.height = H + "px";
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, W, H);
+
+    const padL = 58, padR = 12, padT = 10, padB = 22;
+    const pw = W - padL - padR, ph = H - padT - padB;
+    const tsMin = tsMax - windowSec;
+    let peak = 0;
+    samples.forEach((s) => { peak = Math.max(peak, s.down, s.up); });
+    // y axis in bits/s with a nice ceiling; an idle link still gets a scale.
+    const yMax = Math.max(niceCeil(peak * 8), 8000);
+    const x = (t) => padL + ((t - tsMin) / windowSec) * pw;
+    const y = (bps) => padT + ph - (bps / yMax) * ph;
+
+    ctx.font = "10px sans-serif";
+    ctx.lineWidth = 1;
+    for (let i = 0; i <= 4; i++) {
+      const v = (yMax * i) / 4, yy = y(v);
+      ctx.strokeStyle = gridColor;
+      ctx.beginPath(); ctx.moveTo(padL, yy); ctx.lineTo(W - padR, yy); ctx.stroke();
+      ctx.fillStyle = textColor;
+      ctx.textAlign = "right"; ctx.textBaseline = "middle";
+      ctx.fillText(fmtBits(v), padL - 6, yy);
+    }
+    ctx.textBaseline = "top";
+    const step = windowSec >= 120 ? 60 : windowSec / 2;
+    for (let back = windowSec; back >= 0; back -= step) {
+      const xx = x(tsMax - back);
+      if (back !== windowSec && back !== 0) {
+        ctx.strokeStyle = gridColor;
+        ctx.beginPath(); ctx.moveTo(xx, padT); ctx.lineTo(xx, padT + ph); ctx.stroke();
+      }
+      ctx.fillStyle = textColor;
+      ctx.textAlign = back === windowSec ? "left" : back === 0 ? "right" : "center";
+      const label = back === 0 ? "now" : step >= 60 ? "-" + Math.round(back / 60) + "m" : "-" + back + "s";
+      ctx.fillText(label, xx, H - padB + 6);
+    }
+
+    const pts = samples.filter((s) => s.t >= tsMin);
+    if (pts.length < 2) return;
+    const trace = (key) => {
+      ctx.beginPath();
+      pts.forEach((s, i) => {
+        const px = x(s.t), py = y(s[key] * 8);
+        if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+      });
+    };
+    const drawSeries = (key, color, fill) => {
+      trace(key);
+      ctx.lineTo(x(pts[pts.length - 1].t), padT + ph);
+      ctx.lineTo(x(pts[0].t), padT + ph);
+      ctx.closePath();
+      ctx.fillStyle = fill;
+      ctx.fill();
+      trace(key);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.5;
+      ctx.lineJoin = "round";
+      ctx.stroke();
+    };
+    drawSeries("down", "#3b82f6", "rgba(59, 130, 246, 0.12)");
+    drawSeries("up", "#22c55e", "rgba(34, 197, 94, 0.10)");
+  }
+
   function drawBatteryChart(canvas, data, showSoc, showVoltage, showCurrent, showTemp, powerEvents, tsMin, tsMax) {
     if (!canvas) return;
+    // Grid/shading tones must follow the night-mode class on <html>.
+    const uiDark = document.documentElement.classList.contains("dark");
+    const gridColor = uiDark ? "#26334a" : "#f0f0f0";
+    const offBandColor = uiDark ? "rgba(96, 112, 140, 0.3)" : "rgba(200, 200, 200, 0.25)";
     const ctx = canvas.getContext("2d");
     const dpr = window.devicePixelRatio || 1;
     const parent = canvas.parentElement;
@@ -235,7 +423,7 @@
     }
 
     // Draw grid
-    ctx.strokeStyle = "#f0f0f0";
+    ctx.strokeStyle = gridColor;
     ctx.lineWidth = 1;
     for (let i = 0; i <= 4; i++) {
       let y = PAD_T + (i / 4) * cH;
@@ -258,7 +446,7 @@
           offStart = ev.ts;
         } else if (isOn && offStart !== null) {
           // Draw grey band from offStart to this start
-          ctx.fillStyle = "rgba(200, 200, 200, 0.25)";
+          ctx.fillStyle = offBandColor;
           let x1 = Math.max(xPos(offStart), PAD_L);
           let x2 = Math.min(xPos(ev.ts), W - PAD_R);
           if (x2 > x1) ctx.fillRect(x1, PAD_T, x2 - x1, cH);
@@ -267,7 +455,7 @@
       }
       // If still off at end of chart, shade to the end
       if (offStart !== null) {
-        ctx.fillStyle = "rgba(200, 200, 200, 0.25)";
+        ctx.fillStyle = offBandColor;
         let x1 = Math.max(xPos(offStart), PAD_L);
         ctx.fillRect(x1, PAD_T, W - PAD_R - x1, cH);
       }
@@ -313,6 +501,67 @@
 
     // Gap threshold: if two consecutive data points are more than 10 minutes apart, break the line
     const GAP_THRESHOLD = 600;
+
+    /* Host SOC is integer % (MCU reports 1-byte whole percent, history stores that).
+     * On a discharge/charge chart next to continuous voltage that looks like a
+     * staircase of long horizontal steps. Reconstruct a smooth series by turning
+     * each plateau into a ramp toward the next step, weighted by |I|·Δt (falls
+     * back to time when current is missing). Large jumps (anchors, long gaps)
+     * are left alone so real events stay visible. */
+    function destepSocSeries(raw) {
+      if (!raw || raw.length === 0) return [];
+      const n = raw.length;
+      const out = new Array(n);
+      for (let i = 0; i < n; i++) {
+        out[i] = { ts: raw[i].ts, v: raw[i].soc == null ? null : Number(raw[i].soc) };
+      }
+      let i = 0;
+      while (i < n) {
+        if (raw[i].soc == null) {
+          i++;
+          continue;
+        }
+        let j = i;
+        while (j + 1 < n && raw[j + 1].soc != null && Number(raw[j + 1].soc) === Number(raw[i].soc)) {
+          j++;
+        }
+        const next = j + 1;
+        if (next < n && raw[next].soc != null) {
+          const delta = Number(raw[next].soc) - Number(raw[i].soc);
+          const gapToNext = raw[next].ts - raw[j].ts;
+          // Only de-step small host-quantization moves on continuous sessions
+          if (Math.abs(delta) >= 1 && Math.abs(delta) <= 3 && gapToNext > 0 && gapToNext <= GAP_THRESHOLD) {
+            const weights = [];
+            let totalW = 0;
+            for (let k = i; k <= j; k++) {
+              let dt;
+              if (k < j) {
+                dt = raw[k + 1].ts - raw[k].ts;
+              } else {
+                dt = gapToNext;
+              }
+              if (!(dt > 0) || dt > GAP_THRESHOLD) dt = 300;
+              const cur = raw[k].current;
+              let w = (cur != null ? Math.abs(Number(cur)) : 0) * dt;
+              if (w < 1) w = dt; // idle / missing current → pure time weight
+              weights.push(w);
+              totalW += w;
+            }
+            if (totalW > 0) {
+              let cum = 0;
+              for (let k = i; k <= j; k++) {
+                // Center of this sample's weight bin → ramp from plateau value toward next
+                const frac = (cum + weights[k - i] * 0.5) / totalW;
+                out[k].v = Number(raw[i].soc) + delta * frac;
+                cum += weights[k - i];
+              }
+            }
+          }
+        }
+        i = j + 1;
+      }
+      return out;
+    }
 
     function drawLine(values, color, yMin, yMax, dashed) {
       if (values.length < 1) return;
@@ -391,10 +640,12 @@
       }
     }
 
-    // SOC: 0-100% (left axis, blue with area fill)
+    // SOC: 0-100% (left axis, blue with area fill). De-step integer plateaus
+    // so the line tracks drain smoothly alongside voltage.
+    let socSmooth = null;
     if (showSoc && data && data.length > 0) {
-      let socData = data.map((d) => ({ ts: d.ts, v: d.soc }));
-      drawAreaLine(socData, "#3b82f6", "rgba(59, 130, 246, 0.12)", 0, 100);
+      socSmooth = destepSocSeries(data);
+      drawAreaLine(socSmooth, "#3b82f6", "rgba(59, 130, 246, 0.12)", 0, 100);
       // Left Y axis labels for SOC
       ctx.fillStyle = "#3b82f6";
       ctx.textAlign = "right";
@@ -463,27 +714,81 @@
       }
     }
 
-    // Store chart meta for tooltip
-    canvas._chartMeta = { data: data || [], powerEvents: powerEvents || [], tsMin, tsMax, tsRange, PAD_L, PAD_R, PAD_T, PAD_B, cW, cH };
+    // Store chart meta for tooltip (include de-stepped SOC for hover readout)
+    canvas._chartMeta = {
+      data: data || [],
+      socSmooth: socSmooth,
+      powerEvents: powerEvents || [],
+      tsMin,
+      tsMax,
+      tsRange,
+      PAD_L,
+      PAD_R,
+      PAD_T,
+      PAD_B,
+      cW,
+      cH,
+    };
   }
+
+  const SYS_LABELS = {
+    cpu: "{{locales.sys_cpu}}",
+    ram: "{{locales.sys_ram}}",
+    disk: "{{locales.sys_disk}}",
+    tcp: "{{locales.sys_tcp}}",
+    load: "{{locales.sys_load}}",
+    cores: "{{locales.sys_cores}}",
+    tracked: "{{locales.sys_tracked}}",
+  };
 
   document.addEventListener("alpine:init", () => {
     Alpine.data("statistics", () => ({
       init() {
+        try {
+          const f = localStorage.getItem("stats_device_filter");
+          if (f === "wifi" || f === "dhcp" || f === "all") this.device_filter = f;
+        } catch (e) {}
+
+        // Device table: every DHCP lease + Wi-Fi association. 5s is plenty
+        // (leases change slowly; the server caches a few seconds anyway).
         const fetch_clients = () => {
-          fetch("/api/v1/wifi_clients.json")
+          fetch("/api/v1/lan_clients.json")
             .then((response) => response.json())
             .then((data) => {
-              this.online_devices = data.devices;
-            });
+              this.online_devices = data.devices || [];
+              this.dhcp_count = data.dhcp_count || 0;
+              this.wifi_count = data.wifi_count || 0;
+            })
+            .catch(() => {});
         };
 
         setInterval(() => {
+          if (document.hidden) return; // skip polling in background tabs
           fetch_clients();
+        }, 5000);
+        fetch_clients();
+
+        // Traffic table: both egress types side by side. The device writes
+        // these every 30s, so polling faster would only hit its cache.
+        this.fetch_all_stats();
+        setInterval(() => {
+          if (document.hidden) return;
+          this.fetch_all_stats();
+        }, 30000);
+
+        // System badges: CPU (delta of two samples), memory, disks, TCP flows.
+        this.fetch_sys();
+        setInterval(() => {
+          if (document.hidden) return;
+          this.fetch_sys();
         }, 3000);
 
-        fetch_clients();
-        this.fetch_data_stats("mobile");
+        // Live throughput: one sample a second, last 5 min kept in memory only.
+        this.fetch_rate();
+        setInterval(() => {
+          if (document.hidden) return;
+          this.fetch_rate();
+        }, 1000);
         this.loadBatteryHistory(24);
 
         // Fetch uptime
@@ -494,10 +799,14 @@
             .catch(() => {});
         };
         fetch_uptime();
-        setInterval(fetch_uptime, 30000);
+        setInterval(() => {
+          if (document.hidden) return;
+          fetch_uptime();
+        }, 30000);
 
         // Auto-refresh battery chart every 60 seconds
         setInterval(() => {
+          if (document.hidden) return;
           this.loadBatteryHistory(this.bat_hours);
         }, 60000);
 
@@ -549,8 +858,24 @@
             if (closest && minDist < meta.tsRange * 0.02) {
               let dt = new Date(closest.ts * 1000);
               let timeStr = String(dt.getMonth() + 1).padStart(2, "0") + "/" + String(dt.getDate()).padStart(2, "0") + " " + String(dt.getHours()).padStart(2, "0") + ":" + String(dt.getMinutes()).padStart(2, "0");
-              let watt = ((closest.voltage || 0) * (closest.current || 0) / 1000).toFixed(2);
-              let tip = timeStr + "  SOC:" + closest.soc + "%  V:" + (closest.voltage || 0).toFixed(2) + "  " + watt + "W";
+              let watt = closest.current == null ? null : ((closest.voltage || 0) * closest.current / 1000).toFixed(2);
+              // Prefer the de-stepped SOC used by the line so tooltip matches the curve
+              let socVal = closest.soc;
+              if (meta.socSmooth && meta.socSmooth.length) {
+                let best = null, bestD = Infinity;
+                for (let s of meta.socSmooth) {
+                  if (s.v == null) continue;
+                  let d = Math.abs(s.ts - closest.ts);
+                  if (d < bestD) {
+                    bestD = d;
+                    best = s.v;
+                  }
+                }
+                if (best != null) socVal = best;
+              }
+              let socStr = typeof socVal === "number" && !Number.isInteger(socVal) ? socVal.toFixed(1) : String(socVal);
+              let tip = timeStr + "  SOC:" + socStr + "%  V:" + (closest.voltage || 0).toFixed(2);
+              if (watt != null) tip += "  " + watt + "W";
               if (closest.temperature != null) tip += "  " + closest.temperature + "°C";
               tipParts.push(tip);
             }
@@ -573,6 +898,9 @@
           this.$nextTick(() => this._tryDraw());
         });
 
+        // Redraw with the matching grid/shading tones when night mode toggles
+        window.addEventListener("pcat-theme-change", () => this._redrawChart());
+
         // Watch toggles
         this.$watch("bat_show_soc", () => this._redrawChart());
         this.$watch("bat_show_voltage", () => this._redrawChart());
@@ -581,11 +909,30 @@
       },
 
       online_devices: [],
-      today_used: 0,
-      week_used: 0,
-      month_used: 0,
-      last_month_used: 0,
-      network_type: "",
+      dhcp_count: 0,
+      wifi_count: 0,
+      device_filter: "all", // all | wifi | dhcp (remembered per browser)
+      // System badges
+      sys: null,
+      sys_prev_cpu: null,
+      sys_cpu_pct: null,
+      sys_core_pct: [],
+      usage: {
+        mobile: { today_used: 0, week_used: 0, month_used: 0, last_month_used: 0 },
+        wired: { today_used: 0, week_used: 0, month_used: 0, last_month_used: 0 },
+      },
+      // Bytes seen on the live egress counters since the last server figure
+      // (per column). Added to today/week/month so the table ticks every
+      // second without polling the server more often than it writes (30s).
+      usage_extra: { mobile: 0, wired: 0 },
+      // Live throughput, browser memory only: [{t, down, up}] in bytes/s,
+      // one sample a second for the last rate_window seconds (5 min).
+      rate_samples: [],
+      rate_last: null,
+      rate_now: { down: 0, up: 0 },
+      rate_peak: { down: 0, up: 0 },
+      rate_ifaces: [],
+      rate_window: 300,
       loading: {
         fetchMobileStats: false,
         fetchWiredStats: false,
@@ -660,7 +1007,6 @@
       fetch_data_stats(network_type) {
         const loadingKey = network_type === "mobile" ? "fetchMobileStats" : "fetchWiredStats";
         this.loading[loadingKey] = true;
-        this.network_type = network_type;
 
         fetch("/api/v1/data_stats.json?network_type=" + network_type)
           .then((response) => {
@@ -668,10 +1014,21 @@
             return response.json();
           })
           .then((data) => {
-            this.today_used = data.today_used;
-            this.week_used = data.week_used;
-            this.month_used = data.month_used;
-            this.last_month_used = data.last_month_used;
+            const prev = this.usage[network_type];
+            const next = {
+              today_used: data.today_used || 0,
+              week_used: data.week_used || 0,
+              month_used: data.month_used || 0,
+              last_month_used: data.last_month_used || 0,
+            };
+            // The server figure lags what the page has already counted live
+            // (it is written every 30s and cached); carry the difference so
+            // the cell never steps backwards. A server value below the last
+            // one is a rollover or a reset: take it as is.
+            const shown = prev.today_used + this.usage_extra[network_type];
+            this.usage_extra[network_type] =
+              next.today_used < prev.today_used ? 0 : Math.max(0, shown - next.today_used);
+            this.usage[network_type] = next;
             this.loading[loadingKey] = false;
           })
           .catch((error) => {
@@ -681,17 +1038,146 @@
           });
       },
 
-      get today_used_size() {
-        return humanFileSize(this.today_used, true);
+      fetch_all_stats() {
+        this.fetch_data_stats("mobile");
+        this.fetch_data_stats("wired");
       },
-      get week_used_size() {
-        return humanFileSize(this.week_used, true);
+
+      fetch_rate() {
+        fetch("/api/v1/net_rate.json")
+          .then((r) => r.json())
+          .then((data) => {
+            const ifaces = data.ifaces || {};
+            const ts = data.ts || Date.now() / 1000;
+            this.rate_ifaces = Object.keys(ifaces);
+            if (this.rate_last) {
+              const dt = ts - this.rate_last.ts;
+              if (dt > 0) {
+                // Per-interface deltas: one device resetting its counter (a
+                // PPPoE redial, a modem reconnect) must not drag the sum
+                // negative, and a device that vanished simply stops counting.
+                let drx = 0, dtx = 0;
+                for (const name of this.rate_ifaces) {
+                  const cur = ifaces[name], prev = this.rate_last.ifaces[name];
+                  if (!prev) continue;
+                  const irx = cur.rx_bytes >= prev.rx_bytes ? cur.rx_bytes - prev.rx_bytes : cur.rx_bytes;
+                  const itx = cur.tx_bytes >= prev.tx_bytes ? cur.tx_bytes - prev.tx_bytes : cur.tx_bytes;
+                  drx += irx;
+                  dtx += itx;
+                  // Same split as the server's totals: cellular devices count
+                  // as cellular, the wired WAN (eth0 / pppoe-wan) as wired; a
+                  // Wi-Fi upstream is in neither, exactly like network_stats.
+                  const col = cur.kind === "mobile" ? "mobile" : cur.kind === "wan" ? "wired" : null;
+                  if (col) this.usage_extra[col] += irx + itx;
+                }
+                const down = drx / dt, up = dtx / dt;
+                this.rate_now = { down, up };
+                this.rate_samples.push({ t: ts, down, up });
+                const cutoff = ts - this.rate_window;
+                while (this.rate_samples.length && this.rate_samples[0].t < cutoff) this.rate_samples.shift();
+                let pd = 0, pu = 0;
+                this.rate_samples.forEach((s) => { pd = Math.max(pd, s.down); pu = Math.max(pu, s.up); });
+                this.rate_peak = { down: pd, up: pu };
+                drawRateChart(this.$refs.rateCanvas, this.rate_samples, ts, this.rate_window);
+              }
+            }
+            this.rate_last = { ts, ifaces };
+          })
+          .catch(() => {});
       },
-      get month_used_size() {
-        return humanFileSize(this.month_used, true);
+
+      fetch_sys() {
+        fetch("/api/v1/sys_stats.json")
+          .then((r) => r.json())
+          .then((d) => {
+            if (d.cpu && this.sys_prev_cpu) {
+              const dt = d.cpu.total - this.sys_prev_cpu.total;
+              const db = d.cpu.busy - this.sys_prev_cpu.busy;
+              if (dt > 0) this.sys_cpu_pct = Math.max(0, Math.min(100, (db / dt) * 100));
+              const prevCores = this.sys_prev_cpu.per_core || [];
+              this.sys_core_pct = (d.cpu.per_core || []).map(([busy, total], i) => {
+                const pc = prevCores[i];
+                if (!pc || total - pc[1] <= 0) return 0;
+                return Math.max(0, Math.min(100, ((busy - pc[0]) / (total - pc[1])) * 100));
+              });
+            }
+            if (d.cpu) this.sys_prev_cpu = { busy: d.cpu.busy, total: d.cpu.total, per_core: d.cpu.per_core || [] };
+            this.sys = d;
+          })
+          .catch(() => {});
       },
-      get last_month_used_size() {
-        return humanFileSize(this.last_month_used, true);
+
+      // Stat tiles: label / value / sub line, plus a meter for the ratios.
+      // Severity thresholds: <70% accent, 70-90% warning, >=90% danger; the
+      // number itself is always shown, so state never rides on color alone.
+      get sys_tiles() {
+        const d = this.sys;
+        if (!d) return [];
+        const meter = (p) =>
+          p === null || p === undefined ? { track: "", fill: "" }
+          : p >= 90 ? { track: "bg-red-100", fill: "bg-red-500" }
+          : p >= 70 ? { track: "bg-amber-100", fill: "bg-amber-500" }
+          : { track: "bg-blue-100", fill: "bg-blue-500" };
+        const pct = (p) => (p === null || p === undefined ? "\u2014" : Math.round(p) + "%");
+        const tiles = [];
+        const load = (d.cpu.load || []).map((v) => v.toFixed(2)).join(" ");
+        const coreCount = (d.cpu.per_core || []).length || d.cpu.cores || 0;
+        const bars = this.sys_core_pct.length
+          ? this.sys_core_pct.map((p) => ({ pct: p, ...meter(p) }))
+          : Array.from({ length: coreCount }, () => ({ pct: 0, ...meter(0) }));
+        tiles.push({
+          key: "cpu", label: SYS_LABELS.cpu, value: pct(this.sys_cpu_pct), percent: this.sys_cpu_pct,
+          sub: SYS_LABELS.load + " " + load + " \u00b7 " + coreCount + " " + SYS_LABELS.cores,
+          bars, track: "", fill: "",
+        });
+        tiles.push({
+          key: "mem", label: SYS_LABELS.ram, value: pct(d.mem.percent), percent: d.mem.percent,
+          sub: humanFileSize(d.mem.used, true) + " / " + humanFileSize(d.mem.total, true),
+          ...meter(d.mem.percent),
+        });
+        (d.disks || []).forEach((k) => {
+          tiles.push({
+            key: "disk:" + k.mount, label: (k.kind || SYS_LABELS.disk) + " \u00b7 " + k.mount, value: pct(k.percent), percent: k.percent,
+            sub: humanFileSize(k.used, true) + " / " + humanFileSize(k.total, true) + " \u00b7 " + k.fstype,
+            ...meter(k.percent),
+          });
+        });
+        tiles.push({
+          key: "tcp", label: SYS_LABELS.tcp, value: (d.conn.tcp || 0).toLocaleString(), percent: null,
+          sub: (d.conn.total || 0).toLocaleString() + " / " + (d.conn.max || 0).toLocaleString() + " " + SYS_LABELS.tracked,
+          track: "", fill: "",
+        });
+        return tiles;
+      },
+
+      get shown_devices() {
+        if (this.device_filter === "wifi") return this.online_devices.filter((d) => d.wifi);
+        if (this.device_filter === "dhcp") return this.online_devices.filter((d) => d.ip);
+        return this.online_devices;
+      },
+
+      set_device_filter(f) {
+        this.device_filter = f;
+        try { localStorage.setItem("stats_device_filter", f); } catch (e) {}
+      },
+
+      // Table value: server figure plus the bytes counted live since it was
+      // fetched. Last month is closed, so it never moves.
+      live_usage(type, period) {
+        const base = this.usage[type][period] || 0;
+        return period === "last_month_used" ? base : base + this.usage_extra[type];
+      },
+
+      fmtRate(bytesPerSec) {
+        return fmtBits((bytesPerSec || 0) * 8);
+      },
+
+      get rate_egress_label() {
+        return this.rate_ifaces.length ? "(" + this.rate_ifaces.join(", ") + ")" : "";
+      },
+
+      get rate_no_egress() {
+        return this.rate_last !== null && this.rate_ifaces.length === 0;
       },
 
       reset_statics() {
@@ -704,10 +1190,10 @@
             })
             .then((data) => {
               if (data.status === "ok") {
-                this.today_used = 0;
-                this.week_used = 0;
-                this.month_used = 0;
-                this.last_month_used = 0;
+                for (const t of ["mobile", "wired"]) {
+                  this.usage[t] = { today_used: 0, week_used: 0, month_used: 0, last_month_used: 0 };
+                  this.usage_extra[t] = 0;
+                }
                 this.showNotification("Statistics reset successfully", "", "success");
               }
               this.loading.resetStats = false;

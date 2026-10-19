@@ -1,0 +1,106 @@
+<div x-show="partModal.open" x-cloak class="fixed inset-0 z-40 flex items-center justify-center bg-black bg-opacity-40 p-4" @click.self="partModal.open = false">
+  <div class="flex max-h-[85vh] w-full max-w-2xl flex-col rounded-lg bg-white p-5 shadow-xl">
+    <div class="flex items-center justify-between">
+      <h3 class="font-bold text-gray-700">
+        {{locales.part_title}} <span class="font-mono text-sm text-gray-400" x-text="partModal.dev"></span>
+        <span x-show="partModal.table" class="ml-1 rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-500" x-text="partModal.table && partModal.table.table"></span>
+      </h3>
+      <button @click="partModal.open = false" class="text-2xl leading-none text-gray-400">&times;</button>
+    </div>
+
+    <p x-show="partModal.protected" class="mt-2 rounded bg-yellow-50 p-2 text-xs text-yellow-800">🔒 {{locales.part_protected_note}}</p>
+
+    <div class="mt-3 flex-1 overflow-y-auto">
+      <table class="w-full text-sm">
+        <thead>
+          <tr class="text-left text-xs uppercase text-gray-400">
+            <th class="p-2">{{locales.part_col_num}}</th>
+            <th class="p-2">{{locales.files_col_name}}</th>
+            <th class="p-2">{{locales.part_col_size}}</th>
+            <th class="hidden p-2 sm:table-cell">{{locales.part_col_fs}}</th>
+            <th class="p-2"></th>
+          </tr>
+        </thead>
+        <tbody>
+          <template x-for="part in (partModal.table ? partModal.table.parts : [])" :key="part.num">
+            <tr class="border-t border-gray-100">
+              <td class="p-2 text-gray-400" x-text="part.num"></td>
+              <td class="p-2 font-mono text-xs text-gray-600">
+                <span x-text="partDev(part.num)"></span>
+                <span x-show="part.protected" class="ml-1 text-xs" title="{{locales.disks_protected_hint}}">🔒</span>
+              </td>
+              <td class="p-2 text-gray-500" x-text="gb(part.size) + ' GB'"></td>
+              <td class="hidden p-2 text-gray-500 sm:table-cell" x-text="part.fs || '-'"></td>
+              <td class="p-2 text-right">
+                <!-- Per-partition: system (boot/squashfs) locked; data parts editable. -->
+                <template x-if="!part.protected">
+                  <div class="flex justify-end gap-1">
+                    <button @click="openPartForm('format', part)" :disabled="partModal.busy"
+                      class="rounded border border-gray-300 px-2 py-0.5 text-xs text-gray-600 hover:bg-gray-50">{{locales.part_btn_format}}</button>
+                    <button @click="openPartForm('resize', part)" :disabled="partModal.busy"
+                      :title="part.fs && part.fs != 'ext4' ? '{{locales.part_resize_ext4_only}}' : ''"
+                      class="rounded border border-gray-300 px-2 py-0.5 text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-40"
+                      x-bind:disabled="partModal.busy || (part.fs && part.fs != 'ext4')">{{locales.part_btn_resize}}</button>
+                    <button @click="deletePartition(part)" :disabled="partModal.busy"
+                      class="rounded border border-red-300 px-2 py-0.5 text-xs text-red-600 hover:bg-red-50">{{locales.part_btn_delete}}</button>
+                  </div>
+                </template>
+                <span x-show="part.protected" class="text-xs text-gray-400">{{locales.disks_protected}}</span>
+              </td>
+            </tr>
+          </template>
+          <template x-for="(region, ri) in (partModal.table ? partModal.table.free : [])" :key="'f' + ri">
+            <tr class="border-t border-gray-100 bg-gray-50">
+              <td class="p-2 text-gray-300">–</td>
+              <td class="p-2 text-xs italic text-gray-400">{{locales.part_free_region}}</td>
+              <td class="p-2 text-gray-500" x-text="gb(region.size) + ' GB'"></td>
+              <td class="hidden p-2 sm:table-cell"></td>
+              <td class="p-2 text-right">
+                <!-- On system disks free space is claimed via use_free (safe carve-out), not arbitrary create. -->
+                <button x-show="!partModal.protected" @click="openPartForm('create', null)" :disabled="partModal.busy"
+                  class="rounded bg-pcatblue px-2 py-0.5 text-xs text-white disabled:opacity-50">{{locales.part_btn_create}}</button>
+                <button x-show="partModal.protected" @click="useFreeSpace({dev: partModal.dev, protected: true})" :disabled="partModal.busy"
+                  class="rounded bg-pcatblue px-2 py-0.5 text-xs text-white disabled:opacity-50">{{locales.disks_use_free}}</button>
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+
+      <!-- inline form for format / resize / create -->
+      <div x-show="partForm.open" class="mt-3 rounded border border-gray-200 p-3">
+        <div class="space-y-2 text-sm">
+          <div x-show="partForm.mode == 'format'" class="flex flex-wrap items-center gap-2">
+            <select x-model="partForm.fs" class="rounded border border-gray-300 px-2 py-1">
+              <template x-for="opt in formatFsOptions()" :key="opt.id">
+                <option :value="opt.id" :disabled="!fsToolAvailable(opt.tool)"
+                  x-text="opt.label + (fsToolAvailable(opt.tool) ? '' : ' (' + '{{locales.part_fs_not_installed}}' + ')')"></option>
+              </template>
+            </select>
+            <input x-model="partForm.label" placeholder="{{locales.part_fs_label}}"
+              class="w-40 rounded border border-gray-300 px-2 py-1" />
+          </div>
+          <div x-show="partForm.mode == 'resize' || partForm.mode == 'create'" class="flex items-center gap-2">
+            <label class="text-gray-500">{{locales.part_new_size_gb}}</label>
+            <input type="number" x-model.number="partForm.size_gb" min="1" step="1"
+              class="w-28 rounded border border-gray-300 px-2 py-1" />
+          </div>
+          <div class="flex justify-end gap-2">
+            <button @click="partForm.open = false" class="rounded border border-gray-300 px-3 py-1 text-xs text-gray-600">{{locales.shares_btn_cancel}}</button>
+            <button @click="submitPartForm()" :disabled="partModal.busy"
+              class="rounded bg-pcatblue px-3 py-1 text-xs text-white disabled:opacity-50">{{locales.confirm_btn}}</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- whole-disk actions -->
+    <div x-show="!partModal.protected" class="mt-3 flex items-center justify-between border-t border-gray-100 pt-3">
+      <span class="text-xs text-gray-400">{{locales.confirm_cannot_undo}}</span>
+      <button @click="mkLabel('gpt')" :disabled="partModal.busy"
+        class="rounded border border-red-300 px-3 py-1 text-xs text-red-600 hover:bg-red-50 disabled:opacity-50">
+        {{locales.part_new_gpt}}
+      </button>
+    </div>
+  </div>
+</div>

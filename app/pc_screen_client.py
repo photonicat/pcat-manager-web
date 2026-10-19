@@ -14,6 +14,16 @@ from pcat_util import isp_dict, pcat_logger
 class PcScreenClient (threading.Thread):
     CACHE_TTL = 60  # seconds
 
+    # The live preview on /screen polls frame.png about once a second, and the
+    # display renders a new frame roughly that often too, so anything shorter
+    # than this only buys duplicate bytes. It exists to collapse the burst that
+    # one page load produces (two <img> and two CSS background slices all point
+    # at the same URL) and to keep N open tabs from multiplying upstream hits.
+    FRAME_CACHE_TTL = 0.3   # seconds
+    # A wedged display service must not sit on a granian blocking thread (there
+    # are only 4 on the device): fail fast and let the browser retry.
+    FRAME_TIMEOUT = 2.0     # seconds
+
     def __init__(self):
         threading.Thread.__init__(self)
         self.server_address = 'http://127.0.0.1:8081'
@@ -21,6 +31,11 @@ class PcScreenClient (threading.Thread):
         # cache state:
         self._config_cache         = None
         self._config_cache_time    = 0.0
+        # live-frame state: keep-alive session + the short coalescing cache
+        self._frame_session        = requests.Session()
+        self._frame_lock           = threading.Lock()
+        self._frame_cache          = None
+        self._frame_cache_time     = 0.0
 
     def run(self):
         while True:
@@ -37,14 +52,36 @@ class PcScreenClient (threading.Thread):
             return None
 
     def get_frame(self):
-        try:
-            url = f'{self.server_address}/api/v1/go_frame.png'
-            resp = requests.get(url, timeout=5, stream=True)
-            resp.raise_for_status()
-            return resp.content
-        except requests.RequestException as e:
-            pcat_logger.logger.error(f"Failed to fetch screen: {e}")
-            return None
+        """Current LCD framebuffer as PNG bytes, or None if the display is down.
+
+        Served from a sub-second cache and over a keep-alive session: the
+        preview polls this at ~1Hz per viewer, and a fresh TCP connect per
+        request was a measurable share of the ~35ms round trip.
+        """
+        now = time.time()
+        if self._frame_cache is not None and now - self._frame_cache_time < self.FRAME_CACHE_TTL:
+            return self._frame_cache
+
+        # Only one thread goes upstream; the rest take whatever it just cached.
+        with self._frame_lock:
+            now = time.time()
+            if self._frame_cache is not None and now - self._frame_cache_time < self.FRAME_CACHE_TTL:
+                return self._frame_cache
+            try:
+                url = f'{self.server_address}/api/v1/go_frame.png'
+                resp = self._frame_session.get(url, timeout=self.FRAME_TIMEOUT)
+                resp.raise_for_status()
+                self._frame_cache = resp.content
+                self._frame_cache_time = time.time()
+                return self._frame_cache
+            except requests.RequestException as e:
+                pcat_logger.logger.error(f"Failed to fetch screen: {e}")
+                # Drop the cache rather than serve a frozen frame: the caller
+                # turns None into a 503 so the page can show "reconnecting"
+                # instead of a screenshot that silently stopped moving.
+                self._frame_cache = None
+                self._frame_cache_time = 0.0
+                return None
     
     def get_default_config(self):
         try:
@@ -138,6 +175,21 @@ class PcScreenClient (threading.Thread):
         """
         self._config_cache      = None
         self._config_cache_time = 0.0
+
+    def reset_config(self):
+        """
+        Wipe the display's saved user_config.json so the base config takes over.
+        Clears the local cache too so the next get_config() re-fetches.
+        """
+        try:
+            url = self.server_address + "/api/v1/go_reset_config"
+            response = requests.get(url, timeout=5)
+            response.raise_for_status()
+            self.reset_config_cache()
+            return response.json()
+        except requests.RequestException as e:
+            pcat_logger.logger.error(f"Failed to reset screen config: {e}")
+            return {"status": "error", "message": f"Reset failed: {str(e)}"}
 
     def restart_screen(self): #exec command /etc/init.d/photonicat2_display restart
         try:

@@ -1,0 +1,114 @@
+<div class="mt-4 space-y-4">
+  <div class="rounded-lg bg-white p-4 shadow">
+    <div class="flex items-center justify-between">
+      <div>
+        <h3 class="font-semibold text-gray-700">{{locales.remotes_title}}</h3>
+        <p class="text-xs text-gray-400">{{locales.remotes_auto_note}}</p>
+      </div>
+      <button @click="openRemoteEdit(null)" class="rounded bg-pcatblue px-3 py-1 text-sm text-white">{{locales.remotes_add}}</button>
+    </div>
+
+    <div x-show="!remotes.length" class="mt-4 text-center text-sm text-gray-400">{{locales.remotes_no_remotes}}</div>
+    <div class="mt-2 space-y-2">
+      <template x-for="r in remotes" :key="r.id">
+        <div class="flex flex-wrap items-center justify-between gap-2 rounded border border-gray-100 p-3">
+          <div class="min-w-0">
+            <div class="font-medium text-gray-700">
+              <span x-text="r.name"></span>
+              <span class="ml-1 rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-500" x-text="r.type == 'sshfs' ? 'SSH' : 'S3'"></span>
+              <span class="ml-1 rounded px-2 py-0.5 text-xs"
+                :class="r.state == 'mounted' ? 'bg-green-100 text-green-700' : r.state == 'disabled' ? 'bg-gray-100 text-gray-500' : 'bg-yellow-100 text-yellow-700'"
+                x-text="r.state == 'mounted' ? '{{locales.remotes_state_mounted}}' : r.state == 'disabled' ? '{{locales.remotes_state_disabled}}' : '{{locales.remotes_state_disconnected}}'"></span>
+            </div>
+            <div class="truncate font-mono text-xs text-gray-400" x-text="r.mountpoint"></div>
+            <div class="truncate text-xs text-gray-400"
+              x-text="r.type == 'sshfs' ? (r.user + '@' + r.host + ':' + r.path) : (r.endpoint + '/' + r.bucket)"></div>
+          </div>
+          <div class="flex flex-wrap gap-1">
+            <button @click="remoteAction(r, 'test')" class="rounded border border-gray-300 px-2 py-1 text-xs text-gray-600 hover:bg-gray-50">{{locales.remotes_test}}</button>
+            <button x-show="r.state != 'mounted'" @click="remoteAction(r, 'mount')" class="rounded bg-pcatblue px-2 py-1 text-xs text-white">{{locales.remotes_mount}}</button>
+            <button x-show="r.state == 'mounted'" @click="remoteAction(r, 'unmount')" class="rounded border border-gray-300 px-2 py-1 text-xs text-gray-600 hover:bg-gray-50">{{locales.remotes_unmount}}</button>
+            <button @click="openRemoteEdit(r)" class="rounded border border-gray-300 px-2 py-1 text-xs text-gray-600 hover:bg-gray-50">{{locales.shares_edit}}</button>
+            <button @click="remoteAction(r, 'delete')" class="rounded border border-red-300 px-2 py-1 text-xs text-red-600 hover:bg-red-50">{{locales.shares_btn_delete}}</button>
+          </div>
+        </div>
+      </template>
+    </div>
+  </div>
+
+  <!-- editor -->
+  <div x-show="remoteEdit.open" x-cloak class="fixed inset-0 z-40 flex items-center justify-center bg-black bg-opacity-40 p-4" @click.self="remoteEdit.open = false">
+    <div class="max-h-[85vh] w-full max-w-md overflow-y-auto rounded-lg bg-white p-5 shadow-xl">
+      <h3 class="font-bold text-gray-700" x-text="remoteEdit.id ? '{{locales.remotes_edit}}' : '{{locales.remotes_add}}'"></h3>
+      <div class="mt-3 space-y-3 text-sm">
+        <div>
+          <label class="mb-1 block text-gray-500">{{locales.remotes_type}}</label>
+          <select x-model="remoteEdit.type" class="w-full rounded border border-gray-300 px-2 py-1">
+            <option value="sshfs">{{locales.remotes_sshfs}}</option>
+            <option value="s3">{{locales.remotes_s3}}</option>
+          </select>
+        </div>
+        <div>
+          <label class="mb-1 block text-gray-500">{{locales.shares_name}}</label>
+          <input x-model="remoteEdit.name" class="w-full rounded border border-gray-300 px-2 py-1" />
+        </div>
+
+        <template x-if="remoteEdit.type == 'sshfs'">
+          <div class="space-y-3">
+            <div class="flex gap-2">
+              <div class="flex-1">
+                <label class="mb-1 block text-gray-500">{{locales.remotes_host}}</label>
+                <input x-model="remoteEdit.host" class="w-full rounded border border-gray-300 px-2 py-1" />
+              </div>
+              <div class="w-24">
+                <label class="mb-1 block text-gray-500">{{locales.remotes_port}}</label>
+                <input type="number" x-model.number="remoteEdit.port" class="w-full rounded border border-gray-300 px-2 py-1" />
+              </div>
+            </div>
+            <div>
+              <label class="mb-1 block text-gray-500">{{locales.remotes_user}}</label>
+              <input x-model="remoteEdit.user" class="w-full rounded border border-gray-300 px-2 py-1" autocomplete="off" />
+            </div>
+            <div>
+              <label class="mb-1 block text-gray-500">{{locales.remotes_password}}</label>
+              <input type="password" x-model="remoteEdit.password" class="w-full rounded border border-gray-300 px-2 py-1" autocomplete="new-password"
+                :placeholder="remoteEdit.has_secret ? '••••••' : ''" />
+            </div>
+            <div>
+              <label class="mb-1 block text-gray-500">{{locales.remotes_remote_path}}</label>
+              <input x-model="remoteEdit.path" class="w-full rounded border border-gray-300 px-2 py-1 font-mono text-xs" />
+            </div>
+          </div>
+        </template>
+
+        <template x-if="remoteEdit.type == 's3'">
+          <div class="space-y-3">
+            <div>
+              <label class="mb-1 block text-gray-500">{{locales.remotes_endpoint}}</label>
+              <input x-model="remoteEdit.endpoint" placeholder="https://s3.example.com" class="w-full rounded border border-gray-300 px-2 py-1 text-xs" />
+            </div>
+            <div>
+              <label class="mb-1 block text-gray-500">{{locales.remotes_bucket}}</label>
+              <input x-model="remoteEdit.bucket" class="w-full rounded border border-gray-300 px-2 py-1" />
+            </div>
+            <div>
+              <label class="mb-1 block text-gray-500">{{locales.remotes_access_key}}</label>
+              <input x-model="remoteEdit.access_key" class="w-full rounded border border-gray-300 px-2 py-1 font-mono text-xs" autocomplete="off" />
+            </div>
+            <div>
+              <label class="mb-1 block text-gray-500">{{locales.remotes_secret_key}}</label>
+              <input type="password" x-model="remoteEdit.secret_key" class="w-full rounded border border-gray-300 px-2 py-1 font-mono text-xs" autocomplete="new-password"
+                :placeholder="remoteEdit.has_secret ? '••••••' : ''" />
+            </div>
+          </div>
+        </template>
+
+        <label class="flex items-center gap-2"><input type="checkbox" x-model="remoteEdit.enabled" class="rounded" /> {{locales.sync_enabled}}</label>
+      </div>
+      <div class="mt-4 flex justify-end gap-2">
+        <button @click="remoteEdit.open = false" class="rounded border border-gray-300 px-4 py-2 text-sm text-gray-600">{{locales.shares_btn_cancel}}</button>
+        <button @click="saveRemote()" class="rounded bg-pcatblue px-4 py-2 text-sm text-white">{{locales.shares_btn_save}}</button>
+      </div>
+    </div>
+  </div>
+</div>

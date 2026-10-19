@@ -1,0 +1,28 @@
+<!-- poweroff confirm modal -->
+<div id="poweroff_dlg" class="modal" x-cloak x-show="poweroff_dlg_open" tabindex="-1">
+  <section class="modal-main w-full sm:w-1/2" @click.outside="poweroff_dlg_open = false">
+    <div class="p-6">
+      <p class="text-xl font-semibold">{{locales["need_poweroff_device_now"]}}</p>
+      <p class="mt-2 text-sm text-gray-600">{{locales["poweroff_confirm_note"]}}</p>
+    </div>
+    <div class="flex items-center justify-end space-x-4 rounded-b border-t border-gray-200 p-4">
+      <button type="button" class="rounded-lg border border-gray-200 bg-white px-5 py-2.5 text-sm font-medium text-gray-500 hover:bg-gray-100 hover:text-gray-900 focus:z-10 focus:ring-4 focus:ring-gray-300" @click="poweroff_dlg_open = false">{{locales["common_cancel"]}}</button>
+      <button
+        @click="fetch('/system/poweroff', { method: 'POST', headers: { 'Content-Type': 'application/json' }})
+          .then(response => response.json())
+          .then(data => {
+            if(data.status === 'ok') {
+              poweroff_dlg_open = false;
+              $store.app.begin_restart_watch('shutdown');
+            }
+      });
+      "
+        type="button"
+        class="hover:bg-red-700 focus:ring-red-300 rounded-lg bg-red-600 px-5 py-2.5 text-center text-sm font-medium text-white focus:ring-4"
+      >
+      {{locales["common_poweroff"]}}
+      </button>
+    </div>
+  </section>
+</div>
+<!-- /poweroff confirm modal -->

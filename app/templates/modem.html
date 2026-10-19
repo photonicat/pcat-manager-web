@@ -1,4 +1,5 @@
-{% extends '_base.html' %} {% block content %}
+{% extends '_base.html' %}
+{% block page_title %}{{locales["nav_modem"]}}{% endblock %} {% block content %}
 <div class="container mx-auto w-full pt-10 pb-12 sm:pt-24 sm:pb-12 md:pt-28 lg:px-4" x-data="adv_settings()" x-init="init()">
   <div class="flex items-center justify-between">
     <h1 class="px-1 py-4 font-bold uppercase text-gray-600">{{locales["nav_modem"]}}</h1>
@@ -7,6 +8,56 @@
   {% include '_notification.html' %}
 
   {% include "_select_message_modal.html" %} {% include "_send_message_modal.html" %} {% include "_modem_config_modal.html" %}
+
+  <!-- Modem firmware update dialog (hidden; opened by 10 clicks on the firmware version value) -->
+  <div class="modal" x-cloak x-show="modem_fw_modal_open">
+    <section class="modal-main w-full sm:w-1/2" @click.outside="modem_fw_modal_open = false">
+      <div class="flex items-start justify-between rounded-t border-b p-4">
+        <h3 class="text-base font-semibold text-gray-900 lg:text-xl">{{locales["modem_fw_update_title"]}}</h3>
+        <button type="button" class="bg-transparent ml-auto inline-flex items-center rounded-lg p-1.5 text-sm text-gray-400 hover:bg-gray-200 hover:text-gray-900" @click="modem_fw_modal_open = false">
+          <svg class="h-5 w-5" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
+            <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd"></path>
+          </svg>
+        </button>
+      </div>
+
+      <div class="p-6 space-y-4">
+        <table class="list-info w-full text-gray-700">
+          <tbody>
+            <tr>
+              <td>{{locales["modem_fw_update_model"]}}</td>
+              <td class="text-right font-semibold"><span x-text="modem_model || '—'"></span></td>
+            </tr>
+            <tr>
+              <td>{{locales["modem_fw_update_current"]}}</td>
+              <td class="text-right font-semibold"><span x-text="modem_firmware_version || '—'"></span></td>
+            </tr>
+            <tr class="border-none">
+              <td>{{locales["modem_fw_update_latest"]}}</td>
+              <td class="text-right font-semibold">
+                <span x-show="modem_fw_checking">{{locales["modem_fw_update_checking"]}}</span>
+                <span x-show="!modem_fw_checking" x-text="modem_fw_latest || '{{locales["modem_fw_update_unknown"]}}'"></span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+
+        <!-- Status line -->
+        <div x-show="!modem_fw_checking && modem_fw_status" class="text-sm">
+          <span x-show="modem_fw_status === 'up_to_date'" class="inline-flex items-center rounded-full bg-green-100 px-2.5 py-0.5 font-medium text-green-800">{{locales["modem_fw_update_up_to_date"]}}</span>
+          <span x-show="modem_fw_status === 'available'" class="inline-flex items-center rounded-full bg-yellow-100 px-2.5 py-0.5 font-medium text-yellow-800">{{locales["modem_fw_update_available"]}}</span>
+          <span x-show="modem_fw_status === 'none'" class="text-gray-500">{{locales["modem_fw_update_no_image"]}}</span>
+        </div>
+
+        <p class="text-sm text-gray-500 leading-relaxed">{{locales["modem_fw_update_note"]}}</p>
+      </div>
+
+      <div class="flex items-center justify-end space-x-4 rounded-b border-t border-gray-200 p-4">
+        <button type="button" class="rounded-lg border border-gray-200 bg-white px-5 py-2.5 text-sm font-medium text-gray-500 hover:bg-gray-100 hover:text-gray-900 focus:z-10 focus:ring-4 focus:ring-gray-300" @click="modem_fw_modal_open = false">{{locales["modem_fw_update_close"]}}</button>
+        <button type="button" class="rounded-lg bg-pcatblue px-5 py-2.5 text-center text-sm font-medium text-white hover:bg-blue-700 focus:ring-4 focus:ring-blue-300 disabled:opacity-50" :disabled="modem_fw_checking" @click="check_modem_fw_update()">{{locales["modem_fw_update_check_button"]}}</button>
+      </div>
+    </section>
+  </div>
 
   <!-- Hook History Detail Modal -->
   <div x-data="hookHistoryModal()" class="modal" x-cloak x-show="modalOpen">
@@ -205,7 +256,7 @@
         </div>
       </div>
 
-      <div x-cloak x-show="modem_valid === false && data_loaded && wwan_powered" class="rounded bg-red-50 text-gray-400 p-4">{{locales["modem_invalid"]}}</div>
+      <div x-cloak x-show="modem_installed && modem_valid === false && data_loaded && wwan_powered" class="rounded bg-red-50 text-gray-400 p-4">{{locales["modem_invalid"]}}</div>
 
       <!-- WWAN Powered Off notice -->
       <div x-cloak x-show="!wwan_powered && data_loaded" class="rounded bg-yellow-50 border border-yellow-200 text-yellow-700 p-4 flex items-center">
@@ -216,14 +267,14 @@
       </div>
 
       <!-- Loading state for modem status -->
-      <div x-cloak x-show="modem_valid === null && wwan_powered" class="rounded bg-blue-50 text-gray-500 p-4 flex items-center">
+      <div x-cloak x-show="modem_installed && modem_valid === null && wwan_powered" class="rounded bg-blue-50 text-gray-500 p-4 flex items-center">
         <img src="/static/loading.gif" class="h-4 w-4 mr-2" />
         {{locales["modem_checking_status"]}}
       </div>
 
       <div class="relative px-3 pt-3" x-show="tab_page === 'sms_inbox'">
         <!-- View Toggle -->
-        <div class="flex justify-between items-center mb-3" x-show="modem_valid === true">
+        <div class="flex justify-between items-center mb-3" x-show="sms_viewable">
           <div class="flex gap-2">
             <button @click="sms_view_mode = 'threads'" :class="(sms_view_mode === 'threads' || sms_view_mode === 'conversation') ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-700'" class="px-3 py-1 rounded-lg text-sm font-medium transition-colors">{{locales["sms_conversations"]}}</button>
             <button @click="sms_view_mode = 'traditional'; fetch_sms_list()" :class="sms_view_mode === 'traditional' ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-700'" class="px-3 py-1 rounded-lg text-sm font-medium transition-colors">{{locales["sms_traditional"]}}</button>
@@ -232,9 +283,9 @@
 
         <!-- Thread List View -->
         <div x-show="sms_view_mode === 'threads'">
-          <div x-show="modem_valid === true">
-            <div class="text-gray-500 p-4" x-cloak x-show="sim_state === 'absent'">{{locales["modem_sim_absent"]}}</div>
-            <div class="text-gray-500 p-4" x-cloak x-show="sim_state === 'ready' && Object.keys(conversation_threads).length === 0 && data_loaded">{{locales["modem_no_data"]}}</div>
+          <div x-show="sms_viewable">
+            <div class="text-gray-500 p-4" x-cloak x-show="sim_state === 'absent' && modem_installed">{{locales["modem_sim_absent"]}}</div>
+            <div class="text-gray-500 p-4" x-cloak x-show="(sim_state === 'ready' || !modem_installed) && Object.keys(conversation_threads).length === 0 && data_loaded">{{locales["modem_no_data"]}}</div>
             <!-- Thread List -->
             <template x-for="[phoneNumber, thread] in Object.entries(conversation_threads)" :key="phoneNumber">
               <div class="border-b p-3 cursor-pointer hover:bg-gray-50 flex items-center justify-between" @click="open_thread(phoneNumber)">
@@ -369,9 +420,9 @@
 
         <!-- Traditional View -->
         <div x-show="sms_view_mode === 'traditional'">
-          <div x-show="modem_valid === true">
-            <div class="text-gray-500 p-4" x-cloak x-show="sim_state === 'absent'">{{locales["modem_sim_absent"]}}</div>
-            <div class="text-gray-500 p-4" x-cloak x-show="sim_state === 'ready' && modem_messages.length === 0 && data_loaded">{{locales["modem_no_data"]}}</div>
+          <div x-show="sms_viewable">
+            <div class="text-gray-500 p-4" x-cloak x-show="sim_state === 'absent' && modem_installed">{{locales["modem_sim_absent"]}}</div>
+            <div class="text-gray-500 p-4" x-cloak x-show="(sim_state === 'ready' || !modem_installed) && modem_messages.length === 0 && data_loaded">{{locales["modem_no_data"]}}</div>
             <!-- Traditional SMS List -->
             <template x-for="message in modem_messages" :key="message.id">
               <div class="border-b p-3">
@@ -429,12 +480,12 @@
 
       <div class="px-5 py-2" x-show="tab_page === 'modem_basic'">
         <!-- Loading state for modem basic info -->
-        <div x-cloak x-show="modem_valid === null" class="rounded bg-blue-50 text-gray-500 p-4 flex items-center justify-center">
+        <div x-cloak x-show="modem_installed && modem_valid === null" class="rounded bg-blue-50 text-gray-500 p-4 flex items-center justify-center">
           <img src="/static/loading.gif" class="h-4 w-4 mr-2" />
           {{locales["modem_loading_info"]}}
         </div>
-        
-        <div class="flex flex-col sm:flex-row" x-show="modem_valid !== null">
+
+        <div class="flex flex-col sm:flex-row" x-show="modem_installed && modem_valid !== null">
           <table class="list-info w-full p-5 text-gray-700">
             <tbody>
               <tr>
@@ -553,7 +604,10 @@
               <tr>
                 <td>{{locales["modem_firmware_version"]}}</td>
                 <td class="text-right font-semibold">
-                  <span class="" x-text="modem_firmware_version"></span>
+                  <!-- Hidden entry point: 10 clicks on the version value opens the
+                       modem firmware update dialog. Intentionally no visual affordance
+                       (no pointer cursor / hover) so it stays invisible to normal users. -->
+                  <span class="select-none" x-text="modem_firmware_version" @click="handle_fw_version_click()"></span>
                 </td>
               </tr>
               <tr>
@@ -1444,13 +1498,19 @@ Recent console logs should show more API details.`;
         this.loadCustomSimNumber();
 
         setInterval(() => {
+          if (document.hidden) return; // skip polling in background tabs
           this.fetch_modem_basic();
         }, 30000);
 
-        // Poll for SMS messages every 5 seconds regardless of active tab
+        // Poll for SMS messages every 5 seconds regardless of active in-page
+        // tab (but not while the browser tab itself is hidden)
         setInterval(() => {
+          if (document.hidden) return;
           this.fetch_sms_list();
         }, 5000); // Faster polling for new messages (5 seconds)
+        document.addEventListener("visibilitychange", () => {
+          if (!document.hidden) this.fetch_sms_list();
+        });
       },
       data_loaded: false,
       tab_page: (function() {
@@ -1469,6 +1529,11 @@ Recent console logs should show more API details.`;
       sms_forward_to: "",
 
       modem_valid: null, // null = checking, true = connected, false = disconnected
+      // Server-rendered so the page never shows modem-status noise on a
+      // device with no 4G/5G module fitted, even if basic.json fails.
+      modem_installed: {{ 'true' if modem_installed else 'false' }},
+      // Stored SMS stays readable without a module.
+      get sms_viewable() { return this.modem_valid === true || !this.modem_installed; },
       wwan_powered: true,
       querying: false,
       sim_state: "",
@@ -1500,6 +1565,12 @@ Recent console logs should show more API details.`;
       modem_imei_number: "",
       modem_model: "",
       modem_firmware_version: "",
+      // Hidden modem-firmware update dialog (opened by 10 clicks on the version value)
+      modem_fw_click_count: 0,
+      modem_fw_modal_open: false,
+      modem_fw_checking: false,
+      modem_fw_latest: "",
+      modem_fw_status: "", // '', 'up_to_date', 'available', 'none'
       modem_messages: [],
       topic_messages: [],
       selected_message: null,
@@ -1891,6 +1962,47 @@ Recent console logs should show more API details.`;
         try { localStorage.setItem('modem_tab', tab); } catch(e) {}
       },
 
+      // Hidden entry point: 10 clicks on the firmware version value opens the
+      // modem firmware update dialog. No visual affordance so normal users never
+      // discover it by accident.
+      handle_fw_version_click() {
+        this.modem_fw_click_count++;
+        if (this.modem_fw_click_count >= 10) {
+          this.modem_fw_click_count = 0;
+          this.modem_fw_modal_open = true;
+          // Kick off a check so the dialog isn't empty when it opens.
+          this.check_modem_fw_update();
+        }
+      },
+
+      // Ask the server whether a newer modem firmware image is published.
+      // Today no FM350 image is hosted, so this reports 'none'; the endpoint is
+      // wired so the dialog lights up automatically once one is published.
+      check_modem_fw_update() {
+        if (this.modem_fw_checking) return;
+        this.modem_fw_checking = true;
+        this.modem_fw_latest = "";
+        this.modem_fw_status = "";
+        fetch("/api/v1/modem/firmware_update_check.json")
+          .then((r) => (r.ok ? r.json() : { status: "failed" }))
+          .then((data) => {
+            this.modem_fw_latest = data.latest_version || "";
+            if (data.status === "up_to_date") {
+              this.modem_fw_status = "up_to_date";
+            } else if (data.status === "update_available") {
+              this.modem_fw_status = "available";
+            } else {
+              this.modem_fw_status = "none";
+            }
+          })
+          .catch(() => {
+            this.modem_fw_status = "none";
+          })
+          .finally(() => {
+            this.modem_fw_checking = false;
+          });
+      },
+
       fetch_modem_basic() {
         // Prevent concurrent API calls
         if (this._fetchingBasic) {
@@ -1909,6 +2021,9 @@ Recent console logs should show more API details.`;
           .then((data) => {
             this.modem_valid = data.modem_valid;
             this.wwan_powered = data.wwan_powered !== undefined ? data.wwan_powered : true;
+            if (data.modem_installed !== undefined) {
+              this.modem_installed = data.modem_installed;
+            }
 
             // Check for locally stored custom SIM number first
             const storedSimNumber = localStorage.getItem(this.STORAGE_KEY_CUSTOM_SIM);
@@ -1999,7 +2114,7 @@ Recent console logs should show more API details.`;
             this.modem_messages = data.msg || [];
             
             // Process messages into conversation threads
-            this.process_sms_into_threads(this.modem_messages);
+            this.build_conversation_threads();
             
             const currentMessageCount = this.modem_messages.length;
             

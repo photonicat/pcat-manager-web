@@ -1,0 +1,651 @@
+{
+  "/api/v1/dashboard.json": {
+    "body": {
+      "active_egress": "wan",
+      "active_power_mode": "manual_mode",
+      "battery_current_a": 0.0,
+      "battery_remaining_time": "-",
+      "battery_soc": 100,
+      "battery_voltage_v": 8.313,
+      "battery_wattage_w": 0.0,
+      "board_temperature": 51,
+      "car_mode_countdown_seconds": 0,
+      "car_mode_timeout_seconds": 0,
+      "carmode": {
+        "countdown": 0,
+        "enabled": "false",
+        "timeout": 0
+      },
+      "carrier": "5G",
+      "cell_band": "NR N78",
+      "cell_id": "592E2E004",
+      "cell_isp_act": 0,
+      "cell_isp_long_name": "CHN-TELECOM",
+      "cell_isp_native_name": "\u4e2d\u56fd\u7535\u4fe1",
+      "cell_isp_short_name": "CTCC",
+      "cell_mccmnc": "46011",
+      "cell_signal_percent_csq": 70,
+      "cell_signal_percent_qrsrp": "",
+      "cell_signal_percent_qrsrq": "",
+      "cell_signal_percent_sinr": "",
+      "cell_tac": 590903,
+      "cell_tech": "5G",
+      "charge_percent": 100,
+      "charge_voltage": 19894,
+      "connection": "mobile",
+      "date": "2026-08-06",
+      "dhcp_clients_count": 0,
+      "down_speed": 0,
+      "enhanced_isp_available": true,
+      "enhanced_isp_bilingual": true,
+      "enhanced_isp_country": "",
+      "enhanced_isp_full": "\u4e2d\u56fd\u7535\u4fe1 | China Telecom",
+      "enhanced_isp_full_cn": "\u4e2d\u56fd\u7535\u4fe1",
+      "enhanced_isp_full_en": "China Telecom",
+      "enhanced_isp_mcc": "460",
+      "enhanced_isp_mnc": "11",
+      "firmware_version": "RA2E1260731012",
+      "hostname": "photonicat2-openwrt",
+      "hw_variant": "4+64GB",
+      "idle_remaining_minutes": 0,
+      "idle_remaining_seconds": 0,
+      "idle_shutdown_enabled": false,
+      "idle_status": "disabled",
+      "imei_number": "860000000000000",
+      "isp_name": "China Telecom",
+      "kernel": "6.12.91 - Aug 6 2026",
+      "lan_carrier": false,
+      "lan_ethernet_speed": "Disconnected",
+      "lan_interface_enabled": true,
+      "local_wan_ip": "192.168.21.114",
+      "low_battery_shutdown_enabled": false,
+      "low_battery_status": "disabled",
+      "low_battery_threshold": 20,
+      "machine_sn": "P2XXXXXX",
+      "machine_sn_verified": true,
+      "model": "Photonicat 2 5G",
+      "modem_installed": true,
+      "modem_mode": "5G",
+      "modem_model": "RM500U-CNV",
+      "modem_signal_strength": 70,
+      "modem_temperature": {
+        "board-thermal": 49,
+        "pa-thermal": 47,
+        "pa5g-thermal": 48,
+        "soc-thermal": 47
+      },
+      "network_mode": "auto",
+      "network_mode_label": "Eth/5G",
+      "network_route_mode": "mobile",
+      "nvme": {
+        "free": 96239153152,
+        "model": "KBG30ZMT128G TOSHIBA",
+        "present": true,
+        "size": 128035676160
+      },
+      "on_charging": true,
+      "openwrt_version": "R26.04.1 / r7879-07525daa71",
+      "power_mode_remaining_minutes": 0,
+      "sd_info": {
+        "free": null,
+        "model": "",
+        "present": false,
+        "size": null
+      },
+      "sd_state": 0,
+      "sim_ccid": "89861126040214534228",
+      "sim_cimi": "460115897651791",
+      "sim_interface_enabled": true,
+      "sim_number": "+8613800138003",
+      "sim_state": "ready",
+      "system_status": 0,
+      "time": "17:05",
+      "timer_events_count": 0,
+      "timer_next_event": null,
+      "up_speed": 0,
+      "uptime": "up 30 minutes, 7 seconds",
+      "voltage": 8313,
+      "wan_carrier": true,
+      "wan_ethernet_speed": "1000 Mbps",
+      "wan_interface_enabled": true,
+      "wan_ip": "138.2.37.188",
+      "wan_ipv6": "240e:46c:6710:33a:7c5a:30ff:fe88:8e5",
+      "wifi_clients_count": 0,
+      "wifi_interfaces": [
+        {
+          "band": "2g",
+          "capabilities": {
+            "bands": {
+              "2g": {
+                "default_channel": 1,
+                "eht": false,
+                "he": true,
+                "ht": true,
+                "max_width": 80,
+                "vht": true
+              },
+              "5g": {
+                "default_channel": 36,
+                "eht": false,
+                "he": true,
+                "ht": true,
+                "max_width": 80,
+                "vht": true
+              }
+            },
+            "is_pcie": false
+          },
+          "device": "radio0",
+          "device_type": "Onboard",
+          "enabled": true,
+          "encryption": "psk2",
+          "exist": true,
+          "frequency": "2g",
+          "hidden": "0",
+          "htmode": "HT20",
+          "password": "photonicat",
+          "ssid": "photonicat2-4a99c96b"
+        },
+        {
+          "band": "6g",
+          "capabilities": {
+            "bands": {
+              "2g": {
+                "default_channel": 1,
+                "eht": true,
+                "he": true,
+                "ht": true,
+                "max_width": 40,
+                "vht": false
+              },
+              "5g": {
+                "default_channel": 36,
+                "eht": true,
+                "he": true,
+                "ht": true,
+                "max_width": 160,
+                "vht": true
+              },
+              "6g": {
+                "default_channel": 1,
+                "eht": true,
+                "he": true,
+                "ht": false,
+                "max_width": 160,
+                "vht": false
+              }
+            },
+            "is_pcie": true
+          },
+          "device": "radio1",
+          "device_type": "PCIE",
+          "enabled": false,
+          "encryption": "owe",
+          "exist": true,
+          "frequency": "6g_be",
+          "hidden": "0",
+          "htmode": "EHT80",
+          "ssid": "OpenWrt"
+        }
+      ],
+      "wifi_signal": null,
+      "wifi_signal_percent": null,
+      "wifi_wan_active": false,
+      "wifi_wan_state": {},
+      "wwan_powered": true
+    },
+    "status_code": 200
+  },
+  "/api/v1/firmware_update_check.json": {
+    "body": {
+      "download_url": "https://dl.photonicat.com/images/photonicat2/openwrt/photonicatwrt-26.04.1-r7879-07525daa71-rockchip-armv8-ariaboard_photonicat2-squashfs-sysupgrade.img.gz",
+      "local_revision": 7879,
+      "local_version": "R26.04.1 / r7879-07525daa71",
+      "luci_flash_url": "/cgi-bin/luci/admin/system/flash",
+      "remote_build_date": "2026-08-05 09:12",
+      "remote_build_epoch": 1785921120,
+      "remote_filename": "photonicatwrt-26.04.1-r7879-07525daa71-rockchip-armv8-ariaboard_photonicat2-squashfs-sysupgrade.img.gz",
+      "remote_revision": 7879,
+      "sha256_available": true,
+      "sha256_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "status": "ok",
+      "update_available": false,
+      "versions": [
+        {
+          "build_date": "2026-08-05 09:12",
+          "build_epoch": 1785921120,
+          "download_url": "https://dl.photonicat.com/images/photonicat2/openwrt/photonicatwrt-26.04.1-r7879-07525daa71-rockchip-armv8-ariaboard_photonicat2-squashfs-sysupgrade.img.gz",
+          "filename": "photonicatwrt-26.04.1-r7879-07525daa71-rockchip-armv8-ariaboard_photonicat2-squashfs-sysupgrade.img.gz",
+          "hash": "07525daa71",
+          "revision": 7879,
+          "sha256_available": true,
+          "sha256_hash": ""
+        },
+        {
+          "build_date": "2026-08-05 09:12",
+          "build_epoch": 1785921120,
+          "download_url": "https://dl.photonicat.com/images/photonicat2/openwrt/photonicatwrt-26.04.1-r7875-5592b95bd2-rockchip-armv8-ariaboard_photonicat2-squashfs-sysupgrade.img.gz",
+          "filename": "photonicatwrt-26.04.1-r7875-5592b95bd2-rockchip-armv8-ariaboard_photonicat2-squashfs-sysupgrade.img.gz",
+          "hash": "5592b95bd2",
+          "revision": 7875,
+          "sha256_available": true,
+          "sha256_hash": ""
+        },
+        {
+          "build_date": "2026-08-05 09:12",
+          "build_epoch": 1785921120,
+          "download_url": "https://dl.photonicat.com/images/photonicat2/openwrt/photonicatwrt-26.04.1-r7874-e17f860b77-rockchip-armv8-ariaboard_photonicat2-squashfs-sysupgrade.img.gz",
+          "filename": "photonicatwrt-26.04.1-r7874-e17f860b77-rockchip-armv8-ariaboard_photonicat2-squashfs-sysupgrade.img.gz",
+          "hash": "e17f860b77",
+          "revision": 7874,
+          "sha256_available": true,
+          "sha256_hash": ""
+        },
+        {
+          "build_date": "2026-08-05 09:12",
+          "build_epoch": 1785921120,
+          "download_url": "https://dl.photonicat.com/images/photonicat2/openwrt/photonicatwrt-26.04.1-r7873-9ccfbdff07-rockchip-armv8-ariaboard_photonicat2-squashfs-sysupgrade.img.gz",
+          "filename": "photonicatwrt-26.04.1-r7873-9ccfbdff07-rockchip-armv8-ariaboard_photonicat2-squashfs-sysupgrade.img.gz",
+          "hash": "9ccfbdff07",
+          "revision": 7873,
+          "sha256_available": true,
+          "sha256_hash": ""
+        }
+      ]
+    },
+    "status_code": 200
+  },
+  "/api/v1/firmware_upgrade_status.json": {
+    "body": {
+      "active": false,
+      "error": null,
+      "firmware_url": "",
+      "message": "",
+      "progress": 0,
+      "stage": "",
+      "start_time": null,
+      "status": "ok",
+      "sysupgrade_flags": [
+        "-c",
+        "-p"
+      ]
+    },
+    "status_code": 200
+  },
+  "/api/v1/gps.json": {
+    "body": {
+      "capable": false,
+      "enabled": false,
+      "modem_model": "RM500U-CNV",
+      "powered": false
+    },
+    "status_code": 200
+  },
+  "/api/v1/lxc/containers.json": {
+    "body": {
+      "containers": [],
+      "status": "ok"
+    },
+    "status_code": 200
+  },
+  "/api/v1/lxc/health.json": {
+    "body": {
+      "arch": "arm64",
+      "checks": {
+        "autostart": {
+          "fixable": true,
+          "ok": false
+        },
+        "bridge": {
+          "fixable": true,
+          "ok": false,
+          "persistent": false,
+          "runtime": false
+        },
+        "cgroup": {
+          "fixable": true,
+          "mode": "legacy",
+          "ok": false,
+          "shim_enabled": true
+        },
+        "runtime": {
+          "fixable": false,
+          "ok": true
+        },
+        "sshkey": {
+          "fixable": true,
+          "ok": false
+        },
+        "ubus": {
+          "fixable": false,
+          "ok": true
+        }
+      },
+      "free_bytes": 3799355392,
+      "lxcpath": "/srv/lxc",
+      "lxcpath_exists": true,
+      "ready": false,
+      "running": 0,
+      "status": "ok",
+      "templates": [
+        {
+          "dist": "debian",
+          "label": "Debian 13",
+          "release": "trixie"
+        },
+        {
+          "dist": "debian",
+          "label": "Debian 12",
+          "release": "bookworm"
+        },
+        {
+          "dist": "ubuntu",
+          "label": "Ubuntu 24.04",
+          "release": "noble"
+        },
+        {
+          "dist": "ubuntu",
+          "label": "Ubuntu 22.04",
+          "release": "jammy"
+        },
+        {
+          "dist": "alpine",
+          "label": "Alpine 3.22",
+          "release": "3.22"
+        },
+        {
+          "dist": "alpine",
+          "label": "Alpine 3.21",
+          "release": "3.21"
+        },
+        {
+          "dist": "archlinux",
+          "label": "Arch Linux",
+          "release": "current"
+        },
+        {
+          "dist": "rockylinux",
+          "label": "Rocky Linux 9",
+          "release": "9"
+        }
+      ],
+      "total": 0
+    },
+    "status_code": 200
+  },
+  "/api/v1/modem/basic.json": {
+    "body": {
+      "cell_carrier_info": "",
+      "firmware_version": "RM500UCNVAAI=\rOTNIF\r+IF:\"RGS\"401\"RN8,224\nOK\n",
+      "imei_num": "860000000000000",
+      "modem_cell_id": "592E2E004",
+      "modem_cell_info": "",
+      "modem_cell_signal_details": "12 dB, -2 dB, -74 dBm, 50 dB",
+      "modem_cell_signals": "-%, -%, -%, 70%",
+      "modem_cpin": "",
+      "modem_installed": true,
+      "modem_isp_details": "CHN-TELECOM, \u4e2d\u56fd\u7535\u4fe1, 46011",
+      "modem_model": "RM500U-CNV",
+      "modem_network_info": "NR5G-SA NR N78",
+      "modem_roam_pref": "",
+      "modem_serving_info": "NR5G-SA  TDD, Cell ID = 592E2E004, TAC = 590903, PCI = 474",
+      "modem_serving_quality": "12 dB, -2 dB, -74 dBm, 50 dB",
+      "modem_tech_pref": "",
+      "modem_temperature": {
+        "board-thermal": 49,
+        "pa-thermal": 47,
+        "pa5g-thermal": 48,
+        "soc-thermal": 47
+      },
+      "modem_temperature_decimal": "",
+      "modem_usb_speed": "auto",
+      "modem_usbnet_mode": "",
+      "modem_valid": true,
+      "policy_lte_bands": [],
+      "policy_nr5g_bands": [],
+      "querying": false,
+      "selected_lte_bands": [],
+      "selected_nr5g_bands": [],
+      "sim_number": "+8613800138003",
+      "sim_state": "ready",
+      "sms_check_interval": 30,
+      "sms_forward": false,
+      "sms_forward_to": "",
+      "wwan_powered": true
+    },
+    "status_code": 200
+  },
+  "/api/v1/nas/disks.json": {
+    "body": {
+      "disks": [
+        {
+          "bus": "nvme",
+          "dev": "/dev/nvme0n1",
+          "model": "KBG30ZMT128G TOSHIBA",
+          "name": "nvme0n1",
+          "partitions": [
+            {
+              "automount": false,
+              "avail_bytes": 96239153152,
+              "dev": "/dev/nvme0n1p1",
+              "fs": "ext4",
+              "label": null,
+              "mounted": true,
+              "mountpoint": "/mnt/nvme0n1p1",
+              "protected": false,
+              "size_bytes": 128034627584,
+              "used_bytes": 22767702016,
+              "uuid": "3724d23e-c770-42ef-97ad-7551854b0a78"
+            }
+          ],
+          "protected": false,
+          "removable": false,
+          "serial": "59TPC2RVPESN",
+          "size_bytes": 128035676160,
+          "unallocated_bytes": 1048576
+        },
+        {
+          "bus": "emmc",
+          "dev": "/dev/mmcblk0",
+          "model": null,
+          "name": "mmcblk0",
+          "partitions": [
+            {
+              "automount": false,
+              "avail_bytes": 43806720,
+              "dev": "/dev/mmcblk0p1",
+              "fs": "ext4",
+              "label": "kernel",
+              "mounted": true,
+              "mountpoint": "/mnt/mmcblk0p1",
+              "protected": false,
+              "size_bytes": 67108864,
+              "used_bytes": 20869120,
+              "uuid": "84173db5-fa99-e35a-95c6-28613cc79ea9"
+            },
+            {
+              "automount": false,
+              "avail_bytes": 0,
+              "dev": "/dev/mmcblk0p2",
+              "fs": "squashfs",
+              "label": null,
+              "mounted": true,
+              "mountpoint": "/rom",
+              "protected": true,
+              "size_bytes": 4294967296,
+              "used_bytes": 354418688,
+              "uuid": null
+            }
+          ],
+          "protected": true,
+          "removable": false,
+          "serial": "0xd0cde1c7",
+          "size_bytes": 62579015680,
+          "unallocated_bytes": 58216939520
+        }
+      ],
+      "status": "ok",
+      "tools": {
+        "btrfs": true,
+        "exfat": true,
+        "ext4": true,
+        "f2fs": true,
+        "ntfs": true,
+        "rsync": true,
+        "samba": true,
+        "smart": true,
+        "vfat": true,
+        "zfs": false
+      }
+    },
+    "status_code": 200
+  },
+  "/api/v1/nas/files/list.json": {
+    "body": {
+      "status": "ok",
+      "volumes": [
+        {
+          "free_bytes": 43806720,
+          "mountpoint": "/mnt/mmcblk0p1",
+          "name": "mmcblk0p1",
+          "total_bytes": 66015232
+        },
+        {
+          "free_bytes": 96239153152,
+          "mountpoint": "/mnt/nvme0n1p1",
+          "name": "nvme0n1p1",
+          "total_bytes": 125425360896
+        }
+      ]
+    },
+    "status_code": 200
+  },
+  "/api/v1/nas/jobs.json": {
+    "body": {
+      "jobs": [],
+      "status": "ok"
+    },
+    "status_code": 200
+  },
+  "/api/v1/power_led_settings.json": {
+    "body": {
+      "end_time": "22:00",
+      "mode": "on",
+      "start_time": "08:00",
+      "status": "ok"
+    },
+    "status_code": 200
+  },
+  "/api/v1/system/board.json": {
+    "body": {
+      "board_name": "ariaboard,photonicat2",
+      "hostname": "photonicat2-openwrt",
+      "kernel": "6.12.91",
+      "model": "Ariaboard photonicat2",
+      "release": {
+        "description": "photonicatWrt ",
+        "distribution": "photonicatWrt",
+        "revision": "R26.04.1",
+        "target": "rockchip/armv8",
+        "version": "26.04.1"
+      },
+      "rootfs_type": "squashfs",
+      "system": "ARMv8 Processor rev 4"
+    },
+    "status_code": 200
+  },
+  "/api/v1/system/info.json": {
+    "body": {
+      "load": [
+        57984,
+        51456,
+        44192
+      ],
+      "localtime": 1786035937,
+      "memory": {
+        "available": 3419226112,
+        "buffered": 24752128,
+        "cached": 251494400,
+        "free": 3160023040,
+        "shared": 499712,
+        "total": 4123484160
+      },
+      "root": {
+        "avail": 3710308,
+        "free": 3710308,
+        "total": 3846144,
+        "used": 135836
+      },
+      "swap": {
+        "free": 2061496320,
+        "total": 2061496320
+      },
+      "tmp": {
+        "avail": 2012932,
+        "free": 2012932,
+        "total": 2013420,
+        "used": 488
+      },
+      "uptime": 1808
+    },
+    "status_code": 200
+  },
+  "/api/v1/theme_accent.json": {
+    "body": {
+      "color": "#123456",
+      "status": "ok"
+    },
+    "status_code": 200
+  },
+  "/api/v1/voice_call/audio/status": {
+    "body": {
+      "card_present": true,
+      "rx_active": false,
+      "success": true,
+      "tx_active": false
+    },
+    "status_code": 200
+  },
+  "/api/v1/voice_call/contacts": {
+    "body": {
+      "contacts": [],
+      "success": true
+    },
+    "status_code": 200
+  },
+  "/api/v1/voice_call/history": {
+    "body": {
+      "history": [],
+      "success": true
+    },
+    "status_code": 200
+  },
+  "/api/v1/wifi_wan.json": {
+    "body": {
+      "available": true,
+      "eap_supported": true,
+      "network_mode": "auto",
+      "saved_networks": [],
+      "state": {
+        "associated": false,
+        "band": "",
+        "bitrate": null,
+        "captive_portal": false,
+        "configured": false,
+        "connected": false,
+        "encryption": "none",
+        "internet": null,
+        "ip": "",
+        "ip6": "",
+        "random_mac": false,
+        "signal": null,
+        "signal_percent": null,
+        "ssid": "",
+        "sta_enabled": false,
+        "uptime": 0
+      },
+      "status": "ok"
+    },
+    "status_code": 200
+  }
+}

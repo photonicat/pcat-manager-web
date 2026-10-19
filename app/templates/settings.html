@@ -1,4 +1,5 @@
-{% extends '_base.html' %} {% block content %}
+{% extends '_base.html' %}
+{% block page_title %}Wi-Fi{% endblock %} {% block content %}
 <div class="container mx-auto w-full pt-10 pb-12 sm:pt-24 sm:pb-12 md:pt-28 lg:px-4" x-data="wifi_settings">
   <div class="flex items-center justify-between">
     <h1 class="px-1 py-4 font-bold uppercase text-gray-600">{{locales["nav_settings"]}}</h1>
@@ -63,12 +64,31 @@
         <h5 class="font-bold text-gray-600">
           <span x-text="wifiinfo_0.device_type"></span> Wi-Fi
           <span x-show="wifiinfo_0.device_type === 'PCIE' && '{{pcie_wifi_name}}'" class="text-xs font-light text-gray-500 ml-2">{{pcie_wifi_name}}</span>
+          <span x-show="wifiinfo_0.wifi_wan" x-cloak class="ml-2 rounded-full bg-indigo-100 px-2 py-0.5 text-xs font-medium text-indigo-700">{{locales["wifi_upstream_badge"]}}</span>
         </h5>
       </div>
       <div class="p-5">
         <div class="container mx-auto max-w-xl">
           <div class="grid grid-cols-1 gap-6 text-center text-gray-400" x-show="!wifi_info_0_available">{{locales["no_wifi_info_config"]}}</div>
-          <div class="grid grid-cols-1 gap-6" x-show="wifi_info_0_available">
+          <!-- relaying the upstream: its own hotspot config is paused -->
+          <div class="grid grid-cols-1 gap-4" x-show="wifi_info_0_available && wifiinfo_0.wifi_wan" x-cloak>
+            <div class="rounded-lg border border-gray-200 bg-gray-50 p-4 text-gray-500">
+              <div class="mb-2 text-sm">{{locales["wifi_upstream_connected_to"]}}</div>
+              <!-- associated: green dot + the live upstream SSID -->
+              <div class="flex items-center gap-2" x-show="wifiinfo_0.wifi_wan_associated">
+                <span class="inline-block h-2 w-2 rounded-full bg-green-500"></span>
+                <span class="font-medium text-gray-600" x-text="wifiinfo_0.wifi_wan_ssid || '—'"></span>
+                <span class="rounded bg-gray-200 px-1.5 py-0.5 text-xs" x-text="upstream_tech(wifiinfo_0)"></span>
+              </div>
+              <!-- relaying but not joined (out of range / roaming): standby, not a stale name -->
+              <div class="flex items-center gap-2" x-show="!wifiinfo_0.wifi_wan_associated">
+                <span class="inline-block h-2 w-2 rounded-full bg-gray-400"></span>
+                <span class="font-medium text-gray-500">{{locales["wifi_wan_standby"]}}</span>
+              </div>
+              <div class="mt-3 text-xs">{{locales["wifi_upstream_settings_hint"]}}</div>
+            </div>
+          </div>
+          <div class="grid grid-cols-1 gap-6" x-show="wifi_info_0_available && !wifiinfo_0.wifi_wan">
             <label class="block">
               <span class="text-gray-700">Wi-Fi SSID</span>
               <input type="text" class="mt-1 block w-full" maxlength="31" required value="" x-model="wifiinfo_0.ssid" />
@@ -136,10 +156,17 @@
             </div>
 
             <div class="mt-4 flex justify-between">
-              <button type="button" 
+              <button type="button"
+                      :disabled="wifi_0_loading"
+                      title="{{locales['wifi_reset_defaults_tip']}}"
+                      class="focus:ring-gray-300 mr-2 mb-2 rounded-lg border border-gray-300 bg-white px-5 py-2.5 text-center text-sm font-medium text-gray-700 hover:bg-gray-50 focus:ring-4 sm:w-40 flex items-center justify-center"
+                      @click="reset_wifi_0">
+                <span>{{locales["wifi_reset_defaults"]}}</span>
+              </button>
+              <button type="button"
                       :disabled="wifi_0_loading"
                       :class="wifi_0_loading ? 'bg-gray-400 cursor-not-allowed' : 'bg-pcatblue hover:bg-pcatblue-400'"
-                      class="focus:ring-blue-300 mr-2 mb-2 w-full rounded-lg px-5 py-2.5 text-center text-sm font-medium text-white focus:ring-4 sm:w-32 flex items-center justify-center" 
+                      class="focus:ring-blue-300 mr-2 mb-2 w-full rounded-lg px-5 py-2.5 text-center text-sm font-medium text-white focus:ring-4 sm:w-32 flex items-center justify-center"
                       @click="config_wifi_0">
                 <!-- Loading Spinner -->
                 <svg x-show="wifi_0_loading" class="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
@@ -159,12 +186,31 @@
         <h5 class="font-bold text-gray-600">
           <span x-text="wifiinfo_1.device_type"></span> Wi-Fi
           <span x-show="wifiinfo_1.device_type === 'PCIE' && '{{pcie_wifi_name}}'" class="text-xs font-light text-gray-500 ml-2">{{pcie_wifi_name}}</span>
+          <span x-show="wifiinfo_1.wifi_wan" x-cloak class="ml-2 rounded-full bg-indigo-100 px-2 py-0.5 text-xs font-medium text-indigo-700">{{locales["wifi_upstream_badge"]}}</span>
         </h5>
       </div>
       <div class="p-5">
         <div class="container mx-auto max-w-xl">
           <div class="grid grid-cols-1 gap-6 text-center text-gray-400" x-show="!wifi_info_1_available">{{locales["no_wifi_info_config"]}}</div>
-          <div class="grid grid-cols-1 gap-6" x-show="wifi_info_1_available">
+          <!-- relaying the upstream: its own hotspot config is paused -->
+          <div class="grid grid-cols-1 gap-4" x-show="wifi_info_1_available && wifiinfo_1.wifi_wan" x-cloak>
+            <div class="rounded-lg border border-gray-200 bg-gray-50 p-4 text-gray-500">
+              <div class="mb-2 text-sm">{{locales["wifi_upstream_connected_to"]}}</div>
+              <!-- associated: green dot + the live upstream SSID -->
+              <div class="flex items-center gap-2" x-show="wifiinfo_1.wifi_wan_associated">
+                <span class="inline-block h-2 w-2 rounded-full bg-green-500"></span>
+                <span class="font-medium text-gray-600" x-text="wifiinfo_1.wifi_wan_ssid || '—'"></span>
+                <span class="rounded bg-gray-200 px-1.5 py-0.5 text-xs" x-text="upstream_tech(wifiinfo_1)"></span>
+              </div>
+              <!-- relaying but not joined (out of range / roaming): standby, not a stale name -->
+              <div class="flex items-center gap-2" x-show="!wifiinfo_1.wifi_wan_associated">
+                <span class="inline-block h-2 w-2 rounded-full bg-gray-400"></span>
+                <span class="font-medium text-gray-500">{{locales["wifi_wan_standby"]}}</span>
+              </div>
+              <div class="mt-3 text-xs">{{locales["wifi_upstream_settings_hint"]}}</div>
+            </div>
+          </div>
+          <div class="grid grid-cols-1 gap-6" x-show="wifi_info_1_available && !wifiinfo_1.wifi_wan">
             <label class="block">
               <span class="text-gray-700">Wi-Fi SSID</span>
               <input type="text" class="mt-1 block w-full" maxlength="31" required value="" x-model="wifiinfo_1.ssid" />
@@ -229,10 +275,17 @@
             </div>
 
             <div class="mt-4 flex justify-between">
-              <button type="button" 
+              <button type="button"
+                      :disabled="wifi_1_loading"
+                      title="{{locales['wifi_reset_defaults_tip']}}"
+                      class="focus:ring-gray-300 mr-2 mb-2 rounded-lg border border-gray-300 bg-white px-5 py-2.5 text-center text-sm font-medium text-gray-700 hover:bg-gray-50 focus:ring-4 sm:w-40 flex items-center justify-center"
+                      @click="reset_wifi_1">
+                <span>{{locales["wifi_reset_defaults"]}}</span>
+              </button>
+              <button type="button"
                       :disabled="wifi_1_loading"
                       :class="wifi_1_loading ? 'bg-gray-400 cursor-not-allowed' : 'bg-pcatblue hover:bg-pcatblue-400'"
-                      class="focus:ring-blue-300 mr-2 mb-2 w-full rounded-lg px-5 py-2.5 text-center text-sm font-medium text-white focus:ring-4 sm:w-32 flex items-center justify-center" 
+                      class="focus:ring-blue-300 mr-2 mb-2 w-full rounded-lg px-5 py-2.5 text-center text-sm font-medium text-white focus:ring-4 sm:w-32 flex items-center justify-center"
                       @click="config_wifi_1">
                 <!-- Loading Spinner -->
                 <svg x-show="wifi_1_loading" class="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
@@ -246,6 +299,29 @@
           </div>
         </div>
       </div><!--/p-5-->
+    </div>
+  </div>
+
+  <!-- Captive Portal -->
+  <div class="mb-8 w-full px-2 leading-normal text-gray-800 md:px-0" x-show="captive.installed" x-cloak>
+    <div class="border bg-white">
+      <div class="p-5">
+        <h2 class="mb-1 text-lg font-semibold text-gray-700">{{locales["captive_portal_title"]}}</h2>
+        <p class="mb-4 text-sm text-gray-500">{{locales["captive_portal_desc"]}}</p>
+        <div class="flex flex-wrap items-center gap-x-4 gap-y-2">
+          <label class="relative flex cursor-pointer items-center">
+            <input class="peer sr-only" type="checkbox" :checked="captive.enabled" :disabled="captive_loading" @change="toggle_captive($event.target.checked)" />
+            <div class="h-6 w-11 rounded-full border-2 border-gray-200 bg-gray-200 after:absolute after:top-0.5 after:left-0.5 after:h-5 after:w-5 after:rounded-full after:border after:border-gray-300 after:bg-white after:shadow-sm after:transition-all after:duration-300 peer-checked:border-blue-600 peer-checked:bg-blue-600 peer-checked:after:translate-x-full peer-checked:after:border-white"></div>
+            <span class="ml-2 select-none text-base text-gray-400" x-text="captive.enabled ? '{{locales['common_enable']}}' : '{{locales['common_disable']}}'"></span>
+          </label>
+          <svg x-show="captive_loading" class="animate-spin h-4 w-4 text-gray-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+          </svg>
+          <span class="text-sm font-medium" :class="captive.running ? 'text-green-600' : 'text-gray-400'" x-text="captive.running ? '{{locales['captive_portal_running']}}' : '{{locales['captive_portal_stopped']}}'"></span>
+          <span x-show="captive.running" class="text-sm text-gray-500" x-text="'{{locales['captive_portal_clients']}}: ' + captive.clients"></span>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -291,10 +367,12 @@
           }
         });
 
-        this.$watch("wifiinfo_1.frequency", (value) => {
-          if (value === "6g_be") {
-            this.wifiinfo_1.encryption = "sae";
-          }
+        this.$watch("wifiinfo_0.frequency", () => {
+          this.reconcile_encryption(this.wifiinfo_0);
+        });
+
+        this.$watch("wifiinfo_1.frequency", () => {
+          this.reconcile_encryption(this.wifiinfo_1);
         });
 
         this.$watch("wifiinfo_1.password", (value) => {
@@ -325,6 +403,11 @@
                   device_type: data.interfaces[0]["device_type"],
                   device: data.interfaces[0]["device"],
                   enabled: data.interfaces[0]["enabled"],
+                  band: data.interfaces[0]["band"] || "",
+                  htmode: data.interfaces[0]["htmode"] || "",
+                  wifi_wan: data.interfaces[0]["wifi_wan"] === true,
+                  wifi_wan_ssid: data.interfaces[0]["wifi_wan_ssid"] || "",
+                  wifi_wan_associated: data.interfaces[0]["wifi_wan_associated"] === true,
                   capabilities: data.interfaces[0]["capabilities"] || {is_pcie: false, bands: {}}
                 };
                 this.wifiinfo_0 = info;
@@ -343,6 +426,11 @@
                     device_type: data.interfaces[1]["device_type"],
                     device: data.interfaces[1]["device"],
                     enabled: data.interfaces[1]["enabled"],
+                    band: data.interfaces[1]["band"] || "",
+                    htmode: data.interfaces[1]["htmode"] || "",
+                    wifi_wan: data.interfaces[1]["wifi_wan"] === true,
+                    wifi_wan_ssid: data.interfaces[1]["wifi_wan_ssid"] || "",
+                    wifi_wan_associated: data.interfaces[1]["wifi_wan_associated"] === true,
                     capabilities: data.interfaces[1]["capabilities"] || {is_pcie: false, bands: {}}
                   };
                   this.wifiinfo_1 = info;
@@ -350,15 +438,48 @@
               }
             }
           });
+
+        // Captive portal current state
+        fetch("/api/v1/captive_portal.json")
+          .then((response) => response.json())
+          .then((data) => {
+            if (data.status === "ok" && data.state) this.captive = data.state;
+          })
+          .catch(() => {});
       },
       configing: false,
       configing_timeout: 0,
+      captive: { installed: false, enabled: false, running: false, clients: 0 },
+      captive_loading: false,
+      toggle_captive(enabled) {
+        if (this.captive_loading) return;
+        this.captive_loading = true;
+        // The backend blocks until opennds actually converges to the
+        // requested state (or times out), so the response reflects reality -
+        // no need for a follow-up poll.
+        fetch("/api/v1/captive_portal.json", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ enabled: enabled }),
+        })
+          .then((response) => response.json())
+          .then((data) => {
+            this.captive_loading = false;
+            if (data.state) this.captive = data.state;
+            if (data.status !== "ok") {
+              this.showNotification(
+                data.message || "Failed to update captive portal",
+                "强制门户状态更新失败",
+                'error'
+              );
+            }
+          })
+          .catch(() => {
+            this.captive_loading = false;
+            this.showNotification('Network error occurred', '网络错误', 'error');
+          });
+      },
       // [value, label, tooltip]
-      encrp_options: [
-        ["none", "No Encryption", "Open network · no authentication"],
-        ["psk2", "WPA2-PSK", "WPA2 Personal · AES-CCMP · PSK"],
-      ],
-
       encrp_options_wifi6: [
         ["none", "No Encryption", "Open network · no authentication"],
         ["psk2", "WPA2-PSK", "WPA2 Personal · AES-CCMP · PSK"],
@@ -389,15 +510,34 @@
         return this.freq_catalog.filter(o => o.shown(caps) || (legacy_pcie && o.value === "5g_ax"));
       },
 
+      // WPA3-SAE is a radio capability (WiFi 6/7 certification requires it),
+      // not a property of the frequency the user happens to have clicked:
+      // gating it on 5g_be/6g_be made the option vanish from the dropdown the
+      // moment any other band was selected.
+      radio_supports_sae(info) {
+        let bands = (info && info.capabilities && info.capabilities.bands) || {};
+        return Object.values(bands).some(b => b && (b.he || b.eht));
+      },
+
       encryption_options_for(info) {
         // 6 GHz mandates WPA3-SAE; only show SAE option.
         if (info && info.frequency === "6g_be") {
           return [this.encrp_option_sae];
         }
         let base = this.encrp_options_wifi6.slice();
-        let is_be = info && info.frequency === "5g_be";
-        if (is_be) base.push(this.encrp_option_sae);
+        if (this.radio_supports_sae(info)) base.push(this.encrp_option_sae);
         return base;
+      },
+
+      // Keep the selected encryption inside what the new frequency offers:
+      // 6 GHz allows only SAE, and a select whose model value has no matching
+      // option renders blank while silently posting the stale value.
+      reconcile_encryption(info) {
+        let options = this.encryption_options_for(info);
+        if (options.some(o => o[0] === info.encryption)) return;
+        // Never fall back to an open network.
+        let fallback = options.find(o => o[0] !== "none") || options[0];
+        info.encryption = fallback[0];
       },
 
       wifi_info_0_available: false,
@@ -411,6 +551,11 @@
         device: '',
         device_type: '',
         enabled: true,
+        band: '',
+        htmode: '',
+        wifi_wan: false,
+        wifi_wan_ssid: '',
+        wifi_wan_associated: false,
         capabilities: {is_pcie: false, bands: {}}
       },
 
@@ -423,7 +568,18 @@
         device: '',
         device_type: '',
         enabled: true,
+        band: '',
+        htmode: '',
+        wifi_wan: false,
+        wifi_wan_ssid: '',
+        wifi_wan_associated: false,
         capabilities: {is_pcie: false, bands: {}}
+      },
+
+      // "5G HE80" style tech chip for a radio relaying the upstream WiFi
+      upstream_tech(info) {
+        const band = info.band === "5g" ? "5G" : info.band === "2g" ? "2.4G" : info.band === "6g" ? "6G" : "";
+        return [band, info.htmode].filter(Boolean).join(" ");
       },
 
       ssid_help_text_0: "",
@@ -442,6 +598,42 @@
       // Loading states for AJAX buttons
       wifi_0_loading: false,
       wifi_1_loading: false,
+
+      // Restore the Photonicat factory-default Wi-Fi template into the form.
+      // Does NOT write anything — the user reviews then clicks Save. This is the
+      // recovery path when a Smart WAN <-> eth/5G mode switch leaves the onboard
+      // radio without its original manufacture settings.
+      reset_wifi_defaults(info) {
+        let is_pcie = info && (info.device_type === "PCIE" ||
+                               (info.capabilities && info.capabilities.is_pcie));
+        let suffix = Math.floor(1000 + Math.random() * 9000);
+        // Pick a default frequency that this radio actually supports, falling
+        // back to 2.4 GHz which every radio has.
+        let opts = this.frequency_options_for(info);
+        let prefer = is_pcie ? ["5g_be", "5g_ax", "5g", "2g"] : ["2g"];
+        let freq = "2g";
+        for (let p of prefer) {
+          if (opts.some(o => o.value === p)) { freq = p; break; }
+        }
+        info.ssid = is_pcie ? ("Photonicat-5G-" + suffix) : ("Photonicat-" + suffix);
+        info.encryption = "psk2";
+        info.password = "12345678";
+        info.frequency = freq;
+        info.hide_ssid = false;
+        info.enabled = true;
+        return info;
+      },
+      reset_wifi_0() {
+        this.wifiinfo_0 = this.reset_wifi_defaults(this.wifiinfo_0);
+        this.ssid_help_text_0 = "";
+        this.password_help_text_0 = "";
+      },
+      reset_wifi_1() {
+        this.wifiinfo_1 = this.reset_wifi_defaults(this.wifiinfo_1);
+        this.ssid_help_text_1 = "";
+        this.password_help_text_1 = "";
+      },
+
       config_wifi_0() {
         // Prevent double-clicks
         if (this.wifi_0_loading) return;

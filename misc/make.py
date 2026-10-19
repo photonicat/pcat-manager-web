@@ -172,8 +172,26 @@ if __name__ == "__main__":
   print("\nStep 1.2: Copy files to build directory.")
   shutil.copytree(str(from_directory_temp.joinpath("__pycache__")), str(to_directory))
   shutil.copytree(str(from_directory_temp.joinpath("pcat_util/__pycache__")), str(to_directory.joinpath("pcat_util")))
+  # locales/ is a subpackage (app/locales/{__init__,cn,en}.py); ship its compiled
+  # __pycache__ the same way pcat_util is shipped so `import locales` resolves.
+  shutil.copytree(str(from_directory_temp.joinpath("locales/__pycache__")), str(to_directory.joinpath("locales")))
   shutil.copytree(str(from_directory_temp.joinpath("static")), str(to_directory.joinpath("static")))
   shutil.copytree(str(from_directory_temp.joinpath("templates")), str(to_directory.joinpath("templates")))
+
+  # The pcat-call-audio daemon (src/callaudio) carries the in-call sample path
+  # in C. It is built separately for the aarch64 target -- this only ships an
+  # already-built binary if one is present, so a package can still be made on
+  # a machine without the cross toolchain. Its absence is not fatal: Flask
+  # reports the daemon unavailable and the phone page falls back to the
+  # in-process Python bridge.
+  callaudio_bin = current_working_path.joinpath("src/callaudio/pcat-call-audio")
+  if callaudio_bin.exists():
+    shutil.copy2(str(callaudio_bin), str(to_directory.joinpath("pcat-call-audio")))
+    os.chmod(str(to_directory.joinpath("pcat-call-audio")), 0o755)
+    print("  shipped pcat-call-audio daemon")
+  else:
+    print("  NOTE: src/callaudio/pcat-call-audio not built; package will fall "
+          "back to the Python audio bridge")
 
   print("\nStep 1.3: Rename pyc files.")
   pyc_files = pathlib.Path(to_directory).glob('**/*.pyc')

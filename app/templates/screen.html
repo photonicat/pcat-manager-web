@@ -1,6 +1,6 @@
 {% extends '_base.html' %}
+{% block page_title %}{{locales["nav_screen"]}}{% endblock %}
 {% block html_head0 %}
-  <script defer src="/static/socket.io.js"></script>
 {% endblock %}
 
 {% block content %}
@@ -24,6 +24,9 @@
           <button @click="switch_tab('screen_editor')" :class="tab_page === 'screen_editor' ? 'border-b-2 border-b-pcatblue' : ''" class="flex-1 items-center border-x px-4 py-3">
             {{ locales["tab_screen_editor"] }}
           </button>
+          <button @click="switch_tab('public_ip')" :class="tab_page === 'public_ip' ? 'border-b-2 border-b-pcatblue' : ''" class="flex-1 items-center border-x px-4 py-3">
+            {{ locales["tab_public_ip"] }}
+          </button>
         </div>
       </div>
     </div>
@@ -42,32 +45,58 @@
             <tr>
               <td class="text-left font-semibold">{{ locales["on_battery_auto_dim_time"] }}</td>
               <td class="text-right font-semibold">
-                <div class="flex items-center justify-end">
-                  <input type="number" x-model.number="basic.on_battery_auto_dim_time" placeholder="-" class="w-40 text-center border rounded px-2 py-1"/>
+                <!-- pinned to the same w-48 as the plain inputs below so every
+                     row shares a right edge, and switching unit cannot reflow it -->
+                <div class="flex items-center gap-2 w-48 ml-auto">
+                  <input type="number" min="0" x-model.number="basic.dim_battery.value" placeholder="-" class="w-20 shrink-0 text-center border rounded px-2 py-1"/>
+                  <select x-model.number="basic.dim_battery.unit" class="grow min-w-0 border rounded py-1 pl-2 pr-7 text-sm">
+                    <option value="1">{{ locales["unit_seconds"] | default("seconds") }}</option>
+                    <option value="60">{{ locales["unit_minutes"] | default("minutes") }}</option>
+                    <option value="3600">{{ locales["unit_hours"] | default("hours") }}</option>
+                  </select>
                 </div>
               </td>
             </tr>
             <tr>
               <td class="text-left font-semibold">{{ locales["on_charger_auto_dim_time"] }}</td>
               <td class="text-right font-semibold">
-                <div class="flex items-center justify-end">
-                  <input type="number" x-model.number="basic.on_charger_auto_dim_time" placeholder="-" class="w-40 text-center border rounded px-2 py-1"/>
+                <div class="flex items-center gap-2 w-48 ml-auto">
+                  <input type="number" min="0" x-model.number="basic.dim_charger.value" placeholder="-" class="w-20 shrink-0 text-center border rounded px-2 py-1"/>
+                  <select x-model.number="basic.dim_charger.unit" class="grow min-w-0 border rounded py-1 pl-2 pr-7 text-sm">
+                    <option value="1">{{ locales["unit_seconds"] | default("seconds") }}</option>
+                    <option value="60">{{ locales["unit_minutes"] | default("minutes") }}</option>
+                    <option value="3600">{{ locales["unit_hours"] | default("hours") }}</option>
+                  </select>
                 </div>
               </td>
             </tr>
             <tr>
               <td class="text-left font-semibold">{{ locales["ping_site0"] }}</td>
               <td class="text-right font-semibold">
-                <div class="flex items-center justify-end">
-                  <input type="text" x-model="basic.ping_site0" placeholder="" class="w-40 text-center border rounded px-2 py-1"/>
+                <div class="flex items-center gap-2 justify-end">
+                  <span x-show="pingHint(basic.ping_type0)" :title="pingHint(basic.ping_type0)" class="shrink-0 inline-flex items-center justify-center w-5 h-5 rounded-full border border-gray-400 text-gray-500 text-xs cursor-help select-none">i</span>
+                  <select x-model="basic.ping_type0" class="shrink-0 border rounded py-1 pl-2 pr-7 text-sm">
+                    <option value="icmp">ICMP</option>
+                    <option value="tcp">TCP</option>
+                    <option value="http">HTTP</option>
+                    <option value="https">HTTPS</option>
+                  </select>
+                  <input type="text" x-model="basic.ping_site0" :placeholder="pingPlaceholder(basic.ping_type0)" class="w-48 text-center border rounded px-2 py-1"/>
                 </div>
               </td>
             </tr>
             <tr>
               <td class="text-left font-semibold">{{ locales["ping_site1"] }}</td>
               <td class="text-right font-semibold">
-                <div class="flex items-center justify-end">
-                  <input type="text" x-model="basic.ping_site1" placeholder="" class="w-40 text-center border rounded px-2 py-1"/>
+                <div class="flex items-center gap-2 justify-end">
+                  <span x-show="pingHint(basic.ping_type1)" :title="pingHint(basic.ping_type1)" class="shrink-0 inline-flex items-center justify-center w-5 h-5 rounded-full border border-gray-400 text-gray-500 text-xs cursor-help select-none">i</span>
+                  <select x-model="basic.ping_type1" class="shrink-0 border rounded py-1 pl-2 pr-7 text-sm">
+                    <option value="icmp">ICMP</option>
+                    <option value="tcp">TCP</option>
+                    <option value="http">HTTP</option>
+                    <option value="https">HTTPS</option>
+                  </select>
+                  <input type="text" x-model="basic.ping_site1" :placeholder="pingPlaceholder(basic.ping_type1)" class="w-48 text-center border rounded px-2 py-1"/>
                 </div>
               </td>
             </tr>
@@ -75,7 +104,7 @@
               <td class="text-left font-semibold">{{ locales["screen_max_brightness"] }} 1 - 100</td>
               <td class="text-right font-semibold">
                 <div class="flex items-center justify-end">
-                  <input type="number" x-model.number="basic.screen_max_brightness" placeholder="" min="1" max="100" class="w-40 text-center border rounded px-2 py-1"/>
+                  <input type="number" x-model.number="basic.screen_max_brightness" placeholder="" min="1" max="100" class="w-48 text-center border rounded px-2 py-1"/>
                 </div>
               </td>
             </tr>
@@ -83,7 +112,7 @@
               <td class="text-left font-semibold">{{ locales["screen_min_brightness"] }} 0 - 100</td>
               <td class="text-right font-semibold">
                 <div class="flex items-center justify-end">
-                  <input type="number" x-model.number="basic.screen_min_brightness" placeholder="" min="0" max="100" class="w-40 text-center border rounded px-2 py-1"/>
+                  <input type="number" x-model.number="basic.screen_min_brightness" placeholder="" min="0" max="100" class="w-48 text-center border rounded px-2 py-1"/>
                 </div>
               </td>
             </tr>
@@ -103,7 +132,7 @@
               <td class="text-left font-semibold">{{ locales["sms_limit_for_screen"] }} 1 - 100</td>
               <td class="text-right font-semibold">
                 <div class="flex items-center justify-end">
-                  <input type="number" x-model.number="basic.sms_limit_for_screen" placeholder="5" min="1" max="100" class="w-40 text-center border rounded px-2 py-1"/>
+                  <input type="number" x-model.number="basic.sms_limit_for_screen" placeholder="5" min="1" max="100" class="w-48 text-center border rounded px-2 py-1"/>
                 </div>
               </td>
             </tr>
@@ -129,12 +158,26 @@
         <h5 class="font-bold text-gray-600">{{ locales["screen_live_title"] }}</h5>
       </div>
       <div class="flex items-center justify-center p-4">
-        <img :src="frameSrc" alt="Screen frame" class="max-w-full max-h-[400px] rounded-2xl" />
+        <!-- fixed to the LCD's 172x320 so a late first frame can't grow the card
+             (which popped the page scrollbar in and nudged the layout sideways) -->
+        <div class="relative rounded-2xl overflow-hidden" style="width: 172px; height: 320px">
+          <img :src="frameSrc" alt="Screen frame" class="w-full h-full" />
+          <!-- Nothing has arrived for FRAME_STALE_MS: hide the frozen
+               screenshot rather than pass it off as live, and spin instead. -->
+          <div x-show="frameStale" x-cloak
+               class="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-gray-900 text-gray-300">
+            <svg class="animate-spin h-8 w-8" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            <span class="text-xs">{{ locales["screen_frame_waiting"] | default("Waiting for screen…") }}</span>
+          </div>
+        </div>
       </div>
       <div class="flex flex-wrap justify-center px-4 mt-auto mb-4">
-        <button @click="shortClick()" 
-                :disabled="loading.shortClick" 
-                :class="loading.shortClick ? 'bg-green-600 scale-95' : 'bg-green-500 hover:bg-green-600 active:scale-95'" 
+        <button @click="shortClick()"
+                :disabled="loading.shortClick"
+                :class="loading.shortClick ? 'bg-green-600 scale-95' : 'bg-green-500 hover:bg-green-600 active:scale-95'"
                 class="text-white px-4 py-2 rounded-lg font-semibold w-40 flex items-center justify-center space-x-2 transition-all duration-75">
           <svg x-show="loading.shortClick" class="animate-spin h-4 w-4 text-white" fill="none" viewBox="0 0 24 24">
             <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
@@ -142,6 +185,173 @@
           </svg>
           <img x-show="!loading.shortClick" src="/static/short_click.svg" class="w-4 h-4" />
           <span x-text="getShortClickButtonText()"></span>
+        </button>
+      </div>
+    </div>
+    <!-- ===== Color Themes: one-click recolor of every LCD page ===== -->
+    <div class="w-full bg-white shadow rounded flex flex-col mb-4">
+      <div class="flex items-center justify-between border-b p-3">
+        <h5 class="font-bold text-gray-600">{{ locales["theme_section_title"] | default("Color Themes") }}</h5>
+        <span class="text-xs text-gray-400" x-show="applyingThemeKey">{{ locales["theme_applying"] | default("Applying…") }}</span>
+      </div>
+      <div class="p-4">
+        <p class="text-sm text-gray-600 leading-relaxed mb-4">{{ locales["theme_section_help"] | default("One click recolors every page of the LCD. Your layout, elements and data sources are untouched — only colors (and background, for themes that have one) change.") }}</p>
+
+        <!-- preset theme cards -->
+        <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+          <template x-for="t in presetThemes" :key="t.key">
+            <button @click="applyTheme(t)" :disabled="applyingThemeKey !== null"
+                    class="group text-left rounded-xl border transition-all focus:outline-none"
+                    :class="activeTheme === t.key ? 'border-pcatblue ring-2 ring-pcatblue/40 shadow' : 'border-gray-200 hover:border-gray-400 hover:shadow'">
+              <!-- mini LCD mock -->
+              <div class="rounded-t-xl px-3 py-3 font-mono flex flex-col gap-0.5"
+                   :style="`background:${rgbCss(t.bg || [0,0,0])}`">
+                <span class="text-[9px] tracking-widest" :style="`color:${rgbCss(t.colors.accent)}`">WAN SPEED</span>
+                <span class="text-lg font-bold leading-none" :style="`color:${rgbCss(t.colors.primary)}`">42.7<span class="text-[9px] font-normal"> Mbps</span></span>
+                <span class="text-[9px]" :style="`color:${rgbCss(t.colors.data)}`">192.168.8.1</span>
+              </div>
+              <div class="flex items-center justify-between px-3 py-2">
+                <span class="text-sm font-semibold text-gray-700" x-text="t.name"></span>
+                <span x-show="activeTheme === t.key" class="text-[10px] font-bold text-white bg-pcatblue rounded-full px-2 py-0.5">{{ locales["theme_active"] | default("Active") }}</span>
+                <svg x-show="applyingThemeKey === t.key" class="animate-spin h-4 w-4 text-pcatblue" fill="none" viewBox="0 0 24 24">
+                  <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                  <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+                </svg>
+              </div>
+            </button>
+          </template>
+        </div>
+
+        <!-- custom theme: pick each palette colour by hand, or roll one -->
+        <div class="mt-4 border rounded-xl p-3 flex flex-col sm:flex-row items-stretch sm:items-center gap-3 bg-gray-50">
+          <!-- live preview of the picked colours -->
+          <div class="rounded-xl px-3 py-3 font-mono flex flex-col gap-0.5 min-w-[150px]"
+               :style="`background:${rgbCss(customTheme.bgOn ? customTheme.bg : [0,0,0])}`">
+            <span class="text-[9px] tracking-widest" :style="`color:${rgbCss(customTheme.colors.accent)}`">WAN SPEED</span>
+            <span class="text-lg font-bold leading-none" :style="`color:${rgbCss(customTheme.colors.primary)}`">42.7<span class="text-[9px] font-normal"> Mbps</span></span>
+            <span class="text-[9px]" :style="`color:${rgbCss(customTheme.colors.data)}`">192.168.8.1</span>
+          </div>
+          <div class="flex-grow">
+            <p class="text-sm font-semibold text-gray-700">
+              {{ locales["theme_custom_title"] | default("Pick Your Own") }}
+              <span x-show="customTheme.name" class="ml-1 text-pcatblue" x-text="customTheme.name ? '“' + customTheme.name + '”' : ''"></span>
+            </p>
+            <p class="text-xs text-gray-500 mt-1">{{ locales["theme_custom_desc"] | default("Choose each colour yourself, or roll a random palette into the pickers. The preview updates as you pick, then apply it to every LCD page.") }}</p>
+            <div class="flex flex-wrap items-center gap-x-4 gap-y-2 mt-2">
+              <label class="flex items-center gap-1.5 text-xs text-gray-600">
+                <input type="color" :value="rgbToHex(customTheme.colors.primary)"
+                       @input="setCustomColor('primary', $event.target.value)"
+                       class="border rounded h-7 w-10 p-0.5 cursor-pointer"/>
+                {{ locales["theme_custom_primary"] | default("Values") }}
+              </label>
+              <label class="flex items-center gap-1.5 text-xs text-gray-600">
+                <input type="color" :value="rgbToHex(customTheme.colors.accent)"
+                       @input="setCustomColor('accent', $event.target.value)"
+                       class="border rounded h-7 w-10 p-0.5 cursor-pointer"/>
+                {{ locales["theme_custom_accent"] | default("Labels") }}
+              </label>
+              <label class="flex items-center gap-1.5 text-xs text-gray-600">
+                <input type="color" :value="rgbToHex(customTheme.colors.data)"
+                       @input="setCustomColor('data', $event.target.value)"
+                       class="border rounded h-7 w-10 p-0.5 cursor-pointer"/>
+                {{ locales["theme_custom_data"] | default("Details") }}
+              </label>
+              <label class="flex items-center gap-1.5 text-xs text-gray-600">
+                <input type="checkbox" x-model="customTheme.bgOn" class="rounded"/>
+                <input type="color" :value="rgbToHex(customTheme.bg)"
+                       @input="setCustomColor('bg', $event.target.value)"
+                       :disabled="!customTheme.bgOn"
+                       :class="customTheme.bgOn ? '' : 'opacity-40 cursor-not-allowed'"
+                       class="border rounded h-7 w-10 p-0.5 cursor-pointer"/>
+                {{ locales["theme_custom_bg"] | default("Background") }}
+              </label>
+            </div>
+          </div>
+          <div class="flex sm:flex-col gap-2 shrink-0">
+            <button @click="surpriseMe()"
+                    class="bg-gray-200 hover:bg-gray-300 text-gray-700 px-3 py-2 rounded-lg text-sm font-semibold whitespace-nowrap">
+              {{ locales["theme_random_roll"] | default("🎲 Surprise Me") }}
+            </button>
+            <button @click="applyCustomTheme()" :disabled="applyingThemeKey !== null"
+                    :class="applyingThemeKey !== null ? 'bg-gray-400 cursor-not-allowed' : 'bg-pcatblue hover:bg-pcatblue-400'"
+                    class="text-white px-3 py-2 rounded-lg text-sm font-semibold">
+              {{ locales["theme_apply"] | default("Apply") }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- public_ip panel: configure the URLs used to resolve the LCD's PUBLIC IP -->
+  <div class="flex flex-wrap" x-show="tab_page === 'public_ip'" x-cloak>
+    <div class="flex-grow bg-white shadow rounded flex flex-col overflow-y-auto mr-4 mb-4 pb-4">
+      <div class="flex justify-between border-b p-3">
+        <h5 class="font-bold text-gray-600">{{ locales["public_ip_title"] }}</h5>
+      </div>
+
+      <p class="text-sm text-gray-600 px-4 pt-3 leading-relaxed">{{ locales["public_ip_help"] }}</p>
+
+      <!-- IPv4 sources -->
+      <div class="px-4 pt-4">
+        <div class="flex items-center justify-between mb-2">
+          <h6 class="font-semibold text-gray-700">{{ locales["public_ip_ipv4_label"] }}</h6>
+          <button @click="pubip.ipv4.push({url:'',parser:'stdout'})" class="text-pcatblue text-sm font-semibold">+ {{ locales["public_ip_add"] }}</button>
+        </div>
+        <template x-for="(src, i) in pubip.ipv4" :key="'v4'+i">
+          <div class="flex items-center gap-2 mb-2">
+            <input type="text" x-model="src.url" placeholder="https://api.ipify.org" class="flex-grow border rounded px-2 py-1 text-sm"/>
+            <input type="text" x-model="src.parser" placeholder="stdout" title="{{ locales['public_ip_parser_tip'] }}" class="w-32 border rounded px-2 py-1 text-sm font-mono"/>
+            <button @click="pubip.ipv4.splice(i,1)" class="text-red-500 px-2" title="{{ locales['public_ip_remove'] }}">✕</button>
+          </div>
+        </template>
+        <p x-show="pubip.ipv4.length === 0" class="text-xs text-gray-400 italic">{{ locales["public_ip_empty"] }}</p>
+      </div>
+
+      <!-- IPv6 sources -->
+      <div class="px-4 pt-4">
+        <div class="flex items-center justify-between mb-2">
+          <h6 class="font-semibold text-gray-700">{{ locales["public_ip_ipv6_label"] }}</h6>
+          <button @click="pubip.ipv6.push({url:'',parser:'stdout'})" class="text-pcatblue text-sm font-semibold">+ {{ locales["public_ip_add"] }}</button>
+        </div>
+        <template x-for="(src, i) in pubip.ipv6" :key="'v6'+i">
+          <div class="flex items-center gap-2 mb-2">
+            <input type="text" x-model="src.url" placeholder="https://6.photonicat.com/ip.php" class="flex-grow border rounded px-2 py-1 text-sm"/>
+            <input type="text" x-model="src.parser" placeholder="stdout" title="{{ locales['public_ip_parser_tip'] }}" class="w-32 border rounded px-2 py-1 text-sm font-mono"/>
+            <button @click="pubip.ipv6.splice(i,1)" class="text-red-500 px-2" title="{{ locales['public_ip_remove'] }}">✕</button>
+          </div>
+        </template>
+        <p x-show="pubip.ipv6.length === 0" class="text-xs text-gray-400 italic">{{ locales["public_ip_empty"] }}</p>
+      </div>
+
+      <!-- custom user agent -->
+      <div class="px-4 pt-4">
+        <h6 class="font-semibold text-gray-700 mb-2">{{ locales["public_ip_user_agent"] }}</h6>
+        <input type="text" x-model="pubip.user_agent" placeholder="{{ locales['public_ip_user_agent_ph'] }}" class="w-full border rounded px-2 py-1 text-sm"/>
+        <p class="text-xs text-gray-400 mt-1">{{ locales["public_ip_user_agent_tip"] }}</p>
+      </div>
+
+      <!-- worked example -->
+      <div class="mx-4 mt-5 rounded border bg-gray-50 p-3">
+        <h6 class="font-semibold text-gray-700 mb-2">{{ locales["public_ip_example_title"] }}</h6>
+        <p class="text-xs text-gray-600 mb-2">{{ locales["public_ip_example_desc"] }}</p>
+        <pre class="text-xs font-mono bg-white border rounded p-2 overflow-x-auto">URL: https://api.ipify.org        parser: stdout
+URL: https://ident.me              parser: stdout
+URL: http://ip-api.com/json        parser: json:query
+URL: https://ipinfo.io/json        parser: json:ip</pre>
+        <p class="text-xs text-gray-500 mt-2">{{ locales["public_ip_parser_help"] }}</p>
+      </div>
+
+      <div class="flex space-x-2 flex-wrap justify-end px-4 mt-5">
+        <button @click="savePublicIp()"
+                :disabled="loading.savePublicIp"
+                :class="loading.savePublicIp ? 'bg-gray-400 cursor-not-allowed' : 'bg-pcatblue hover:bg-pcatblue-400'"
+                class="text-white px-4 py-2 rounded-lg font-semibold w-40 flex items-center justify-center">
+          <svg x-show="loading.savePublicIp" class="animate-spin -ml-1 mr-2 h-4 w-4 text-white" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+          </svg>
+          <span x-text="getSavePublicIpButtonText()"></span>
         </button>
       </div>
     </div>
@@ -210,7 +420,7 @@
       <div class="relative mx-auto w-full overflow-hidden" x-ref="canvasBox"
            :style="`max-width:258px;height:${480 * canvasCssScale}px;`">
       <div class="absolute top-0 left-0 select-none rounded-lg overflow-hidden origin-top-left"
-           :style="`width:258px;height:480px;background:#0a0a12;transform:scale(${canvasCssScale});`"
+           :style="`width:258px;height:480px;background:${canvasBg()};transform:scale(${canvasCssScale});`"
            @mousemove="onCanvasMove($event)" @mouseup="onCanvasUp()" @mouseleave="onCanvasUp()"
            x-ref="canvas">
         <!-- ===== TOP BAR & FOOTER — REAL pixels from the live device frame =====
@@ -461,7 +671,19 @@
         <h5 class="font-bold text-gray-600">{{ locales["screen_live_title"] }}</h5>
       </div>
       <div class="flex items-center justify-center p-4">
-        <img :src="frameSrc" alt="Screen frame" class="max-w-full max-h-[400px] rounded-2xl" />
+        <!-- fixed to the LCD's 172x320 so a late first frame can't grow the card
+             (which popped the page scrollbar in and nudged the layout sideways) -->
+        <div class="relative rounded-2xl overflow-hidden" style="width: 172px; height: 320px">
+          <img :src="frameSrc" alt="Screen frame" class="w-full h-full" />
+          <div x-show="frameStale" x-cloak
+               class="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-gray-900 text-gray-300">
+            <svg class="animate-spin h-8 w-8" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            <span class="text-xs">{{ locales["screen_frame_waiting"] | default("Waiting for screen…") }}</span>
+          </div>
+        </div>
       </div>
       <div class="flex flex-wrap justify-center px-4 mt-auto mb-4">
         <button @click="shortClick()"
@@ -779,6 +1001,17 @@
           </svg>
           <span x-text="getRestartScreenButtonText()"></span>
         </button>
+        <button @click="resetScreen()"
+                :disabled="loading.resetScreen"
+                :class="loading.resetScreen ? 'bg-gray-400 cursor-not-allowed' : 'bg-red-500 hover:bg-red-600'"
+                class="text-white px-4 py-2 rounded-lg font-semibold w-40 flex items-center justify-center"
+                title="{{ locales['reset_screen_tip'] | default('Wipe the saved screen layout on the device and restart with the built-in defaults') }}">
+          <svg x-show="loading.resetScreen" class="animate-spin -ml-1 mr-2 h-4 w-4 text-white" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 0 18-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+          </svg>
+          <span x-text="getResetScreenButtonText()"></span>
+        </button>
         <button @click="loadDefault()" class="bg-red-300 hover:bg-red-400 text-white px-4 py-2 rounded-lg font-semibold w-40">
           {{ locales["load_default"] }}
         </button>
@@ -807,7 +1040,7 @@
     Alpine.store("app").set_page("screen");
 
     Alpine.data("screen", () => ({
-      tab_page: (window.location.hash && ["screen_settings", "screen_editor"].includes(window.location.hash.substring(1))) ? window.location.hash.substring(1) : "screen_settings",
+      tab_page: (window.location.hash && ["screen_settings", "screen_editor", "public_ip"].includes(window.location.hash.substring(1))) ? window.location.hash.substring(1) : "screen_settings",
 
       notification: {
         show: false,
@@ -822,9 +1055,18 @@
         saveSettings: false,
         shortClick: false,
         restartScreen: false,
+        resetScreen: false,
         saveEditor: false,
         saveVisual: false,
-        saveRestartSources: false
+        saveRestartSources: false,
+        savePublicIp: false
+      },
+
+      // Public IP lookup config (mirrored into the Go user_config + Python user config).
+      pubip: {
+        user_agent: "",
+        ipv4: [],
+        ipv6: [],
       },
 
       // ---- visual editor state ----
@@ -912,13 +1154,96 @@
       basic: {
         ping_site0: "",
         ping_site1: "",
-        on_battery_auto_dim_time: "",
-        on_charger_auto_dim_time: "",
+        // Probe mode per ping row: "icmp" (default), "tcp" (one TCP handshake
+        // to host[:port], port 443 when omitted) or "http" (one GET, Google
+        // gen_204 style — any HTTP response counts as up).
+        ping_type0: "icmp",
+        ping_type1: "icmp",
+        // The device stores both dim delays in seconds, but 86400 is not a
+        // number anyone should have to type or read. The form edits
+        // {value, unit} — unit being seconds-per-unit, so the conversion is a
+        // multiply — and the stored value is unchanged. On load the unit is
+        // the largest one that divides evenly, so 300 shows as "5 minutes"
+        // and 90 stays "90 seconds".
+        dim_battery: { value: 1, unit: 60 },
+        dim_charger: { value: 24, unit: 3600 },
         screen_max_brightness: 100,
         screen_min_brightness: 0,
         show_sms: true,
         sms_limit_for_screen: 5,
       },
+
+      // Example target for the chosen ping mode, shown while the field is empty.
+      pingPlaceholder(t) {
+        if (t === "tcp") return "photonicat.com:443";
+        if (t === "http") return "http://www.google.com/generate_204";
+        if (t === "https") return "https://www.google.com/generate_204";
+        return "1.1.1.1";
+      },
+
+      // Explanation + example for the non-default modes; shown as the hover
+      // tooltip on the ⓘ badge next to the mode select.
+      pingHint(t) {
+        if (t === "tcp") return "{{ locales.ping_hint_tcp }}";
+        if (t === "http") return "{{ locales.ping_hint_http }}";
+        if (t === "https") return "{{ locales.ping_hint_https }}";
+        return "";
+      },
+
+      // Seconds -> the friendliest {value, unit} that represents them exactly.
+      splitDuration(seconds) {
+        let s = parseInt(seconds, 10);
+        if (isNaN(s) || s < 0) s = 0;
+        if (s && s % 3600 === 0) return { value: s / 3600, unit: 3600 };
+        if (s && s % 60 === 0) return { value: s / 60, unit: 60 };
+        return { value: s, unit: 1 };
+      },
+
+      // {value, unit} -> seconds for the config. Blank or negative reads as 0.
+      dimSeconds(d) {
+        let v = parseInt(d.value, 10);
+        if (isNaN(v) || v < 0) v = 0;
+        return v * (parseInt(d.unit, 10) || 1);
+      },
+
+      // ---- color themes ----
+      // Six curated palettes. colors.{primary,accent,data} map onto element
+      // roles (big values / section labels / info text); bg, when set, becomes
+      // display_template.bg_color (needs firmware with bg_color support —
+      // older firmware just ignores it).
+      presetThemes: [
+        { key: "pcat_classic", name: "PCAT Classic", bg: null,
+          colors: { primary: [255,229,0],  accent: [255,229,0],  data: [255,229,255] } },
+        { key: "neon_cyber",   name: "Neon Cyber",   bg: null,
+          colors: { primary: [0,229,255],  accent: [255,64,160], data: [225,242,255] } },
+        { key: "aurora",       name: "Aurora",       bg: null,
+          colors: { primary: [70,235,145], accent: [80,170,255], data: [215,255,235] } },
+        { key: "sunset_synth", name: "Sunset Synth", bg: null,
+          colors: { primary: [255,160,40], accent: [185,115,255], data: [255,235,215] } },
+        { key: "ember",        name: "Ember",        bg: [26,7,2],
+          colors: { primary: [255,150,50], accent: [255,90,64],  data: [255,214,180] } },
+        { key: "midnight",     name: "Midnight",     bg: [3,10,26],
+          colors: { primary: [90,220,255], accent: [130,150,255], data: [215,232,255] } },
+      ],
+      // key of the theme saved in user_config (color_theme), for the Active badge
+      activeTheme: "",
+      // theme key currently being applied (null = idle); doubles as a lock
+      applyingThemeKey: null,
+      // The single editable palette behind the "Pick Your Own" card. Hand
+      // picking and "Surprise Me" both write here, so there is one preview and
+      // one Apply button rather than two competing cards. bgOn gates whether bg
+      // is sent at all, so an unchecked box leaves the LCD background black
+      // instead of writing a bg_color the user never asked for. name is set
+      // only by a roll, and cleared as soon as a swatch is edited by hand.
+      customTheme: {
+        colors: { primary: [255,229,0], accent: [0,138,211], data: [235,235,235] },
+        bg: [10,10,18],
+        bgOn: false,
+        name: "",
+      },
+      // display_template.bg_color of the loaded layout (null = black). Kept so
+      // visual-editor saves and the canvas preview preserve/show the themed bg.
+      templateBg: null,
 
       editor: "",
       // pretty-printed snapshot of the last config loaded/saved from the device,
@@ -935,16 +1260,37 @@
       // flicker. All live-frame bindings use frameSrc, not frameTs directly.
       frameSrc: "/api/v1/screen/frame.png?ts=" + Date.now(),
       frameLoading: false,
-      refreshInterval: null,
+      // ---- live-frame pacing ----------------------------------------------
+      // The display renders about one frame a second, and the whole fetch
+      // costs ~35ms on the device, so a 1s cadence is the real refresh rate;
+      // the old 3s interval was throwing away two thirds of it.
+      FRAME_PERIOD_MS: 1000,
+      // Backoff after a failed/aborted load so a rebooting display service
+      // isn't hammered at 1Hz.
+      FRAME_RETRY_MS: 2000,
+      // A load that has neither succeeded nor errored by now is treated as
+      // dead. Without this an image request that simply never settles (tab
+      // suspended mid-flight, Wi-Fi dropped, request stuck behind granian's
+      // 4 blocking threads) pinned frameLoading true and froze the preview
+      // for the rest of the page's life — the "very stale image" bug.
+      FRAME_TIMEOUT_MS: 4000,
+      // No good frame for this long ⇒ show the spinner instead of a
+      // screenshot that has silently stopped moving.
+      FRAME_STALE_MS: 5000,
+      frameTimer: null,        // handle of the next scheduled poll
+      frameWatchdog: null,     // handle of the in-flight load's deadline
+      frameImg: null,          // the off-screen Image currently loading
+      frameSeq: 0,             // bumped to orphan a superseded load's callbacks
+      frameOkAt: Date.now(),   // when the last good frame landed
+      frameStale: false,       // drives the loading wheel over the preview
+      staleTimer: null,
+      visHandler: null,
 
       init() {
-        // open socket.io and handle frame updates
-        window.socket = io({ transports: ["polling"], upgrade: false });
-        socket.on("frame_update", () => {
-          this.bumpFrame();
-        });
-
-        // start auto-refresh timer for screen image (every 3 seconds)
+        // No push channel here: this page used to open one and listen for a
+        // "frame_update" event that nothing on the server has ever emitted,
+        // so it cost a held request slot (issue #113) and delivered nothing.
+        // The live frame is driven by the ~1s poll loop below.
         this.startAutoRefresh();
 
         // load data for all panels
@@ -1009,45 +1355,113 @@
       },
 
       startAutoRefresh() {
-        // clear any existing interval
-        if (this.refreshInterval) {
-          clearInterval(this.refreshInterval);
-        }
-        
-        // set up new interval to refresh every 3 seconds
-        this.refreshInterval = setInterval(() => {
+        this.stopAutoRefresh();
+
+        // Self-scheduling loop rather than setInterval: the next fetch is
+        // queued only once the previous one has settled, so a slow link
+        // stretches the cadence instead of piling requests on top of each
+        // other (which on a 4-thread server makes the lag worse, not better).
+        this.scheduleFrame(0);
+
+        // Staleness is time-based, so it needs its own tick to stay reactive.
+        this.staleTimer = setInterval(() => {
+          this.frameStale = Date.now() - this.frameOkAt > this.FRAME_STALE_MS;
+        }, 500);
+
+        // Coming back to a background tab: polling was paused, so what is on
+        // screen is by definition old. Fetch immediately instead of waiting
+        // out a tick, and force past any load left in flight when we were
+        // hidden (the browser may never settle it).
+        this.visHandler = () => { if (!document.hidden) this.bumpFrame(true); };
+        document.addEventListener("visibilitychange", this.visHandler);
+      },
+
+      scheduleFrame(delay) {
+        if (this.frameTimer) clearTimeout(this.frameTimer);
+        this.frameTimer = setTimeout(() => {
+          this.frameTimer = null;
           this.bumpFrame();
-        }, 3000);
+        }, delay);
       },
 
       // Refresh the live preview WITHOUT flicker: fetch the next frame into an
       // off-screen Image first, and only swap the visible src once it has fully
       // decoded. The old frame stays painted until the new one is ready, so the
-      // <img> / background-image never blanks out between loads. Skips if a load
-      // is already in flight (avoids piling up requests).
-      bumpFrame() {
-        if (this.frameLoading) return;
+      // <img> / background-image never blanks out between loads.
+      //
+      // force=true (short click, tab regained focus) drops whatever is in
+      // flight and starts over — a manual refresh must never be a no-op just
+      // because an earlier load is wedged.
+      bumpFrame(force) {
+        if (this.frameLoading && !force) return;
+        if (document.hidden && !force) {
+          this.scheduleFrame(this.FRAME_PERIOD_MS);
+          return;
+        }
+        this.cancelFrameLoad();
+
+        let token = this.frameSeq;   // cancelFrameLoad already invalidated older ones
         this.frameLoading = true;
         let ts = Date.now();
         let url = "/api/v1/screen/frame.png?ts=" + ts;
         let img = new Image();
+        this.frameImg = img;
+
         let done = (ok) => {
+          if (token !== this.frameSeq) return;   // superseded or timed out
+          if (this.frameWatchdog) {
+            clearTimeout(this.frameWatchdog);
+            this.frameWatchdog = null;
+          }
+          this.frameImg = null;
           this.frameLoading = false;
           if (ok) {
             this.frameTs = ts;       // keep in sync for any other consumers
             this.frameSrc = url;     // already cached → instant, flicker-free swap
+            this.frameOkAt = Date.now();
+            this.frameStale = false;
           }
+          this.scheduleFrame(ok ? this.FRAME_PERIOD_MS : this.FRAME_RETRY_MS);
         };
+
+        this.frameWatchdog = setTimeout(() => {
+          if (token !== this.frameSeq) return;
+          this.cancelFrameLoad();
+          this.scheduleFrame(this.FRAME_RETRY_MS);
+        }, this.FRAME_TIMEOUT_MS);
+
         img.onload = () => done(true);
         img.onerror = () => done(false);
         img.src = url;
       },
 
-      stopAutoRefresh() {
-        if (this.refreshInterval) {
-          clearInterval(this.refreshInterval);
-          this.refreshInterval = null;
+      // Abandon whatever load is in flight and make sure it can never write
+      // state again. Bumping frameSeq is what neutralises a callback that
+      // fires later anyway; clearing frameLoading is what stops a wedged
+      // request from blocking every future refresh.
+      cancelFrameLoad() {
+        if (this.frameWatchdog) { clearTimeout(this.frameWatchdog); this.frameWatchdog = null; }
+        let img = this.frameImg;
+        this.frameImg = null;
+        if (img) {
+          img.onload = null;
+          img.onerror = null;
+          // Removing the attribute is what actually cancels the fetch;
+          // assigning "" would re-point the request at the page URL.
+          img.removeAttribute("src");
         }
+        this.frameSeq++;
+        this.frameLoading = false;
+      },
+
+      stopAutoRefresh() {
+        if (this.frameTimer) { clearTimeout(this.frameTimer); this.frameTimer = null; }
+        if (this.staleTimer) { clearInterval(this.staleTimer); this.staleTimer = null; }
+        if (this.visHandler) {
+          document.removeEventListener("visibilitychange", this.visHandler);
+          this.visHandler = null;
+        }
+        this.cancelFrameLoad();
       },
 
       switch_tab(tab) {
@@ -1065,14 +1479,78 @@
 
           this.basic.ping_site0 = cfg.ping_site0 || "taobao.com";
           this.basic.ping_site1 = cfg.ping_site1 || "photonicat.com";
-          this.basic.on_battery_auto_dim_time = cfg.screen_dimmer_time_on_battery_seconds || 60;
-          this.basic.on_charger_auto_dim_time = cfg.screen_dimmer_time_on_dc_seconds       || 86400;
+          this.basic.ping_type0 = cfg.ping_type0 || "icmp";
+          this.basic.ping_type1 = cfg.ping_type1 || "icmp";
+          this.basic.dim_battery = this.splitDuration(
+            cfg.screen_dimmer_time_on_battery_seconds || 60);
+          this.basic.dim_charger = this.splitDuration(
+            cfg.screen_dimmer_time_on_dc_seconds || 86400);
           this.basic.screen_max_brightness = cfg.screen_max_brightness || 100;
           this.basic.screen_min_brightness = cfg.screen_min_brightness || 0;
           this.basic.show_sms                  = cfg.show_sms !== false;
           this.basic.sms_limit_for_screen      = cfg.sms_limit_for_screen || 5;
+          this.activeTheme                     = cfg.color_theme || "";
+          // Restore the hand-picked swatches so reopening the page shows the
+          // colours actually in use rather than resetting to the defaults.
+          let ct = cfg.custom_theme;
+          if (ct && ct.colors) {
+            ["primary", "accent", "data"].forEach((k) => {
+              if (Array.isArray(ct.colors[k]) && ct.colors[k].length >= 3)
+                this.customTheme.colors[k] = ct.colors[k].slice(0, 3);
+            });
+            if (Array.isArray(ct.bg) && ct.bg.length >= 3) this.customTheme.bg = ct.bg.slice(0, 3);
+            this.customTheme.bgOn = !!ct.bgOn;
+            this.customTheme.name = typeof ct.name === "string" ? ct.name : "";
+          }
+
+          let pip = cfg.public_ip_lookup || {};
+          let norm = (arr) => (Array.isArray(arr) ? arr : []).map((s) =>
+            typeof s === "string" ? { url: s, parser: "stdout" }
+                                  : { url: s.url || "", parser: s.parser || "stdout" });
+          this.pubip.user_agent = pip.user_agent || "";
+          this.pubip.ipv4 = norm(pip.ipv4);
+          this.pubip.ipv6 = norm(pip.ipv6);
         } catch (e) {
           console.error("Failed loading settings", e);
+        }
+      },
+
+      // Build the public_ip_lookup config object from the form, dropping blank URLs.
+      buildPublicIpConfig() {
+        let clean = (arr) => arr
+          .map((s) => ({ url: (s.url || "").trim(), parser: (s.parser || "stdout").trim() || "stdout" }))
+          .filter((s) => s.url !== "");
+        return {
+          user_agent: (this.pubip.user_agent || "").trim(),
+          ipv4: clean(this.pubip.ipv4),
+          ipv6: clean(this.pubip.ipv6),
+        };
+      },
+
+      async savePublicIp() {
+        this.loading.savePublicIp = true;
+        try {
+          let pip = this.buildPublicIpConfig();
+
+          // 1) Persist into the Go display user_config (drives the LCD PUBLIC IP).
+          let current = JSON.parse(this.editor || "{}");
+          current.public_ip_lookup = pip;
+          this.editor = JSON.stringify(current, null, 2);
+          await this.saveEditor(false);
+
+          // 2) Persist into the Python user config (drives the web dashboard).
+          await fetch("/api/v1/public_ip_lookup.json", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(pip),
+          });
+
+          this.showNotification("{{locales['config_saved']}}", "配置已保存", "success");
+        } catch (e) {
+          console.error("Save public IP failed", e);
+          this.showNotification("Error saving public IP settings.", "保存公网IP设置错误", "error");
+        } finally {
+          this.loading.savePublicIp = false;
         }
       },
 
@@ -1084,10 +1562,12 @@
           let merged = {
             ...current,
             show_sms:                             this.basic.show_sms,
-            screen_dimmer_time_on_battery_seconds: this.basic.on_battery_auto_dim_time,
-            screen_dimmer_time_on_dc_seconds:      this.basic.on_charger_auto_dim_time,
+            screen_dimmer_time_on_battery_seconds: this.dimSeconds(this.basic.dim_battery),
+            screen_dimmer_time_on_dc_seconds:      this.dimSeconds(this.basic.dim_charger),
             ping_site0:                           this.basic.ping_site0,
             ping_site1:                           this.basic.ping_site1,
+            ping_type0:                           this.basic.ping_type0,
+            ping_type1:                           this.basic.ping_type1,
             screen_max_brightness:                this.basic.screen_max_brightness,
             screen_min_brightness:                this.basic.screen_min_brightness,
             screen_off_from:                       this.basic.screen_off_from,
@@ -1223,7 +1703,7 @@
         this.loading.restartScreen = true;
         try {
           const response = await fetch("/api/v1/screen/restart", {
-            method: "GET"
+            method: "POST"
           });
           const result = await response.json();
           
@@ -1241,12 +1721,44 @@
         }
       },
 
+      // Wipe the saved user layout on the device so the built-in defaults take
+      // over, then restart the display so the change is visible immediately.
+      // Use this to recover from a stale user_config (e.g. one saved before a
+      // firmware update added new fields to the default layout).
+      async resetScreen() {
+        if (!confirm('{{ locales["reset_screen_confirm"] | default("Reset the screen to factory defaults? Your saved custom layout on the device will be erased.") }}')) return;
+        this.loading.resetScreen = true;
+        try {
+          const response = await fetch("/api/v1/screen/reset", {
+            method: "POST"
+          });
+          const result = await response.json();
+
+          if (result.status === "error") {
+            console.error("Error: " + (result.message || "reset failed"));
+            this.showNotification("Error resetting screen.", "屏幕重置错误", 'error');
+            return;
+          }
+
+          this.showNotification("Screen reset to defaults. Restarting…", "屏幕已重置为默认值，正在重启…", 'success');
+          // Reload the editor/visual layout from the now-cleared config and
+          // restart the display so the base layout renders.
+          await this.loadVisual().catch(() => {});
+          await this.restartScreen();
+        } catch (e) {
+          console.error("Reset screen failed", e);
+          this.showNotification("Error resetting screen.", "屏幕重置错误", 'error');
+        } finally {
+          this.loading.resetScreen = false;
+        }
+      },
+
       async shortClick() {
         // Ultra-responsive: Set loading state
         this.loading.shortClick = true;
         
         // Immediate visual feedback - refresh screen instantly
-        this.bumpFrame();
+        this.bumpFrame(true);
         
         // Reset loading state quickly for immediate responsiveness
         setTimeout(() => {
@@ -1260,7 +1772,7 @@
             const timeoutId = setTimeout(() => controller.abort(), 1000); // 1 second timeout
             
             fetch("/api/v1/screen/short_click", {
-              method: "GET",
+              method: "POST",
               signal: controller.signal
             }).then(response => {
               clearTimeout(timeoutId);
@@ -1269,7 +1781,7 @@
               if (result.status === "success") {
                 // Queue additional screen refresh after short delay
                 setTimeout(() => {
-                  this.bumpFrame();
+                  this.bumpFrame(true);
                 }, 200);
               } else {
                 console.error("Error: " + result.message);
@@ -1283,44 +1795,6 @@
             console.error("Short click setup failed", e);
           }
         }, 200);
-      },
-
-      async checkAndRefreshScreen() {
-        // Get current image source for comparison
-        const img = document.querySelector('img[alt="Screen frame"]');
-        if (!img) return;
-        
-        const originalSrc = img.src;
-        let retryCount = 0;
-        const maxRetries = 20;
-        
-        const attemptRefresh = () => {
-          retryCount++;
-          this.bumpFrame();
-          
-          // Wait for image to potentially load new content
-          setTimeout(() => {
-            try {
-              // Check if the image source actually changed (different timestamp)
-              const newSrc = img.src;
-              
-              if ((originalSrc === newSrc || !img.complete) && retryCount < maxRetries) {
-                setTimeout(attemptRefresh, 100);
-              } else if (retryCount >= maxRetries) {
-                // Max retries reached, stopping refresh attempts
-              } else {
-                // Screen successfully updated
-              }
-            } catch (e) {
-              if (retryCount < maxRetries) {
-                setTimeout(attemptRefresh, 100);
-              }
-            }
-          }, 100);
-        };
-        
-        // Start first attempt after 50ms
-        setTimeout(attemptRefresh, 50);
       },
 
       showNotification(message_en, message_cn = '', type = 'info') {
@@ -1362,6 +1836,9 @@
                    ? usr.display_template
                    : (def.display_template || { elements: {} });
           let elements = dt.elements || {};
+          // themed background travels with the layout; remember it so saves
+          // and the editor canvas preserve/show it
+          this.templateBg = Array.isArray(dt.bg_color) ? dt.bg_color.slice() : null;
           // normalize: keep whatever contiguous pages the config defines (the
           // firmware uses len(elements) as the page count), but guarantee at
           // least page0 exists. Pad to 4 only when the config has no pages at all.
@@ -2001,7 +2478,7 @@
           let res = await fetch("/api/v1/screen/user_config.json");
           let usr = await res.json().catch(() => ({}));
           if (typeof usr !== "object" || usr === null) usr = {};
-          usr.display_template = { elements: this.cleanElements() };
+          usr.display_template = this.buildDisplayTemplate();
           usr.custom_metrics = this.normalizedCustomMetrics();
           await fetch("/api/v1/screen/user_config.json", {
             method: "POST",
@@ -2011,7 +2488,7 @@
           // keep the raw-JSON editor tab in sync and reset the diff baseline
           this.editor = JSON.stringify(usr, null, 2);
           this.savedEditor = this.editor;
-          this.bumpFrame();
+          this.bumpFrame(true);
           this.showNotification("Layout saved.", "布局已保存", 'success');
           return true;
         } catch (e) {
@@ -2039,6 +2516,232 @@
         } finally {
           this.loading.saveRestartSources = false;
         }
+      },
+
+      // ===================== COLOR THEMES =====================
+
+      rgbCss(a) {
+        if (!Array.isArray(a) || a.length < 3) return "#000";
+        return `rgb(${a[0]},${a[1]},${a[2]})`;
+      },
+
+      // Map an element to a palette role. Section labels (fixed_text) get the
+      // accent; big value fonts get the primary; small info text gets data.
+      // Icons (arrows, battery, separators…) are tinted by the firmware when
+      // given a color: separator lines take the accent, the rest the primary.
+      // Role comes from element TYPE + FONT, not its current color, so themes
+      // can be applied repeatedly on already-themed layouts.
+      themeRole(el) {
+        if (el.type === "icon") {
+          return (el.icon_path || "").includes("hline") ? "accent" : "primary";
+        }
+        if (["cpu_bars", "hbar", "disk_bars"].includes(el.type)) return "primary";
+        if (el.type === "fixed_text") return "accent";
+        if (["huge", "gigantic", "big", "reg"].includes(el.font)) return "primary";
+        return "data";
+      },
+
+      // Element types that have no color by default but accept one: icons get
+      // tinted, bar charts recolor their fill. Anything else without a color
+      // (e.g. the power graph) stays untouched.
+      THEMABLE_TYPES: ["icon", "cpu_bars", "hbar", "disk_bars"],
+
+      recolorElements(elements, colors) {
+        Object.keys(elements).forEach((k) => {
+          (elements[k] || []).forEach((el) => {
+            if (!Array.isArray(el.color) && !this.THEMABLE_TYPES.includes(el.type)) return;
+            el.color = colors[this.themeRole(el)].slice();
+          });
+        });
+      },
+
+      // Apply a theme: recolor the device's CURRENT effective layout (user
+      // layout if saved, else the default) and save it as user_config. The
+      // firmware re-merges on save, so the LCD updates live — no restart.
+      async applyTheme(t) {
+        if (this.applyingThemeKey) return;
+        this.applyingThemeKey = t.key;
+        try {
+          let [defRes, usrRes] = await Promise.all([
+            fetch("/api/v1/screen/default_config.json"),
+            fetch("/api/v1/screen/user_config.json"),
+          ]);
+          let def = await defRes.json().catch(() => ({}));
+          let usr = await usrRes.json().catch(() => ({}));
+          if (typeof usr !== "object" || usr === null) usr = {};
+          let dt = (usr.display_template && usr.display_template.elements)
+                   ? usr.display_template
+                   : (def.display_template || { elements: {} });
+          let elements = JSON.parse(JSON.stringify(dt.elements || {}));
+          // Start from the DEFAULT pages and let the user layout override them
+          // page by page. The firmware merges the two per key (deepMergeJSONOpt
+          // replaces arrays, but only for keys present in the user config), so a
+          // page the user layout never saved -- the GPS page, which is appended
+          // by the firmware and absent from older saved layouts -- keeps its
+          // default colours and was left un-themed while every other page
+          // changed. Theming the union fixes that and is a no-op when the user
+          // layout already covers every page.
+          let defEls = (def.display_template && def.display_template.elements) || {};
+          Object.keys(defEls).forEach((k) => {
+            if (!elements[k]) elements[k] = JSON.parse(JSON.stringify(defEls[k]));
+          });
+          this.recolorElements(elements, t.colors);
+          let newDt = { elements: elements };
+          if (Array.isArray(t.bg)) newDt.bg_color = t.bg.slice();
+          usr.display_template = newDt;
+          usr.color_theme = t.key;
+          // Remember the hand-picked swatches so the pickers repopulate on
+          // reload. Only the custom card writes this; presets leave it alone.
+          if (t.key === "custom") {
+            usr.custom_theme = {
+              colors: JSON.parse(JSON.stringify(this.customTheme.colors)),
+              bg: this.customTheme.bg.slice(),
+              bgOn: !!this.customTheme.bgOn,
+              name: this.customTheme.name || "",
+            };
+          }
+          await fetch("/api/v1/screen/user_config.json", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(usr),
+          });
+          this.activeTheme = t.key;
+          this.templateBg = Array.isArray(t.bg) ? t.bg.slice() : null;
+          // Mirror the theme onto the browser tab icon, so the LCD and the
+          // web UI carry the same colour.
+          await this.syncFavicon(t.colors && t.colors.primary);
+          // keep the raw-JSON editor + visual editor in sync with what we saved
+          this.editor = JSON.stringify(usr, null, 2);
+          this.savedEditor = this.editor;
+          await this.loadVisual().catch(() => {});
+          this.bumpFrame(true);
+          this.showNotification("{{ locales['theme_applied'] | default('Theme applied.') }}", "主题已应用。", "success");
+        } catch (e) {
+          console.error("Apply theme failed", e);
+          this.showNotification("{{ locales['theme_apply_error'] | default('Error applying theme.') }}", "应用主题出错。", "error");
+        } finally {
+          this.applyingThemeKey = null;
+        }
+      },
+
+      // Persist the theme's primary colour and repoint the favicon link at
+      // the freshly tinted SVG. The href carries the colour, so changing it
+      // is what makes the browser re-fetch instead of reusing the cached one.
+      async syncFavicon(rgb) {
+        if (!Array.isArray(rgb) || rgb.length < 3) return;
+        let hex = "#" + rgb.slice(0, 3).map(v =>
+          Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, "0")
+        ).join("").toUpperCase();
+        try {
+          let r = await fetch("/api/v1/theme_accent.json", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ color: hex }),
+          });
+          if (!r.ok) return;
+          // Replace the element rather than assign .href: several browsers
+          // keep showing the cached icon when only the attribute changes.
+          let old = document.getElementById("favicon-svg");
+          let link = document.createElement("link");
+          link.id = "favicon-svg";
+          link.rel = "icon";
+          link.type = "image/svg+xml";
+          link.href = "/favicon-theme.svg?c=" + hex.slice(1);
+          if (old) old.remove();
+          document.head.appendChild(link);
+        } catch (e) { /* cosmetic only — never block applying the theme */ }
+      },
+
+      // h in [0,360), s/v in [0,1] -> [r,g,b] 0-255
+      hsvRgb(h, s, v) {
+        let f = (n) => {
+          let k = (n + h / 60) % 6;
+          return v - v * s * Math.max(0, Math.min(k, 4 - k, 1));
+        };
+        return [Math.round(f(5) * 255), Math.round(f(3) * 255), Math.round(f(1) * 255)];
+      },
+
+      // Roll a random palette + a generated name. ~1 in 3 rolls also gets a
+      // dark background tinted with one of its hues.
+      rollRandomTheme() {
+        let rnd = (a, b) => a + Math.random() * (b - a);
+        let pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
+        let h = Math.random() * 360;
+        // accent hue offset: complementary-ish, triadic, or analogous
+        let dh = pick([rnd(160, 200), 120, -120, rnd(25, 45)]);
+        let accentH = (h + dh + 360) % 360;
+        let colors = {
+          primary: this.hsvRgb(h, rnd(0.8, 1), 1),
+          accent:  this.hsvRgb(accentH, rnd(0.65, 0.95), 1),
+          data:    this.hsvRgb(h, rnd(0.08, 0.18), 1),
+        };
+        let bg = Math.random() < 0.35
+          ? this.hsvRgb(Math.random() < 0.5 ? h : accentH, rnd(0.55, 0.85), rnd(0.05, 0.13))
+          : null;
+        let adjectives = ["Neon", "Quantum", "Solar", "Lunar", "Turbo", "Phantom",
+          "Electric", "Cosmic", "Velvet", "Plasma", "Retro", "Arctic", "Blazing",
+          "Jade", "Crimson", "Golden", "Cyber", "Hyper", "Silent", "Wild"];
+        let nouns = ["Drift", "Pulse", "Mirage", "Circuit", "Nebula", "Horizon",
+          "Tide", "Falcon", "Prism", "Vortex", "Signal", "Bloom", "Orbit",
+          "Static", "Runner", "Groove", "Flux", "Dream", "Storm", "Glow"];
+        let name = pick(adjectives) + " " + pick(nouns);
+        // Roll straight into the pickers: the swatches, preview and Apply all
+        // read from customTheme, so a roll is just a bulk edit the user can
+        // then fine-tune by hand before applying.
+        this.customTheme.colors = colors;
+        this.customTheme.name = name;
+        if (bg) {
+          this.customTheme.bg = bg;
+          this.customTheme.bgOn = true;
+        } else {
+          this.customTheme.bgOn = false;
+        }
+      },
+
+      // "🎲 Surprise Me" — alias kept separate from the roll internals so the
+      // template reads as intent rather than implementation.
+      surpriseMe() {
+        this.rollRandomTheme();
+      },
+
+      // "#rrggbb" -> [r,g,b], writing into the hand-picked palette. role is one
+      // of primary/accent/data, or "bg" for the background swatch.
+      setCustomColor(role, hex) {
+        let rgb = [
+          parseInt(hex.slice(1, 3), 16),
+          parseInt(hex.slice(3, 5), 16),
+          parseInt(hex.slice(5, 7), 16),
+        ];
+        if (rgb.some(isNaN)) return;
+        if (role === "bg") this.customTheme.bg = rgb;
+        else this.customTheme.colors[role] = rgb;
+        // A hand edit means this is no longer the rolled palette, so drop the
+        // generated name instead of leaving a stale one on screen.
+        this.customTheme.name = "";
+      },
+
+      // Apply the hand-picked palette through the same path as presets, so the
+      // union-of-pages recolour and favicon sync behave identically.
+      applyCustomTheme() {
+        return this.applyTheme({
+          key: "custom",
+          name: this.customTheme.name || "{{ locales['theme_custom_title'] | default('Pick Your Own') }}",
+          colors: JSON.parse(JSON.stringify(this.customTheme.colors)),
+          bg: this.customTheme.bgOn ? this.customTheme.bg.slice() : null,
+        });
+      },
+
+      // Canvas background for the visual editor: themed bg when set, else the
+      // near-black placeholder.
+      canvasBg() {
+        return this.templateBg ? this.rgbCss(this.templateBg) : "#0a0a12";
+      },
+
+      // display_template payload for saves: elements plus the preserved bg.
+      buildDisplayTemplate() {
+        let dt = { elements: this.cleanElements() };
+        if (Array.isArray(this.templateBg)) dt.bg_color = this.templateBg.slice();
+        return dt;
       },
 
       // Upstream reference config from the photonicat2_mini_display (Go) repo.
@@ -2109,7 +2812,7 @@
         try { base = JSON.parse(this.savedEditor || "{}"); }
         catch (e) { base = {}; }
         if (typeof base !== "object" || base === null) base = {};
-        base.display_template = { elements: this.cleanElements() };
+        base.display_template = this.buildDisplayTemplate();
         base.custom_metrics = this.normalizedCustomMetrics();
         this.editor = JSON.stringify(base, null, 2);
       },
@@ -2260,14 +2963,15 @@
           url: "https://wttr.in/Shanghai?format=%t", parser: "stdout",
           data_key: "WeatherTemp", interval: 1800, name: "Weather" },
         { id: "btc",     icon: "₿", label: "BTC price",
-          url: "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",
-          parser: "json:bitcoin.usd", data_key: "BtcUsd", interval: 600, name: "BtcPrice" },
+          url: "https://pchat.photonicat.com/api/v1/q/BTC",
+          parser: "json:price", data_key: "BtcUsd", interval: 600, name: "BtcPrice" },
         { id: "time",    icon: "🕒", label: "Time",
           url: "https://timeapi.io/api/Time/current/zone?timeZone=Asia/Shanghai",
           parser: "json:time", data_key: "NetTime", interval: 60, name: "NetTime" },
         // Official Photonicat market API (pchat.photonicat.com, see device-guide):
-        // clean single-value JSON, device-friendly. Gold complements BTC; the
-        // stock quote also demonstrates the array-index parser (quotes.0.price).
+        // clean single-value JSON, device-friendly. BTC (above) uses /api/v1/q/BTC
+        // → json:price; gold complements it; the stock quote also demonstrates the
+        // array-index parser (quotes.0.price).
         { id: "gold",    icon: "🥇", label: "Gold $/oz",
           url: "https://pchat.photonicat.com/metals",
           parser: "json:gold_usd_oz", data_key: "GoldUsd", interval: 600, name: "GoldPrice" },
@@ -2558,12 +3262,20 @@
         return this.loading.restartScreen ? '{{ locales["common_restarting"] | default("Restarting...") }}' : '{{ locales["restart_screen"] }}';
       },
 
+      getResetScreenButtonText() {
+        return this.loading.resetScreen ? '{{ locales["common_resetting"] | default("Resetting...") }}' : '{{ locales["reset_screen"] | default("Reset Screen") }}';
+      },
+
       getShortClickButtonText() {
         return this.loading.shortClick ? '{{ locales["common_processing"] | default("Processing...") }}' : '{{ locales["short_click"] }}';
       },
 
       getSaveEditorButtonText() {
         return this.loading.saveEditor ? '{{ locales["common_saving"] | default("Saving...") }}' : '{{ locales["save_json"] }}';
+      },
+
+      getSavePublicIpButtonText() {
+        return this.loading.savePublicIp ? '{{ locales["saving"] | default("Saving...") }}' : '{{ locales["save_settings"] }}';
       },
     }));
   });

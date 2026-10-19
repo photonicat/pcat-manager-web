@@ -1,0 +1,1112 @@
+{% extends '_base.html' %}
+{% block page_title %}{{locales.nas_title}}{% endblock %} {% block html_head0 %}
+<script defer src="/static/pollbus.js?v={{ cache_bust_version }}"></script>
+{% endblock %} {% block content %}
+<div x-data="nas">
+  <div class="container mx-auto w-full pt-10 pb-16 sm:pt-24 sm:pb-12 md:pt-28 lg:px-4">
+    <div class="flex items-center justify-between">
+      <h1 class="px-1 py-4 font-bold uppercase text-gray-600">{{locales.nas_title}}</h1>
+    </div>
+
+    {% include '_notification_standalone.html' %}
+
+    <!-- Tab bar -->
+    <div class="flex space-x-1 overflow-x-auto border-b border-gray-300 px-1">
+      <button @click="switchTab('files')" :class="tabClass('files')" class="whitespace-nowrap rounded-t px-4 py-2 text-sm font-semibold">{{locales.tab_storage}}</button>
+      <button @click="switchTab('shares')" :class="tabClass('shares')" class="whitespace-nowrap rounded-t px-4 py-2 text-sm font-semibold">{{locales.tab_shares}}</button>
+      <button @click="switchTab('remotes')" :class="tabClass('remotes')" class="whitespace-nowrap rounded-t px-4 py-2 text-sm font-semibold">{{locales.tab_remotes}}</button>
+      <button @click="switchTab('tasks')" :class="tabClass('tasks')" class="whitespace-nowrap rounded-t px-4 py-2 text-sm font-semibold">
+        {{locales.tab_tasks}}
+        <span x-show="activeJobCount() > 0" x-text="activeJobCount()" class="ml-1 rounded-full bg-pcatblue px-2 py-0.5 text-xs text-white"></span>
+      </button>
+      <button @click="switchTab('settings')" :class="tabClass('settings')" class="whitespace-nowrap rounded-t px-4 py-2 text-sm font-semibold">{{locales.tab_settings}}</button>
+    </div>
+
+    <!-- Storage: disks sidebar left, file panel right (stacked on phones) -->
+    <div x-show="tab == 'files'" class="mt-4 flex flex-col gap-4 lg:flex-row">
+      <!-- Sidebar: only use Tailwind classes present in built app.css.
+           lg:w-64 is NOT generated — using it left the rail at w-full and
+           hid the file browser. lg:w-80 (20rem) is in the CSS. -->
+      <div class="w-full flex-shrink-0 lg:w-80">{% include '_nas_disks.html' %}</div>
+      <div class="min-w-0 flex-1">{% include '_nas_files.html' %}</div>
+    </div>
+    <div x-show="tab == 'shares'">{% include '_nas_shares.html' %}</div>
+    <div x-show="tab == 'remotes'">{% include '_nas_remotes.html' %}</div>
+    <div x-show="tab == 'tasks'">{% include '_nas_tasks.html' %}</div>
+    <div x-show="tab == 'settings'">{% include '_nas_settings.html' %}</div>
+
+    {% include '_nas_confirm_modal.html' %}
+    {% include '_nas_dir_picker.html' %}
+    {% include '_nas_partitions.html' %}
+    {% include '_nas_link_modal.html' %}
+  </div>
+</div>
+{% endblock %} {% block bottom %}
+<script>
+  function nasFormatSize(n) {
+    if (n === null || n === undefined) return "";
+    if (n === 0) return "0 B";
+    var k = 1024, sizes = ["B", "KB", "MB", "GB", "TB"],
+      i = Math.floor(Math.log(n) / Math.log(k));
+    if (i >= sizes.length) i = sizes.length - 1;
+    return parseFloat((n / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
+  }
+  function nasPad2(n) { return (n < 10 ? "0" : "") + n; }
+  // Computer-style absolute time: YYYY-MM-DD HH:mm (local clock).
+  function nasFormatTimeYMD(ts) {
+    if (!ts) return "";
+    var d = new Date(ts * 1000);
+    if (isNaN(d.getTime())) return "";
+    return d.getFullYear() + "-" + nasPad2(d.getMonth() + 1) + "-" + nasPad2(d.getDate())
+      + " " + nasPad2(d.getHours()) + ":" + nasPad2(d.getMinutes());
+  }
+  // Relative "how long ago" for display next to the absolute stamp.
+  function nasFormatTimeAgo(ts) {
+    if (!ts) return "";
+    var sec = Math.floor(Date.now() / 1000 - Number(ts));
+    if (isNaN(sec)) return "";
+    var cn = (document.documentElement.lang || "").toLowerCase().indexOf("zh") === 0;
+    if (sec < 0) sec = 0;
+    if (sec < 45) return cn ? "刚刚" : "just now";
+    var min = Math.floor(sec / 60);
+    if (min < 60) return cn ? (min + " 分钟前") : (min + (min === 1 ? " min ago" : " mins ago"));
+    var hr = Math.floor(min / 60);
+    if (hr < 24) return cn ? (hr + " 小时前") : (hr + (hr === 1 ? " hour ago" : " hours ago"));
+    var day = Math.floor(hr / 24);
+    if (day < 30) return cn ? (day + " 天前") : (day + (day === 1 ? " day ago" : " days ago"));
+    var mo = Math.floor(day / 30);
+    if (mo < 12) return cn ? (mo + " 个月前") : (mo + (mo === 1 ? " month ago" : " months ago"));
+    var yr = Math.floor(day / 365);
+    return cn ? (yr + " 年前") : (yr + (yr === 1 ? " year ago" : " years ago"));
+  }
+  // Back-compat single-line helper (absolute + relative).
+  function nasFormatTime(ts) {
+    var a = nasFormatTimeYMD(ts), b = nasFormatTimeAgo(ts);
+    if (!a) return "";
+    return b ? (a + " · " + b) : a;
+  }
+  function nasCsrfToken() {
+    var m = document.querySelector('meta[name="csrf-token"]');
+    return m ? m.content : "";
+  }
+
+  document.addEventListener("alpine:init", () => {
+    Alpine.store("app").set_page("nas");
+    Alpine.data("nas", () => ({
+      tab: "files",
+      // disks
+      disks: [], tools: {}, disksLoading: false, busyDev: "",
+      // Settings tab: SMART cache + in-flight load marker
+      smartData: {},
+      smartLoading: "",
+      // files
+      volumes: [], path: "", entries: [], filesLoading: false,
+      selection: [], lastClickIdx: -1,
+      renaming: "", renameValue: "",
+      clipboard: { op: "", paths: [] },
+      newFolderOpen: false, newFolderName: "",
+      upload: { queue: [], active: 0, policy: "", speed: 0, eta: 0, timer: null, samples: [] },
+      // in-browser media preview (images / video / audio / pdf)
+      preview: { open: false, name: "", path: "", kind: "" },
+      // shares
+      samba: {}, shares: [], smbUsers: [], sharesLoaded: false,
+      shareEdit: { open: false, id: "", name: "", path: "", mode: "guest", users: [], read_only: false, http_browse: false },
+      userModal: { open: false, name: "", password: "" },
+      installLog: [], installing: false,
+      // jobs
+      jobs: {},
+      // partitions / backup / sync / remotes / links
+      partModal: { open: false, dev: "", table: null, protected: false, busy: false },
+      partForm: { open: false, mode: "", num: 0, dev: "", fs: "ext4", label: "", size_gb: 0, start_b: 0, end_b: 0 },
+      // Standalone format dialog (from disk tree) — pick filesystem + label.
+      formatModal: { open: false, dev: "", diskDev: "", fs: "ext4", label: "pcat-data", busy: false },
+      backup: {}, syncJobs: [], remotes: [], links: [],
+      syncEdit: { open: false, id: "", name: "", src: "", dst: "", schedule: "daily", cron: "", delete: false, enabled: true },
+      logModal: { open: false, text: "", title: "" },
+      remoteEdit: { open: false, id: "", type: "sshfs", name: "", host: "", port: 22, user: "", password: "", path: "/", endpoint: "", bucket: "", access_key: "", secret_key: "", enabled: true },
+      linkModal: { open: false, path: "", name: "", password: "", created: null, flash: false, busy: false, _flashTimer: null },
+      // Which link token is flashing "Copied" on the Shares list (or modal).
+      linkCopyFlash: "",
+      _linkCopyTimer: null,
+      // Per-row ⋯ menu (entry name, or "" when closed)
+      rowMenu: "",
+      // confirm modal
+      confirm: { open: false, title: "", body: "", typed: "", expect: "", resolve: null },
+      // dir picker
+      picker: { open: false, path: "", entries: [], resolve: null },
+
+      init() {
+        var h = (location.hash || "").slice(1);
+        if (h) {
+          var parts = h.split(":");
+          if (parts[0] == "disks") parts[0] = "files";  // old two-tab deep links
+          if (["files", "shares", "tasks", "settings", "remotes"].includes(parts[0])) this.tab = parts[0];
+          if (parts[0] == "files" && parts[1]) this.path = parts.slice(1).join(":");
+        }
+        window.socket = io({ transports: ["polling"], upgrade: false });
+        socket.on("nas_job_status", (j) => { this.jobs[j.id] = j; this.onJobUpdate(j); });
+        socket.on("nas_disks_changed", () => { this.loadDisks(); if (this.tab == "files") this.loadFiles(this.path); });
+        socket.on("log_response", (m) => {
+          if (this.installing && m && m.data) {
+            this.installLog.push(m.data);
+            if (this.installLog.length > 200) this.installLog.shift();
+            if (/installed|Configuring|error|failed/i.test(m.data)) this.loadShares();
+          }
+        });
+        this.loadDisks();
+        this.loadJobs();
+        if (this.tab == "files") { this.loadFiles(this.path); this.loadLinks(); }
+        if (this.tab == "shares") { this.loadShares(); this.loadLinks(); }
+        setInterval(() => {
+          if (document.hidden) return;
+          if (this.tab == "files") this.loadDisks();
+          // Keep the HTTP share-links list fresh without a manual refresh.
+          if (this.tab == "shares") this.loadLinks();
+        }, 5000);
+      },
+
+      switchTab(t) {
+        this.tab = t;
+        location.hash = t == "files" && this.path ? t + ":" + this.path : t;
+        if (t == "files") { this.loadFiles(this.path); this.loadLinks(); }
+        if (t == "shares") { this.loadShares(); this.loadLinks(); }
+        if (t == "tasks") { this.loadJobs(); this.loadBackup(); this.loadSync(); }
+        if (t == "remotes") this.loadRemotes();
+        if (t == "settings") {
+          this.loadDisks().then(() => {
+            // Prefetch SMART for disks that support it.
+            this.smartDisks().forEach(d => {
+              if (!this.smartData[d.dev]) this.loadSmart(d);
+            });
+          });
+        }
+      },
+
+      // ── partitions ──
+      async openPartitions(disk) {
+        this.partModal = { open: true, dev: disk.dev, table: null, protected: disk.protected, busy: false };
+        await this.loadPartitions();
+      },
+      async loadPartitions() {
+        var d = await (await fetch("/api/v1/nas/partitions.json?dev=" + encodeURIComponent(this.partModal.dev))).json();
+        if (d.status == "ok") { this.partModal.table = d; this.partModal.protected = d.protected; }
+        else showNotification(d.message, d.message, "error");
+      },
+      shortDev(dev) { return (dev || "").replace("/dev/", ""); },
+      gb(bytes) { return Math.round((bytes || 0) / 1073741824 * 10) / 10; },
+      partDev(num) {
+        var disk = this.partModal.dev;
+        return disk + (/\d$/.test(disk) ? "p" : "") + num;
+      },
+      largestFree() {
+        var f = (this.partModal.table && this.partModal.table.free) || [];
+        return f.length ? f.reduce((a, b) => a.size > b.size ? a : b) : null;
+      },
+      async partAction(action, extra) {
+        var diskName = this.shortDev(this.partModal.dev);
+        var body = Object.assign({ action: action, dev: this.partModal.dev, confirm: diskName }, extra || {});
+        this.partModal.busy = true;
+        try {
+          var d = await (await fetch("/api/v1/nas/partitions.json", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body)
+          })).json();
+          if (d.status == "ok") {
+            this.partForm.open = false;
+            showNotification("Started", "已开始", "success");
+            setTimeout(() => { this.loadPartitions(); this.loadDisks(); }, 2000);
+          } else showNotification(d.message, d.message, "error");
+        } finally { this.partModal.busy = false; }
+      },
+      async useFreeSpace(disk) {
+        // free-space region OR a blank orphan data partition (resume mkfs).
+        var free = null;
+        var d = await (await fetch("/api/v1/nas/partitions.json?dev=" + encodeURIComponent(disk.dev))).json();
+        if (d.status == "ok" && d.free && d.free.length) free = d.free.reduce((a, b) => a.size > b.size ? a : b);
+        var blankGb = 0;
+        if (!free && d.status == "ok" && d.parts) {
+          var blank = d.parts.filter(p => !p.protected && !p.fs && p.size >= 1073741824)
+            .sort((a, b) => b.size - a.size)[0];
+          if (blank) blankGb = this.gb(blank.size);
+        }
+        if (!free && !blankGb && !this.hasBlankDataPart(disk)) {
+          showNotification("No unused space", "没有未使用空间", "error");
+          return;
+        }
+        var sizeLabel = free ? this.gb(free.size) : (blankGb || this.diskFreeGb(disk));
+        var yes = await this.confirmDialog(
+          "{{locales.disks_use_free}} — " + sizeLabel + " GB",
+          "{{locales.disks_use_free_hint}}", this.shortDev(disk.dev));
+        if (!yes) return;
+        var r = await (await fetch("/api/v1/nas/partitions.json", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "use_free", dev: disk.dev, confirm: this.shortDev(disk.dev) })
+        })).json();
+        if (r.status == "ok") { this.switchTab("tasks"); showNotification("Started", "已开始", "success"); }
+        else showNotification(r.message, r.message, "error");
+      },
+      openPartForm(mode, part) {
+        this.partForm = {
+          open: true, mode: mode, num: part ? part.num : 0,
+          dev: part ? this.partDev(part.num) : "", fs: "ext4", label: "",
+          size_gb: part ? this.gb(part.size) : this.gb((this.largestFree() || {}).size || 0),
+          start_b: part ? part.start : (this.largestFree() || {}).start || 0,
+          end_b: part ? part.end : (this.largestFree() || {}).end || 0
+        };
+      },
+      async submitPartForm() {
+        var f = this.partForm;
+        if (f.mode == "format") {
+          var yes = await this.confirmDialog("{{locales.part_btn_format}} " + f.dev,
+            "{{locales.confirm_cannot_undo}}", this.shortDev(this.partModal.dev));
+          if (!yes) return;
+          return this.partAction("format", { dev: f.dev, fs: f.fs, label: f.label });
+        }
+        if (f.mode == "resize") {
+          var newEnd = f.start_b + Math.round(f.size_gb * 1073741824);
+          var yes2 = await this.confirmDialog("{{locales.part_btn_resize}} " + f.dev,
+            "{{locales.confirm_cannot_undo}}", this.shortDev(this.partModal.dev));
+          if (!yes2) return;
+          return this.partAction("resize", { dev: f.dev, num: f.num, new_end_b: newEnd });
+        }
+        if (f.mode == "create") {
+          var end = f.start_b + Math.round(f.size_gb * 1073741824);
+          return this.partAction("create", { start_b: f.start_b, end_b: Math.min(end, f.end_b) });
+        }
+      },
+      async mkLabel(type) {
+        var yes = await this.confirmDialog(
+          "{{locales.part_new_gpt}} — " + this.partModal.dev,
+          "{{locales.part_new_gpt_warn}}", this.shortDev(this.partModal.dev));
+        if (!yes) return;
+        this.partAction("mklabel", { table: type });
+      },
+      async deletePartition(part) {
+        var dev = this.partDev(part.num);
+        var yes = await this.confirmDialog("{{locales.part_btn_delete}} " + dev,
+          "{{locales.confirm_cannot_undo}}", this.shortDev(this.partModal.dev));
+        if (!yes) return;
+        this.partAction("delete", { dev: dev, num: part.num });
+      },
+
+      // ── backup / sync ──
+      async loadBackup() {
+        var d = await (await fetch("/api/v1/nas/backup.json")).json();
+        if (d.status == "ok") this.backup = d;
+      },
+      async runBackup() {
+        var yes = await this.confirmDialog("{{locales.backup_title}}", "{{locales.backup_desc}}", "");
+        if (!yes) return;
+        var d = await (await fetch("/api/v1/nas/backup.json", {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: "{}"
+        })).json();
+        if (d.status != "ok") showNotification(d.message, d.message, "error");
+      },
+      async loadSync() {
+        var d = await (await fetch("/api/v1/nas/sync.json")).json();
+        if (d.status == "ok") this.syncJobs = d.jobs;
+      },
+      openSyncEdit(job) {
+        this.syncEdit = job
+          ? Object.assign({ open: true }, job)
+          : { open: true, id: "", name: "", src: "", dst: "", schedule: "daily", cron: "", delete: false, enabled: true };
+      },
+      async pickSyncPath(field) {
+        var p = await this.pickDir();
+        if (p) this.syncEdit[field] = p;
+      },
+      async saveSyncJob() {
+        var s = this.syncEdit;
+        var d = await (await fetch("/api/v1/nas/sync.json", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(Object.assign({ action: s.id ? "update" : "create" }, s))
+        })).json();
+        if (d.status == "ok") { this.syncEdit.open = false; this.syncJobs = d.jobs; }
+        else showNotification(d.message, d.message, "error");
+      },
+      async syncAction(job, action) {
+        if (action == "delete") {
+          var yes = await this.confirmDialog("{{locales.shares_btn_delete}}: " + job.name, "{{locales.confirm_cannot_undo}}", "");
+          if (!yes) return;
+        }
+        var d = await (await fetch("/api/v1/nas/sync.json", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: action, id: job.id })
+        })).json();
+        if (d.status == "ok") this.syncJobs = d.jobs || this.syncJobs;
+        else showNotification(d.message, d.message, "error");
+      },
+      async showSyncLog(job) {
+        var d = await (await fetch("/api/v1/nas/sync_log.json?id=" + encodeURIComponent(job.id))).json();
+        this.logModal = { open: true, title: job.name, text: d.log || "(empty)" };
+      },
+
+      // ── remotes ──
+      async loadRemotes() {
+        var d = await (await fetch("/api/v1/nas/remotes.json")).json();
+        if (d.status == "ok") this.remotes = d.remotes;
+      },
+      openRemoteEdit(r) {
+        this.remoteEdit = r
+          ? Object.assign({ open: true, password: "", secret_key: "" }, r)
+          : { open: true, id: "", type: "sshfs", name: "", host: "", port: 22, user: "", password: "", path: "/", endpoint: "", bucket: "", access_key: "", secret_key: "", enabled: true };
+      },
+      async saveRemote() {
+        var r = this.remoteEdit;
+        var d = await (await fetch("/api/v1/nas/remotes.json", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(Object.assign({ action: r.id ? "update" : "create" }, r))
+        })).json();
+        if (d.status == "ok") { this.remoteEdit.open = false; this.remotes = d.remotes; }
+        else showNotification(d.message, d.message, "error");
+      },
+      async remoteAction(remote, action) {
+        if (action == "delete") {
+          var yes = await this.confirmDialog("{{locales.shares_btn_delete}}: " + remote.name, "{{locales.confirm_cannot_undo}}", "");
+          if (!yes) return;
+        }
+        var d = await (await fetch("/api/v1/nas/remotes.json", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: action, id: remote.id })
+        })).json();
+        if (d.status == "ok") { this.remotes = d.remotes; if (action == "test") showNotification("OK", "正常", "success"); }
+        else showNotification(d.message, d.message, "error");
+      },
+
+      // ── share links ──
+      async loadLinks() {
+        try {
+          var d = await (await fetch("/api/v1/nas/links.json")).json();
+          if (d.status == "ok") this.links = d.links || [];
+        } catch (e) { /* keep last list on network blip */ }
+      },
+      openLinkModal(entryOrName) {
+        // Accept an entry object, a name string, or fall back to single selection.
+        var name = "";
+        if (entryOrName && typeof entryOrName == "object") name = entryOrName.name || "";
+        else if (typeof entryOrName == "string") name = entryOrName;
+        else if (this.selection.length == 1) name = this.selection[0];
+        if (!name) return;
+        this.rowMenu = "";
+        var path = this.path.replace(/\/+$/, "") + "/" + name;
+        this.linkModal = {
+          open: true,
+          path: path,
+          name: name,
+          password: "",
+          created: null,
+          flash: false,
+          busy: false,
+          _flashTimer: null,
+        };
+        // Prefill with an existing link for this path so the UI is just URL+Copy.
+        this.loadLinks().then(() => {
+          var existing = this.links.find(l => l.path == path);
+          if (existing) this.linkModal.created = existing;
+        });
+      },
+      activeShareLink() {
+        return this.linkModal.created || null;
+      },
+      toggleRowMenu(name) {
+        this.rowMenu = this.rowMenu == name ? "" : name;
+      },
+      closeRowMenu() { this.rowMenu = ""; },
+      rowMenuAction(entry, action) {
+        this.rowMenu = "";
+        if (!entry) return;
+        if (action == "preview") this.openPreview(entry);
+        else if (action == "download") this.downloadEntry(entry);
+        else if (action == "share") this.openLinkModal(entry);
+        else if (action == "rename") {
+          this.selection = [entry.name];
+          this.startRename();
+        } else if (action == "copy") {
+          this.selection = [entry.name];
+          this.setClipboard("copy");
+        } else if (action == "move") {
+          this.selection = [entry.name];
+          this.setClipboard("move");
+        } else if (action == "delete") {
+          this.selection = [entry.name];
+          this.deleteSelected();
+        }
+      },
+      async createLink() {
+        this.linkModal.busy = true;
+        try {
+          var d = await (await fetch("/api/v1/nas/links.json", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "create", path: this.linkModal.path, password: this.linkModal.password })
+          })).json();
+          if (d.status == "ok") {
+            this.linkModal.created = d.link;
+            this.links = d.links;
+            // Auto-copy URL once after create so the user can paste immediately.
+            this.copyLink(d.link);
+          } else showNotification(d.message, d.message, "error");
+        } finally { this.linkModal.busy = false; }
+      },
+      async deleteLink(link) {
+        if (!link) return;
+        var d = await (await fetch("/api/v1/nas/links.json", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "delete", token: link.token })
+        })).json();
+        if (d.status == "ok") {
+          this.links = d.links;
+          if (this.linkModal.created && this.linkModal.created.token == link.token) {
+            this.linkModal.created = null;
+            this.linkModal.password = "";
+          }
+        }
+      },
+      linkUrl(link) { return location.origin + "/s/" + (link && link.token ? link.token : ""); },
+      copyLink(link) {
+        if (!link || !link.token) return;
+        var url = this.linkUrl(link);
+        var token = link.token;
+        var done = () => {
+          // Flash "Copied" on the matching row/modal; still re-clickable.
+          this.linkCopyFlash = token;
+          this.linkModal.flash = true;
+          if (this._linkCopyTimer) clearTimeout(this._linkCopyTimer);
+          if (this.linkModal._flashTimer) clearTimeout(this.linkModal._flashTimer);
+          this._linkCopyTimer = setTimeout(() => { this.linkCopyFlash = ""; }, 900);
+          this.linkModal._flashTimer = setTimeout(() => { this.linkModal.flash = false; }, 900);
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(url).then(done).catch(() => {
+            try {
+              var ta = document.createElement("textarea");
+              ta.value = url; document.body.appendChild(ta); ta.select();
+              document.execCommand("copy"); document.body.removeChild(ta);
+            } catch (e) {}
+            done();
+          });
+        } else {
+          try {
+            var ta = document.createElement("textarea");
+            ta.value = url; document.body.appendChild(ta); ta.select();
+            document.execCommand("copy"); document.body.removeChild(ta);
+          } catch (e) {}
+          done();
+        }
+      },
+      linksFor(name) {
+        var p = this.path.replace(/\/+$/, "") + "/" + name;
+        return this.links.filter(l => l.path == p);
+      },
+      tabClass(t) {
+        return this.tab == t ? "bg-white border border-b-0 border-gray-300 text-pcatblue" : "text-gray-500 hover:text-gray-700";
+      },
+
+      // ── jobs ──
+      activeJobCount() {
+        return Object.values(this.jobs).filter(j => j.state == "queued" || j.state == "running").length;
+      },
+      jobList() {
+        return Object.values(this.jobs).sort((a, b) => b.created - a.created);
+      },
+      async loadJobs() {
+        try {
+          var d = await (await fetch("/api/v1/nas/jobs.json")).json();
+          if (d.status == "ok") { this.jobs = {}; d.jobs.forEach(j => this.jobs[j.id] = j); }
+        } catch (e) {}
+      },
+      onJobUpdate(j) {
+        if (j.state == "done" && this.tab == "files") this.loadFiles(this.path);
+      },
+      async jobAction(id, action) {
+        var d = await (await fetch("/api/v1/nas/jobs.json", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: action, id: id })
+        })).json();
+        if (d.status == "ok") { this.jobs = {}; d.jobs.forEach(j => this.jobs[j.id] = j); }
+      },
+      jobLabel(j) { return this.isCN() ? (j.label_cn || j.label) : j.label; },
+      isCN() { return (document.documentElement.lang || "").toUpperCase().indexOf("ZH") >= 0 || "{{locales.current_locale}}" == "CN"; },
+
+      // ── confirm modal ──
+      confirmDialog(title, body, expect) {
+        return new Promise((resolve) => {
+          this.confirm = { open: true, title: title, body: body, typed: "", expect: expect || "", resolve: resolve };
+        });
+      },
+      confirmOk() {
+        if (this.confirm.expect && this.confirm.typed != this.confirm.expect) return;
+        this.confirm.open = false;
+        if (this.confirm.resolve) this.confirm.resolve(true);
+      },
+      confirmCancel() {
+        this.confirm.open = false;
+        if (this.confirm.resolve) this.confirm.resolve(false);
+      },
+
+      // ── disks ──
+      async loadDisks() {
+        try {
+          var d = await (await fetch("/api/v1/nas/disks.json")).json();
+          if (d.status == "ok") { this.disks = d.disks; this.tools = d.tools; }
+        } catch (e) {}
+      },
+      async diskMount(part, action, force) {
+        this.busyDev = part.dev;
+        try {
+          var d = await (await fetch("/api/v1/nas/mount.json", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ dev: part.dev, action: action, force: !!force })
+          })).json();
+          if (d.status == "ok") { this.disks = d.disks; this.tools = d.tools; }
+          else if (d.code == "busy") {
+            var yes = await this.confirmDialog("{{locales.disks_btn_force}}", "{{locales.disks_busy_warn}}", "");
+            if (yes) return this.diskMount(part, action, true);
+          } else showNotification(d.message, d.message, "error");
+        } finally { this.busyDev = ""; }
+      },
+      async diskAutomount(part, enabled) {
+        var d = await (await fetch("/api/v1/nas/automount.json", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ dev: part.dev, enabled: enabled })
+        })).json();
+        if (d.status == "ok") { this.disks = d.disks; this.tools = d.tools; }
+        else showNotification(d.message, d.message, "error");
+      },
+      automountRows() {
+        var rows = [];
+        (this.disks || []).forEach(disk => {
+          (disk.partitions || []).forEach(part => {
+            if (!part.protected) rows.push({ disk: disk, part: part, bus: this.busLabel(disk.bus) });
+          });
+        });
+        return rows;
+      },
+      smartDisks() {
+        // SMART is meaningful on NVMe / USB / SATA; eMMC/SD rarely expose it.
+        return (this.disks || []).filter(d => d.bus != "emmc" && d.bus != "sd");
+      },
+      async loadSmart(disk) {
+        if (!disk || !disk.dev) return;
+        this.smartLoading = disk.dev;
+        try {
+          var d = await (await fetch("/api/v1/nas/smart.json?dev=" + encodeURIComponent(disk.dev))).json();
+          if (d.status == "ok") {
+            this.smartData = Object.assign({}, this.smartData, { [disk.dev]: d });
+          } else {
+            this.smartData = Object.assign({}, this.smartData, {
+              [disk.dev]: { health: "na", attrs: [], error: d.message || "failed" }
+            });
+          }
+        } catch (e) {
+          this.smartData = Object.assign({}, this.smartData, {
+            [disk.dev]: { health: "na", attrs: [], error: String(e) }
+          });
+        } finally { this.smartLoading = ""; }
+      },
+      diskFreeGb(disk) {
+        // Only offer "use free space" where a new volume is actually usable:
+        // ≥1 GB unallocated. Protected disks are allowed here on purpose —
+        // carving the eMMC's unused tail never touches the system partitions.
+        return Math.round((disk.unallocated_bytes || 0) / 1073741824 * 10) / 10;
+      },
+      // Blank data partition left by a half-finished carve-out (e.g. mmcblk0p3
+      // with no filesystem) — use_free resumes at mkfs + mount.
+      hasBlankDataPart(disk) {
+        return (disk.partitions || []).some(p =>
+          !p.protected && !p.fs && !p.mounted && (p.size_bytes || 0) >= 1073741824);
+      },
+      canUseFreeSpace(disk) {
+        return this.diskFreeGb(disk) >= 1 || this.hasBlankDataPart(disk);
+      },
+      busLabel(bus) {
+        var m = { nvme: "NVMe", usb: "USB", sd: "SD", emmc: "eMMC", unknown: "?" };
+        return m[bus] || bus;
+      },
+      // Filesystems offered in the format dialog. Disabled when mkfs is missing.
+      formatFsOptions() {
+        return [
+          { id: "ext4", label: "ext4", tool: "ext4", hint: "{{locales.part_fs_hint_ext4}}" },
+          { id: "exfat", label: "exFAT", tool: "exfat", hint: "{{locales.part_fs_hint_exfat}}" },
+          { id: "vfat", label: "FAT32", tool: "vfat", hint: "{{locales.part_fs_hint_vfat}}" },
+          { id: "f2fs", label: "f2fs", tool: "f2fs", hint: "{{locales.part_fs_hint_f2fs}}" },
+          { id: "btrfs", label: "btrfs", tool: "btrfs", hint: "{{locales.part_fs_hint_btrfs}}" },
+          { id: "zfs", label: "ZFS", tool: "zfs", hint: "{{locales.part_fs_hint_zfs}}" },
+        ];
+      },
+      fsToolAvailable(tool) {
+        // ext4/vfat default to true when tools map is empty (older API).
+        if (tool == "ext4" || tool == "vfat") return this.tools[tool] !== false;
+        return !!this.tools[tool];
+      },
+      openFormatModal(part, disk) {
+        if (!part || part.protected) return;
+        if (part.mounted) {
+          showNotification("{{locales.part_format_unmount_first}}", "{{locales.part_format_unmount_first}}", "error");
+          return;
+        }
+        this.formatModal = {
+          open: true,
+          dev: part.dev,
+          diskDev: disk.dev,
+          fs: this.fsToolAvailable("ext4") ? "ext4" : "exfat",
+          label: part.label || "pcat-data",
+          busy: false,
+        };
+      },
+      async formatDataPart(part, disk) {
+        // Opens the filesystem chooser (ext4 / exFAT / …). System partitions
+        // stay locked; unmount first if the volume is mounted.
+        this.openFormatModal(part, disk);
+      },
+      async submitFormatModal() {
+        var m = this.formatModal;
+        if (!m.open || !m.dev) return;
+        if (m.fs == "zfs" || !this.fsToolAvailable(m.fs == "vfat" ? "vfat" : m.fs)) {
+          showNotification("{{locales.part_fs_unavailable}}", "{{locales.part_fs_unavailable}}", "error");
+          return;
+        }
+        var diskName = this.shortDev(m.diskDev);
+        var yes = await this.confirmDialog(
+          "{{locales.part_btn_format}} " + this.shortDev(m.dev) + " (" + m.fs + ")",
+          "{{locales.confirm_cannot_undo}}", diskName);
+        if (!yes) return;
+        m.busy = true;
+        this.busyDev = m.dev;
+        try {
+          var d = await (await fetch("/api/v1/nas/partitions.json", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              action: "format", dev: m.dev, confirm: diskName,
+              fs: m.fs, label: m.label || ""
+            })
+          })).json();
+          if (d.status == "ok") {
+            m.open = false;
+            showNotification("Started", "已开始", "success");
+            setTimeout(() => this.loadDisks(), 2000);
+          } else showNotification(d.message, d.message, "error");
+        } finally {
+          m.busy = false;
+          this.busyDev = "";
+        }
+      },
+
+      // ── files ──
+      async loadFiles(path) {
+        this.filesLoading = true;
+        this.selection = []; this.renaming = "";
+        try {
+          var url = "/api/v1/nas/files/list.json" + (path ? "?path=" + encodeURIComponent(path) : "");
+          var d = await (await fetch(url)).json();
+          if (d.status == "ok") {
+            if (d.volumes) { this.volumes = d.volumes; this.path = ""; this.entries = []; }
+            else { this.path = d.path; this.entries = d.entries; this.volume = d.volume; }
+            location.hash = this.path ? "files:" + this.path : "files";
+          } else { this.path = ""; this.loadFiles(""); }
+        } catch (e) {} finally { this.filesLoading = false; }
+      },
+      entryPath(entry) {
+        return this.path.replace(/\/+$/, "") + "/" + entry.name;
+      },
+      // Browser-previewable kinds by extension (Panasonic DCIM often has JPG/MP4).
+      fileKind(name) {
+        var ext = ((name || "").split(".").pop() || "").toLowerCase();
+        if (["jpg", "jpeg", "png", "gif", "webp", "bmp", "svg"].includes(ext)) return "image";
+        if (["mp4", "webm", "ogg", "mov", "m4v", "mkv"].includes(ext)) return "video";
+        if (["mp3", "wav", "flac", "aac", "m4a", "oga", "opus"].includes(ext)) return "audio";
+        if (ext == "pdf") return "pdf";
+        return "";
+      },
+      fileIcon(entry) {
+        if (entry.type == "dir") return "📁";
+        var k = this.fileKind(entry.name);
+        if (k == "image") return "🖼️";
+        if (k == "video") return "🎬";
+        if (k == "audio") return "🎵";
+        if (k == "pdf") return "📕";
+        return "📄";
+      },
+      navigate(entry) {
+        if (entry.type == "dir") {
+          this.loadFiles(this.path.replace(/\/+$/, "") + "/" + entry.name);
+          return;
+        }
+        // Clickable preview for media; other files open the download path.
+        if (this.fileKind(entry.name)) this.openPreview(entry);
+        else this.downloadEntry(entry);
+      },
+      openPreview(entry) {
+        if (!entry || entry.type != "file") return;
+        var kind = this.fileKind(entry.name);
+        if (!kind) return;
+        this.preview = {
+          open: true,
+          name: entry.name,
+          path: this.entryPath(entry),
+          kind: kind,
+        };
+      },
+      closePreview() {
+        // Drop media src by clearing open first so video/audio stop decoding.
+        this.preview = { open: false, name: "", path: "", kind: "" };
+      },
+      previewInlineUrl() {
+        if (!this.preview.path) return "";
+        return "/api/v1/nas/files/download?path=" + encodeURIComponent(this.preview.path) + "&inline=1";
+      },
+      previewDownloadUrl() {
+        if (!this.preview.path) return "#";
+        return "/api/v1/nas/files/download?path=" + encodeURIComponent(this.preview.path);
+      },
+      downloadEntry(entry) {
+        if (!entry || entry.type != "file") return;
+        window.location = "/api/v1/nas/files/download?path=" + encodeURIComponent(this.entryPath(entry));
+      },
+      previewableEntries() {
+        return (this.entries || []).filter(e => e.type == "file" && this.fileKind(e.name));
+      },
+      previewIndex() {
+        var list = this.previewableEntries();
+        return list.findIndex(e => e.name == this.preview.name);
+      },
+      previewHasPrev() { return this.previewIndex() > 0; },
+      previewHasNext() {
+        var i = this.previewIndex();
+        return i >= 0 && i < this.previewableEntries().length - 1;
+      },
+      previewNav(delta) {
+        if (!this.preview.open) return;
+        var list = this.previewableEntries();
+        var i = this.previewIndex() + delta;
+        if (i < 0 || i >= list.length) return;
+        this.openPreview(list[i]);
+      },
+      crumbs() {
+        if (!this.path) return [];
+        var parts = this.path.split("/").filter(p => p);
+        var out = [], acc = "";
+        for (var i = 0; i < parts.length; i++) {
+          acc += "/" + parts[i];
+          out.push({ name: parts[i], path: acc });
+        }
+        return out;
+      },
+      toggleSelect(entry, idx, ev) {
+        var name = entry.name;
+        if (ev && ev.shiftKey && this.lastClickIdx >= 0) {
+          var lo = Math.min(this.lastClickIdx, idx), hi = Math.max(this.lastClickIdx, idx);
+          for (var i = lo; i <= hi; i++) {
+            var n = this.entries[i].name;
+            if (!this.selection.includes(n)) this.selection.push(n);
+          }
+        } else if (this.selection.includes(name)) {
+          this.selection = this.selection.filter(n => n != name);
+        } else {
+          this.selection.push(name);
+        }
+        this.lastClickIdx = idx;
+      },
+      selPaths() { return this.selection.map(n => this.path.replace(/\/+$/, "") + "/" + n); },
+      async mkFolder() {
+        if (!this.newFolderName) return;
+        var d = await (await fetch("/api/v1/nas/files/mkdir.json", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: this.path, name: this.newFolderName })
+        })).json();
+        if (d.status == "ok") { this.newFolderOpen = false; this.newFolderName = ""; this.loadFiles(this.path); }
+        else showNotification(d.message, d.message, "error");
+      },
+      startRename() {
+        if (this.selection.length != 1) return;
+        this.renaming = this.selection[0];
+        this.renameValue = this.selection[0];
+        this.$nextTick(() => { var el = document.getElementById("nas-rename-input"); if (el) el.focus(); });
+      },
+      async commitRename() {
+        if (!this.renaming || !this.renameValue || this.renameValue == this.renaming) { this.renaming = ""; return; }
+        var d = await (await fetch("/api/v1/nas/files/rename.json", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: this.path.replace(/\/+$/, "") + "/" + this.renaming, new_name: this.renameValue })
+        })).json();
+        this.renaming = "";
+        if (d.status == "ok") this.loadFiles(this.path);
+        else showNotification(d.message, d.message, "error");
+      },
+      setClipboard(op) {
+        if (!this.selection.length) return;
+        this.clipboard = { op: op, paths: this.selPaths() };
+        showNotification(this.selection.length + " item(s) ready to " + op, "已选择 " + this.selection.length + " 项", "info");
+      },
+      async pasteClipboard() {
+        if (!this.clipboard.paths.length) return;
+        var ep = this.clipboard.op == "move" ? "move" : "copy";
+        var d = await (await fetch("/api/v1/nas/files/" + ep + ".json", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sources: this.clipboard.paths, dest_dir: this.path })
+        })).json();
+        if (d.status == "ok") {
+          this.clipboard = { op: "", paths: [] };
+          if (!d.job_id) this.loadFiles(this.path);
+        } else showNotification(d.message, d.message, "error");
+      },
+      async deleteSelected() {
+        if (!this.selection.length) return;
+        var yes = await this.confirmDialog("{{locales.confirm_delete_n}} (" + this.selection.length + ")", "{{locales.confirm_cannot_undo}}", "");
+        if (!yes) return;
+        var d = await (await fetch("/api/v1/nas/files/delete.json", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ paths: this.selPaths() })
+        })).json();
+        if (d.status == "ok") { if (!d.job_id) this.loadFiles(this.path); }
+        else showNotification(d.message, d.message, "error");
+      },
+      downloadSelected() {
+        if (this.selection.length == 1) {
+          var entry = this.entries.find(e => e.name == this.selection[0]);
+          if (entry && entry.type == "file") {
+            window.location = "/api/v1/nas/files/download?path=" + encodeURIComponent(this.selPaths()[0]);
+            return;
+          }
+        }
+        var q = this.selPaths().map(p => "path=" + encodeURIComponent(p)).join("&");
+        window.location = "/api/v1/nas/files/archive?" + q;
+      },
+
+      // ── upload engine ──
+      queueFiles(fileList, relBase) {
+        for (var i = 0; i < fileList.length; i++) {
+          var f = fileList[i];
+          var rel = f.webkitRelativePath || (relBase ? relBase + "/" + f.name : f.name);
+          this.upload.queue.push({ file: f, rel: rel, pct: 0, state: "queued", error: "" });
+        }
+        this.pumpUploads();
+      },
+      handleFileInput(ev) { this.queueFiles(ev.target.files, ""); ev.target.value = ""; },
+      async handleDrop(ev) {
+        var items = ev.dataTransfer.items;
+        if (items && items.length && items[0].webkitGetAsEntry) {
+          for (var i = 0; i < items.length; i++) {
+            var entry = items[i].webkitGetAsEntry();
+            if (entry) await this.walkEntry(entry, "");
+          }
+          this.pumpUploads();
+        } else {
+          this.queueFiles(ev.dataTransfer.files, "");
+        }
+      },
+      walkEntry(entry, prefix) {
+        return new Promise((resolve) => {
+          if (entry.isFile) {
+            entry.file((f) => {
+              this.upload.queue.push({ file: f, rel: prefix ? prefix + "/" + f.name : f.name, pct: 0, state: "queued", error: "" });
+              resolve();
+            }, resolve);
+          } else if (entry.isDirectory) {
+            var reader = entry.createReader();
+            var readAll = () => {
+              reader.readEntries(async (batch) => {
+                if (!batch.length) { resolve(); return; }
+                for (var i = 0; i < batch.length; i++) {
+                  await this.walkEntry(batch[i], prefix ? prefix + "/" + entry.name : entry.name);
+                }
+                readAll();  // readEntries batches at 100 — must loop until empty
+              }, resolve);
+            };
+            readAll();
+          } else resolve();
+        });
+      },
+      pumpUploads() {
+        while (this.upload.active < 2) {
+          var item = this.upload.queue.find(q => q.state == "queued");
+          if (!item) break;
+          this.uploadOne(item);
+        }
+        // Sample transferred bytes on a timer while anything is in flight so
+        // the totals row can show a rolling speed and ETA.
+        if (this.upload.active > 0 && !this.upload.timer) {
+          this.upload.samples = [];
+          this.upload.timer = setInterval(() => this.tickUploadStats(), 500);
+        }
+      },
+      tickUploadStats() {
+        var now = Date.now(), loaded = 0, total = 0;
+        this.upload.queue.forEach((i) => {
+          if (i.state == "error") return;
+          total += i.file.size;
+          loaded += i.state == "done" ? i.file.size : (i.loaded || 0);
+        });
+        var s = this.upload.samples;
+        s.push({ t: now, b: loaded });
+        while (s.length > 2 && now - s[0].t > 6000) s.shift();  // ~6s rolling window
+        var dt = (now - s[0].t) / 1000, db = loaded - s[0].b;
+        this.upload.speed = dt >= 0.8 ? db / dt : 0;
+        this.upload.eta = this.upload.speed > 0 ? Math.round((total - loaded) / this.upload.speed) : 0;
+      },
+      uploadOne(item) {
+        item.state = "uploading";
+        this.upload.active++;
+        var xhr = new XMLHttpRequest();
+        var url = "/api/v1/nas/files/upload?dest=" + encodeURIComponent(this.path)
+          + "&relpath=" + encodeURIComponent(item.rel) + "&conflict=" + (this.upload.policy || "rename");
+        xhr.open("POST", url);
+        xhr.setRequestHeader("X-CSRF-Token", nasCsrfToken());
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable) { item.loaded = e.loaded; item.pct = Math.round(e.loaded * 100 / e.total); }
+        };
+        xhr.onload = () => {
+          this.upload.active--;
+          try {
+            var d = JSON.parse(xhr.responseText);
+            if (d.status == "ok") { item.state = "done"; item.pct = 100; }
+            else { item.state = "error"; item.error = d.message || d.code; }
+          } catch (e) { item.state = "error"; item.error = "HTTP " + xhr.status; }
+          this.afterUpload();
+        };
+        xhr.onerror = () => { this.upload.active--; item.state = "error"; item.error = "network"; this.afterUpload(); };
+        xhr.send(item.file);
+      },
+      afterUpload() {
+        this.pumpUploads();
+        if (this.upload.active == 0 && !this.upload.queue.some(q => q.state == "queued")) {
+          if (this.upload.timer) { clearInterval(this.upload.timer); this.upload.timer = null; }
+          this.upload.speed = 0;
+          this.upload.eta = 0;
+          this.loadFiles(this.path);
+          if (!this.upload.queue.some(q => q.state == "error")) {
+            showNotification("{{locales.files_upload_done}}", "{{locales.files_upload_done}}", "success");
+            setTimeout(() => { this.upload.queue = []; }, 3000);
+          }
+        }
+      },
+      uploadTotals() {
+        var q = this.upload.queue;
+        var done = q.filter(i => i.state == "done").length;
+        var out = done + "/" + q.length;
+        var loaded = 0, total = 0;
+        q.forEach((i) => {
+          if (i.state == "error") return;
+          total += i.file.size;
+          loaded += i.state == "done" ? i.file.size : (i.loaded || 0);
+        });
+        if (total) out += " · " + nasFormatSize(loaded) + " / " + nasFormatSize(total);
+        if (this.upload.active > 0 && this.upload.speed > 0) {
+          out += " · " + nasFormatSize(this.upload.speed) + "/s";
+          var e = this.upload.eta;
+          if (e > 0) {
+            var h = Math.floor(e / 3600), m = Math.floor((e % 3600) / 60), sec = e % 60;
+            out += " · ETA " + (h ? h + ":" + nasPad2(m) : m) + ":" + nasPad2(sec);
+          }
+        }
+        return out;
+      },
+
+      // ── shares ──
+      async loadShares() {
+        try {
+          var d = await (await fetch("/api/v1/nas/shares.json")).json();
+          if (d.status == "ok") { this.samba = d.samba; this.shares = d.shares; this.smbUsers = d.users; this.sharesLoaded = true; }
+        } catch (e) {}
+      },
+      openShareEdit(share) {
+        if (share) this.shareEdit = { open: true, id: share.id, name: share.name, path: share.path, mode: share.mode, users: share.users.slice(), read_only: share.read_only, http_browse: share.http_browse };
+        else this.shareEdit = { open: true, id: "", name: "", path: "", mode: "guest", users: [], read_only: false, http_browse: false };
+      },
+      async saveShare() {
+        var s = this.shareEdit;
+        var d = await (await fetch("/api/v1/nas/shares.json", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: s.id ? "update" : "create", id: s.id, name: s.name, path: s.path, mode: s.mode, users: s.users, read_only: s.read_only, http_browse: s.http_browse })
+        })).json();
+        if (d.status == "ok") { this.shareEdit.open = false; this.samba = d.samba; this.shares = d.shares; this.smbUsers = d.users; }
+        else showNotification(d.message, d.message, "error");
+      },
+      async deleteShare(share) {
+        var yes = await this.confirmDialog("{{locales.shares_btn_delete}}: " + share.name, "{{locales.confirm_cannot_undo}}", "");
+        if (!yes) return;
+        var d = await (await fetch("/api/v1/nas/shares.json", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "delete", id: share.id })
+        })).json();
+        if (d.status == "ok") { this.samba = d.samba; this.shares = d.shares; this.smbUsers = d.users; }
+        else showNotification(d.message, d.message, "error");
+      },
+      async saveUser() {
+        var d = await (await fetch("/api/v1/nas/share_users.json", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "add", name: this.userModal.name, password: this.userModal.password })
+        })).json();
+        if (d.status == "ok") { this.userModal = { open: false, name: "", password: "" }; this.smbUsers = d.users; }
+        else showNotification(d.message, d.message, "error");
+      },
+      async removeUser(name) {
+        var yes = await this.confirmDialog("{{locales.shares_btn_delete}}: " + name, "{{locales.confirm_cannot_undo}}", "");
+        if (!yes) return;
+        var d = await (await fetch("/api/v1/nas/share_users.json", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "remove", name: name })
+        })).json();
+        if (d.status == "ok") { this.smbUsers = d.users; this.shares = d.shares; }
+        else showNotification(d.message, d.message, "error");
+      },
+      async sambaService(action) {
+        var d = await (await fetch("/api/v1/nas/samba.json", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: action })
+        })).json();
+        if (d.status == "ok") { this.samba = d.samba; this.shares = d.shares; }
+      },
+      installSamba() {
+        this.installing = true;
+        this.installLog = [];
+        socket.emit("request_install_package", { package: "samba4-server" });
+      },
+      publicUrl(share) { return location.origin + "/public/share/" + encodeURIComponent(share.name) + "/"; },
+      copyPublicUrl(share) {
+        navigator.clipboard.writeText(this.publicUrl(share));
+        showNotification("Copied", "已复制", "success");
+      },
+
+      // ── dir picker ──
+      pickDir() {
+        return new Promise((resolve) => {
+          this.picker = { open: true, path: "", entries: [], resolve: resolve };
+          this.pickerLoad("");
+        });
+      },
+      async pickerLoad(path) {
+        var url = "/api/v1/nas/files/list.json" + (path ? "?path=" + encodeURIComponent(path) : "");
+        var d = await (await fetch(url)).json();
+        if (d.status != "ok") return;
+        if (d.volumes) {
+          this.picker.path = "";
+          this.picker.entries = d.volumes.map(v => ({ name: v.mountpoint, type: "dir", vol: true }));
+        } else {
+          this.picker.path = d.path;
+          this.picker.entries = d.entries.filter(e => e.type == "dir");
+        }
+      },
+      pickerNavigate(entry) {
+        this.pickerLoad(entry.vol ? entry.name : this.picker.path.replace(/\/+$/, "") + "/" + entry.name);
+      },
+      pickerUp() {
+        if (!this.picker.path) return;
+        var parent = this.picker.path.replace(/\/+$/, "").split("/").slice(0, -1).join("/");
+        this.pickerLoad(parent || "");
+      },
+      pickerSelect() {
+        this.picker.open = false;
+        if (this.picker.resolve) this.picker.resolve(this.picker.path || null);
+      },
+      pickerCancel() {
+        this.picker.open = false;
+        if (this.picker.resolve) this.picker.resolve(null);
+      },
+      async chooseSharePath() {
+        var p = await this.pickDir();
+        if (p) this.shareEdit.path = p;
+      },
+    }));
+  });
+</script>
+{% endblock %}

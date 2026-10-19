@@ -1,4 +1,5 @@
 {% extends '_base.html' %}
+{% block page_title %}{{locales["tab_general_settings"]}}{% endblock %}
 {% block content %}
 <div class="container mx-auto w-full pt-14 pb-6 sm:pt-24 sm:pb-8 md:pt-28 lg:px-4" x-data="general_settings" x-init="init()">
   <div class="flex items-center justify-between">
@@ -51,6 +52,25 @@
         <h5 class="font-bold text-gray-600">{{locales["general_settings_title"]}}</h5>
       </div>
       <div class="p-5">
+        <!-- Appearance / Night mode (client-side; default follows browser) -->
+        <div class="mb-6">
+          <label class="mb-2 block font-medium text-gray-700">
+            <svg xmlns="http://www.w3.org/2000/svg" class="mr-1 inline h-5 w-5 text-pcatblue" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
+            </svg>
+            {{locales["theme_label"]}}
+          </label>
+          <div class="theme-seg">
+            <button type="button" :class="{ 'is-active': theme_pref === 'auto' }"
+                    @click="setTheme('auto')">{{locales["theme_auto"]}}</button>
+            <button type="button" :class="{ 'is-active': theme_pref === 'light' }"
+                    @click="setTheme('light')">{{locales["theme_light"]}}</button>
+            <button type="button" :class="{ 'is-active': theme_pref === 'dark' }"
+                    @click="setTheme('dark')">{{locales["theme_dark"]}}</button>
+          </div>
+          <p class="mt-1 text-sm text-gray-400">{{locales["theme_help"]}}</p>
+        </div>
+
         <!-- Language Setting -->
         <div class="mb-6">
           <label class="mb-2 block font-medium text-gray-700">
@@ -126,14 +146,105 @@
             {{locales.terminal_enabled_label}}
           </label>
           <label class="relative flex cursor-pointer items-center">
-            <input class="peer sr-only" type="checkbox" x-model="terminal_enabled" />
+            <input class="peer sr-only" type="checkbox" x-model="terminal_enabled" {% if current_terminal_enabled %}checked{% endif %} />
             <div
               class="h-6 w-11 rounded-full border-2 border-gray-200 bg-gray-200 after:absolute after:top-0.5 after:left-0.5 after:h-5 after:w-5 after:rounded-full after:border after:border-gray-300 after:bg-white after:shadow-sm after:transition-all after:duration-300 peer-checked:border-blue-600 peer-checked:bg-blue-600 peer-checked:after:translate-x-full peer-checked:after:border-white"
             ></div>
-            <span class="ml-2 select-none text-base text-gray-400" x-text="terminal_enabled ? '{{locales.common_enable}}' : '{{locales.common_disable}}'"></span>
+            <span class="ml-2 select-none text-base text-gray-400" x-text="terminal_enabled ? '{{locales.common_enable}}' : '{{locales.common_disable}}'">{{ locales.common_enable if current_terminal_enabled else locales.common_disable }}</span>
           </label>
           <p class="mt-1 text-sm text-gray-400">{{locales.terminal_enabled_help}}</p>
         </div>
+
+        <!-- Phone Page Menu Setting. Rendered only where telephony can
+             actually work (RM500U/RM520 module on a REV2 board); the gate is
+             server-side on purpose, an x-show would paint the switch for a
+             frame on boxes that must never be offered it. -->
+        {% if phone_capable %}
+        <div class="mb-6">
+          <label class="mb-2 block font-medium text-gray-700">
+            <svg xmlns="http://www.w3.org/2000/svg" class="mr-1 inline h-5 w-5 text-pcatblue" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.79 19.79 0 0 1 2.12 4.18 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.9.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z"/>
+            </svg>
+            {{locales.phone_enabled_label}}
+          </label>
+          <label class="relative flex cursor-pointer items-center">
+            <input class="peer sr-only" type="checkbox" x-model="phone_enabled" {% if current_phone_enabled %}checked{% endif %} />
+            <div
+              class="h-6 w-11 rounded-full border-2 border-gray-200 bg-gray-200 after:absolute after:top-0.5 after:left-0.5 after:h-5 after:w-5 after:rounded-full after:border after:border-gray-300 after:bg-white after:shadow-sm after:transition-all after:duration-300 peer-checked:border-blue-600 peer-checked:bg-blue-600 peer-checked:after:translate-x-full peer-checked:after:border-white"
+            ></div>
+            <span class="ml-2 select-none text-base text-gray-400" x-text="phone_enabled ? '{{locales.common_enable}}' : '{{locales.common_disable}}'">{{ locales.common_enable if current_phone_enabled else locales.common_disable }}</span>
+          </label>
+          <p class="mt-1 text-sm text-gray-400">{{locales.phone_enabled_help}}</p>
+        </div>
+        {% endif %}
+
+        <!-- NAS Page Menu Setting -->
+        <div class="mb-6">
+          <label class="mb-2 block font-medium text-gray-700">
+            <svg xmlns="http://www.w3.org/2000/svg" class="mr-1 inline h-5 w-5 text-pcatblue" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M22 12H2"/>
+              <path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>
+              <line x1="6" y1="16" x2="6.01" y2="16"/>
+              <line x1="10" y1="16" x2="10.01" y2="16"/>
+            </svg>
+            {{locales.nas_enabled_label}}
+          </label>
+          <label class="relative flex cursor-pointer items-center">
+            <input class="peer sr-only" type="checkbox" x-model="nas_enabled" {% if current_nas_enabled %}checked{% endif %} />
+            <div
+              class="h-6 w-11 rounded-full border-2 border-gray-200 bg-gray-200 after:absolute after:top-0.5 after:left-0.5 after:h-5 after:w-5 after:rounded-full after:border after:border-gray-300 after:bg-white after:shadow-sm after:transition-all after:duration-300 peer-checked:border-blue-600 peer-checked:bg-blue-600 peer-checked:after:translate-x-full peer-checked:after:border-white"
+            ></div>
+            <span class="ml-2 select-none text-base text-gray-400" x-text="nas_enabled ? '{{locales.common_enable}}' : '{{locales.common_disable}}'">{{ locales.common_enable if current_nas_enabled else locales.common_disable }}</span>
+          </label>
+          <p class="mt-1 text-sm text-gray-400">{{locales.nas_enabled_help}}</p>
+        </div>
+
+        <!-- LXC Page Menu Setting (Photonicat 2 only; see lxc_capable) -->
+        {% if lxc_capable %}
+        <div class="mb-6">
+          <label class="mb-2 block font-medium text-gray-700">
+            <svg xmlns="http://www.w3.org/2000/svg" class="mr-1 inline h-5 w-5 text-pcatblue" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M8 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h2"/>
+              <path d="M16 4h2a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-2"/>
+              <rect x="9" y="9" width="6" height="6" rx="1"/>
+            </svg>
+            {{locales.lxc_enabled_label}}
+          </label>
+          <label class="relative flex cursor-pointer items-center">
+            <input class="peer sr-only" type="checkbox" x-model="lxc_enabled" {% if current_lxc_enabled %}checked{% endif %} />
+            <div
+              class="h-6 w-11 rounded-full border-2 border-gray-200 bg-gray-200 after:absolute after:top-0.5 after:left-0.5 after:h-5 after:w-5 after:rounded-full after:border after:border-gray-300 after:bg-white after:shadow-sm after:transition-all after:duration-300 peer-checked:border-blue-600 peer-checked:bg-blue-600 peer-checked:after:translate-x-full peer-checked:after:border-white"
+            ></div>
+            <span class="ml-2 select-none text-base text-gray-400" x-text="lxc_enabled ? '{{locales.common_enable}}' : '{{locales.common_disable}}'">{{ locales.common_enable if current_lxc_enabled else locales.common_disable }}</span>
+          </label>
+          <p class="mt-1 text-sm text-gray-400">{{locales.lxc_enabled_help}}</p>
+        </div>
+        {% endif %}
+
+        <!-- GPS Page Menu Setting -->
+        {% if gps_capable %}
+        <div class="mb-6">
+          <label class="mb-2 block font-medium text-gray-700">
+            <svg xmlns="http://www.w3.org/2000/svg" class="mr-1 inline h-5 w-5 text-pcatblue" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="6"/>
+              <line x1="12" y1="2" x2="12" y2="4.5"/>
+              <line x1="12" y1="19.5" x2="12" y2="22"/>
+              <line x1="2" y1="12" x2="4.5" y2="12"/>
+              <line x1="19.5" y1="12" x2="22" y2="12"/>
+              <circle cx="12" cy="12" r="1.2" fill="currentColor" stroke="none"/>
+            </svg>
+            {{locales.gps_enabled_label}}
+          </label>
+          <label class="relative flex cursor-pointer items-center">
+            <input class="peer sr-only" type="checkbox" x-model="gps_enabled" {% if current_gps_enabled %}checked{% endif %} />
+            <div
+              class="h-6 w-11 rounded-full border-2 border-gray-200 bg-gray-200 after:absolute after:top-0.5 after:left-0.5 after:h-5 after:w-5 after:rounded-full after:border after:border-gray-300 after:bg-white after:shadow-sm after:transition-all after:duration-300 peer-checked:border-blue-600 peer-checked:bg-blue-600 peer-checked:after:translate-x-full peer-checked:after:border-white"
+            ></div>
+            <span class="ml-2 select-none text-base text-gray-400" x-text="gps_enabled ? '{{locales.common_enable}}' : '{{locales.common_disable}}'">{{ locales.common_enable if current_gps_enabled else locales.common_disable }}</span>
+          </label>
+          <p class="mt-1 text-sm text-gray-400">{{locales.gps_enabled_help}}</p>
+        </div>
+        {% endif %}
 
         <!-- Save Button -->
         <div class="flex items-center space-x-4">
@@ -149,6 +260,46 @@
             <span x-text="saving ? '{{locales["saving"]}}' : '{{locales["common_save"]}}'"></span>
           </button>
           <span x-show="save_success" x-cloak x-transition class="text-sm text-green-600 font-medium">{{locales["saved_succeed"]}}</span>
+
+          <button type="button"
+                  @click="reset_dlg_open = true"
+                  :disabled="saving || resetting"
+                  class="ml-auto rounded-lg border border-gray-300 px-4 py-2.5 text-sm font-medium text-gray-600 hover:bg-gray-100 hover:text-gray-900 focus:outline-none focus:ring-4 focus:ring-gray-200 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-700">
+            {{locales["reset_defaults_button"]}}
+          </button>
+        </div>
+
+        <!-- Reset confirmation. It resets everything on the page, hostname
+             and timezone included, so the dialog lists what will change. -->
+        <div x-show="reset_dlg_open" x-cloak
+             class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+             @click.self="reset_dlg_open = false"
+             @keydown.escape.window="reset_dlg_open = false">
+          <div class="w-full max-w-md rounded-lg bg-white p-6 shadow-xl dark:bg-gray-800">
+            <h3 class="mb-3 text-lg font-semibold text-gray-900 dark:text-white">
+              {{locales["reset_defaults_title"]}}
+            </h3>
+            <p class="mb-2 text-sm text-gray-600 dark:text-gray-300">
+              {{locales["reset_defaults_body"]}}
+            </p>
+            <p class="mb-5 text-sm font-medium text-amber-600 dark:text-amber-400">
+              {{locales["reset_defaults_note"]}}
+            </p>
+            <div class="flex justify-end space-x-3">
+              <button type="button"
+                      @click="reset_dlg_open = false"
+                      class="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-700">
+                {{locales["common_cancel"]}}
+              </button>
+              <button type="button"
+                      @click="resetSettings()"
+                      :disabled="resetting"
+                      class="rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 focus:outline-none focus:ring-4 focus:ring-red-300 disabled:cursor-not-allowed disabled:opacity-50">
+                <span x-show="!resetting">{{locales["reset_defaults_confirm"]}}</span>
+                <span x-show="resetting" x-cloak>{{locales["saving"]}}</span>
+              </button>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -168,9 +319,59 @@
       hostname: "{{current_hostname}}",
       tcp_congestion: "{{current_tcp_congestion}}",
       terminal_enabled: {{current_terminal_enabled|tojson}},
+      nas_enabled: {{current_nas_enabled|tojson}},
+      lxc_enabled: {{current_lxc_enabled|tojson}},
+      gps_enabled: {{current_gps_enabled|tojson}},
+      phone_enabled: {{current_phone_enabled|tojson}},
+      theme_pref: (window.PcatTheme && PcatTheme.getPref()) || 'auto',
       hostname_error: false,
       saving: false,
       save_success: false,
+      reset_dlg_open: false,
+      resetting: false,
+
+      notification: {
+        show: false,
+        message: '',
+        message_en: '',
+        message_cn: '',
+        type: 'info' // 'success', 'error', 'info'
+      },
+
+      setTheme(pref) {
+        this.theme_pref = pref;
+        if (window.PcatTheme) PcatTheme.setPref(pref);
+      },
+
+      resetSettings() {
+        if (this.resetting) return;
+        this.resetting = true;
+
+        fetch("/api/v1/general_settings/reset.json", { method: "POST" })
+          .then(response => response.json())
+          .then(data => {
+            this.resetting = false;
+            this.reset_dlg_open = false;
+            if (data.status === "ok") {
+              // This browser's own stored appearance has to go too, or it
+              // would immediately override the device default we just cleared
+              // and the reset would look like it had done nothing.
+              try { localStorage.removeItem("pcat-theme"); } catch (e) {}
+              window.PCAT_DEVICE_THEME = null;
+              // Reload rather than patch the fields: language and appearance
+              // are both applied at render time.
+              window.location.reload();
+            } else {
+              this.showNotification(data.message || "Reset failed", "恢复默认失败", 'error');
+            }
+          })
+          .catch(error => {
+            this.resetting = false;
+            this.reset_dlg_open = false;
+            console.error("Error resetting settings:", error);
+            this.showNotification("Network error", "网络错误", 'error');
+          });
+      },
 
       timezones: [
         { zonename: "UTC", timezone: "UTC0", label: "UTC" },
@@ -254,7 +455,11 @@
             timezone: tz ? tz.timezone : this.timezone_str,
             hostname: this.hostname,
             tcp_congestion: this.tcp_congestion,
-            terminal_enabled: this.terminal_enabled
+            terminal_enabled: this.terminal_enabled,
+            nas_enabled: this.nas_enabled,
+            lxc_enabled: this.lxc_enabled,
+            gps_enabled: this.gps_enabled,
+            phone_enabled: this.phone_enabled
           })
         })
           .then(response => response.json())
@@ -268,15 +473,38 @@
                 setTimeout(() => { window.location.reload(); }, 500);
               }
             } else {
-              alert(data.message || "Save failed");
+              // Backend only returns English messages; don't echo them as the CN string.
+              this.showNotification(data.message || "Save failed", "保存失败", 'error');
             }
           })
           .catch(error => {
             this.saving = false;
             console.error("Error saving settings:", error);
-            alert("Network error");
+            this.showNotification("Network error", "网络错误", 'error');
           });
-      }
+      },
+
+      showNotification(message_en, message_cn = '', type = 'info') {
+        this.notification.message_en = message_en;
+        this.notification.message_cn = message_cn;
+        this.notification.message = message_en; // Fallback
+        this.notification.type = type;
+        this.notification.show = true;
+
+        clearTimeout(this._notificationTimer);
+
+        // Auto-hide after 4 seconds for success and info messages
+        if (type !== 'error') {
+          this._notificationTimer = setTimeout(() => {
+            this.notification.show = false;
+          }, 4000);
+        }
+      },
+
+      hideNotification() {
+        clearTimeout(this._notificationTimer);
+        this.notification.show = false;
+      },
     }));
   });
 </script>

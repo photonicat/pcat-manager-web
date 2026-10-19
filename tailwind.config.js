@@ -3,6 +3,7 @@ const colors = require("tailwindcss/colors");
 
 module.exports = {
   content: ["./src/**/*.{js,jsx,ts,tsx}", "./app/templates/*.html"],
+  darkMode: "class",
   theme: {
     colors: {
       pcatyellow: "#FDE021",
@@ -33,6 +34,7 @@ module.exports = {
       red: colors.red,
       green: colors.green,
       orange: colors.orange,
+      amber: colors.amber,
     },
     extend: {
       fontFamily: {

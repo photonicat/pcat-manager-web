@@ -1,4 +1,4 @@
-<!-- IPK Package Management Card -->
+<!-- Package Management Card: IPK (opkg) or APK (apk), whichever this firmware uses -->
 <div class="mb-4 w-full px-2 leading-normal text-gray-800 lg:px-0">
   <div class="rounded border bg-white shadow">
     <div class="border-b p-3">
@@ -13,7 +13,7 @@
       </h5>
     </div> <!-- border-b p-3 -->
     <div class="p-4">
-      <!-- IPK Installation Section -->
+      <!-- Package Installation Section -->
       <div class="mb-3 rounded bg-gradient-to-r from-slate-50 to-blue-gray-50 border border-slate-200 p-3 flex flex-col">
         <div class="flex items-start">
           <div class="flex-shrink-0 mr-3">
@@ -30,7 +30,7 @@
               <div>
                 <div class="flex items-center gap-3">
                   <!-- Hidden file input -->
-                  <input type="file" x-ref="file" name="package" @change="file_selected()" accept=".ipk,.gz,.xz,.bz2,.tar" class="hidden" id="file-upload" />
+                  <input type="file" x-ref="file" name="package" @change="file_selected()" accept="{{pkg_accept}}" class="hidden" id="file-upload" />
                   
                   <!-- File selection button with drag and drop -->
                   <label for="file-upload" 
@@ -111,6 +111,12 @@
                   <span x-text="getDownloadButtonText()"></span>
                 </button>
               </div> <!-- flex items-center gap-3 -->
+              <label class="mt-2 inline-flex items-center gap-2 text-sm text-blue-900 cursor-pointer select-none">
+                <input type="checkbox" x-model="verify_tls" :disabled="downloading_url"
+                       class="h-4 w-4 rounded border-blue-300 text-blue-600 focus:ring-blue-500">
+                <span>{{locales["verify_tls_label"]}}</span>
+                <span class="text-xs text-blue-700/70">{{locales["verify_tls_hint"]}}</span>
+              </label>
             </div> <!-- mb-4 -->
           </div> <!-- flex-grow -->
         </div> <!-- flex items-start -->

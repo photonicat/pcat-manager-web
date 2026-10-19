@@ -1,420 +1,1162 @@
 {% extends '_base.html' %}
+{% block page_title %}{{locales["page_phone"]}}{% endblock %}
 
 {% block content %}
 <div class="container mx-auto w-full pt-10 pb-12 sm:pt-24 sm:pb-12 md:pt-28 lg:px-4" x-data="voiceCallsManager()" x-init="init()">
+
+  <!-- ==================== Incoming call, floating ====================
+       Fixed and above everything: a call arrives while you are somewhere
+       else on the page, and the answer buttons are no use if you have to
+       find them first. Ignoring it drops back to the page without touching
+       the call, so this is dismissable but never missable. -->
+  <template x-if="incomingCall.active && ignoredNumber !== (incomingCall.number || '?')">
+    <div class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-gray-900/60 backdrop-blur-sm"
+      @keydown.escape.window="ignoreCall()">
+      <div class="w-full max-w-sm rounded-3xl bg-white shadow-2xl p-7 text-center">
+        <div class="relative inline-flex items-center justify-center w-24 h-24 mb-4">
+          <span class="absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-40 animate-ping"></span>
+          <span class="relative inline-flex items-center justify-center w-20 h-20 bg-blue-500 rounded-full">
+            <svg class="h-9 w-9 text-white" fill="currentColor" viewBox="0 0 20 20">
+              <path d="M2 3a1 1 0 011-1h2.153a1 1 0 01.986.836l.74 4.435a1 1 0 01-.54 1.06l-1.548.773a11.037 11.037 0 006.105 6.105l.774-1.548a1 1 0 011.059-.54l4.435.74a1 1 0 01.836.986V17a1 1 0 01-1 1h-2C7.82 18 2 12.18 2 5V3z"></path>
+            </svg>
+          </span>
+        </div>
+        <p class="text-xs uppercase tracking-widest text-blue-600 font-semibold">{{ locales.voice_incoming_call }}</p>
+        <p class="text-2xl font-semibold text-gray-900 mt-1" x-text="callerTitle(incomingCall.number)"></p>
+        <!-- always the full number, even when a contact matched: knowing who
+             it claims to be is not the same as knowing what number called.
+             Hidden only when the headline already *is* the number. -->
+        <p class="text-base font-mono text-gray-600 mt-1 h-6"
+          x-show="incomingCall.number && callerTitle(incomingCall.number) !== incomingCall.number"
+          x-text="incomingCall.number || ''"></p>
+
+        <div class="mt-6 grid grid-cols-2 gap-3">
+          <button @click="answerCall()" :disabled="answeringCall"
+            class="col-span-2 flex items-center justify-center gap-2 py-3.5 rounded-2xl bg-green-500 hover:bg-green-600 disabled:bg-gray-300 text-white font-semibold shadow-lg transition-all active:scale-95">
+            <svg class="h-5 w-5" fill="currentColor" viewBox="0 0 20 20">
+              <path d="M2 3a1 1 0 011-1h2.153a1 1 0 01.986.836l.74 4.435a1 1 0 01-.54 1.06l-1.548.773a11.037 11.037 0 006.105 6.105l.774-1.548a1 1 0 011.059-.54l4.435.74a1 1 0 01.836.986V17a1 1 0 01-1 1h-2C7.82 18 2 12.18 2 5V3z"></path>
+            </svg>
+            {{ locales.voice_pickup }}
+          </button>
+
+          <button @click="silenceRinger()" :disabled="ringerSilenced"
+            class="flex items-center justify-center gap-2 py-3 rounded-2xl bg-gray-100 hover:bg-gray-200 disabled:opacity-50 text-gray-700 font-medium transition-all active:scale-95">
+            <svg class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M13.73 21a2 2 0 01-3.46 0M18.63 13A17.9 17.9 0 0118 8M6.26 6.26A5.86 5.86 0 006 8c0 7-3 9-3 9h14M18 8a6 6 0 00-9.33-5M1 1l22 22"></path>
+            </svg>
+            {{ locales.voice_silence }}
+          </button>
+
+          <button @click="ignoreCall()"
+            class="flex items-center justify-center gap-2 py-3 rounded-2xl bg-gray-100 hover:bg-gray-200 text-gray-700 font-medium transition-all active:scale-95">
+            <svg class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"></path>
+            </svg>
+            {{ locales.voice_ignore }}
+          </button>
+
+          <button @click="hangupCall()" :disabled="hangingUpCall"
+            class="col-span-2 flex items-center justify-center gap-2 py-3.5 rounded-2xl bg-red-500 hover:bg-red-600 disabled:bg-gray-300 text-white font-semibold shadow-lg transition-all active:scale-95">
+            <svg class="h-5 w-5 rotate-[135deg]" fill="currentColor" viewBox="0 0 20 20">
+              <path d="M2 3a1 1 0 011-1h2.153a1 1 0 01.986.836l.74 4.435a1 1 0 01-.54 1.06l-1.548.773a11.037 11.037 0 006.105 6.105l.774-1.548a1 1 0 011.059-.54l4.435.74a1 1 0 01.836.986V17a1 1 0 01-1 1h-2C7.82 18 2 12.18 2 5V3z"></path>
+            </svg>
+            {{ locales.voice_refuse }}
+          </button>
+        </div>
+        <p class="mt-3 h-4 text-xs text-gray-400" x-cloak
+          x-show="ringerSilenced" x-text="'{{ locales.voice_silence }} \u2713'"></p>
+      </div>
+    </div>
+  </template>
+
+  <!-- ==================== Settings drawer ====================
+       Slides in from the right on desktop, full-height sheet on mobile. Kept
+       out of the page flow so /phone is the dialer and the call lists; this
+       is everything you configure once. -->
+  <template x-if="settingsOpen">
+    <div class="fixed inset-0 z-40 flex justify-end bg-gray-900/50 backdrop-blur-sm"
+      @click.self="settingsOpen = false" @keydown.escape.window="settingsOpen = false">
+      <div class="w-full sm:max-w-md h-full bg-white shadow-2xl flex flex-col">
+        <div class="flex items-center justify-between px-5 py-4 border-b border-gray-200 flex-shrink-0">
+          <h2 class="font-bold uppercase text-gray-600 tracking-wide text-sm">{{ locales.voice_settings }}</h2>
+          <button @click="settingsOpen = false"
+            class="p-2 -mr-2 rounded-lg text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors">
+            <svg class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"></path>
+            </svg>
+          </button>
+        </div>
+        <div class="flex-1 overflow-y-auto px-5 py-5">
+          {% include '_phone_settings.html' %}
+        </div>
+      </div>
+    </div>
+  </template>
+
   <div class="flex items-center justify-between">
     <h1 class="px-1 py-4 font-bold uppercase text-gray-600">
-      {{ locales["nav_phone"] }}
+      {{ locales.nav_phone }}
     </h1>
+    <div class="flex items-center space-x-3">
+      <!-- Audio status chip -->
+      <div class="flex items-center space-x-2 px-3 py-1 rounded-full text-xs font-medium"
+        :class="audio.connected ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-500'">
+        <span class="w-2 h-2 rounded-full"
+          :class="audio.connected ? 'bg-green-500 animate-pulse' : 'bg-gray-400'"></span>
+        <span x-text="audio.connected ? 'Audio live' : 'Audio idle'"></span>
+      </div>
+      <!-- everything you set once, out of the way of the dialer -->
+      <button @click="settingsOpen = true" :title="'{{ locales.voice_settings }}'"
+        class="flex items-center space-x-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-gray-100 text-gray-600 hover:bg-gray-200 transition-colors">
+        <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path>
+          <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
+        </svg>
+        <span class="hidden sm:inline">{{ locales.voice_settings }}</span>
+      </button>
+    </div>
   </div>
 
   <div class="mb-4 w-full px-2 leading-normal text-gray-800 md:px-0">
-    <div class="grow rounded border bg-white shadow">
-      <div class="px-5 py-3">
-        {% include '_notification.html' %}
+    {% include '_notification.html' %}
 
-        <!-- Enhanced Phone Interface -->
-        <div class="mb-8">
-          <div class="bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-100 rounded-2xl p-8 border border-slate-200 shadow-xl">
-            <div class="text-center mb-6">
-              <div class="inline-flex items-center justify-center w-16 h-16 bg-gradient-to-r from-blue-500 to-indigo-600 rounded-full mb-4 shadow-lg">
-                <svg class="h-8 w-8 text-white" fill="currentColor" viewBox="0 0 20 20">
+    <!-- Mic needs HTTPS banner -->
+    <template x-if="!secure">
+      <div class="mb-4 flex items-start p-4 bg-amber-50 border border-amber-300 rounded-xl text-sm text-amber-900">
+        <svg class="h-5 w-5 mr-3 mt-0.5 flex-shrink-0 text-amber-500" fill="currentColor" viewBox="0 0 20 20">
+          <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd"></path>
+        </svg>
+        <div>
+          <p class="font-semibold">You can hear calls, but the microphone needs HTTPS.</p>
+          <p class="mt-1">Open <a :href="httpsUrl" class="underline font-mono font-semibold" x-text="httpsUrl"></a>
+            and accept the certificate warning to talk from this page.</p>
+        </div>
+      </div>
+    </template>
+
+    <!-- ============ In-call panel (incoming / active / dialing) ============ -->
+    <div x-show="incomingCall.active || callStatus.hasActiveCalls || dialing" x-cloak
+      class="mb-8 bg-gradient-to-br from-slate-50 to-slate-100 rounded-2xl p-6 sm:p-8 border border-slate-200 shadow-lg">
+
+      <!-- ===== State: incoming call ===== -->
+      <template x-if="incomingCall.active && ignoredNumber !== (incomingCall.number || '?')">
+        <div class="text-center py-6">
+          <p class="text-sm uppercase tracking-widest text-blue-600 font-semibold">{{ locales.voice_incoming }}</p>
+          <p class="text-2xl font-semibold text-gray-900 mt-1" x-text="callerTitle(incomingCall.number)"></p>
+          <p class="text-base font-mono text-gray-500" x-text="incomingCall.number || ''"></p>
+        </div>
+      </template>
+
+      <!-- ===== State: active call =====
+           Gated on isConnected(), not merely on hasActiveCalls: the modem
+           reports a CLCC row from the moment it starts dialling, so the old
+           condition claimed "In call" with a running timer about half a second
+           after tapping Call -- while the far end went on ringing, silently,
+           for another ten seconds. -->
+      <template x-if="!incomingCall.active && callStatus.hasActiveCalls && isConnected()">
+        <div class="text-center py-6">
+          <p class="text-sm uppercase tracking-widest text-green-600 font-semibold mb-1">{{ locales.voice_in_call }}</p>
+          <p class="text-3xl font-semibold text-gray-900" x-text="contactName(activeNumber()) || activeNumber()"></p>
+          <p class="text-base font-mono text-gray-500 mt-1 h-5" x-text="contactName(activeNumber()) ? activeNumber() : ''"></p>
+          <p class="text-xl font-mono text-gray-500 mt-2" x-text="callTimer"></p>
+          <p x-show="isRecording()" x-cloak class="mt-1 text-xs font-semibold text-red-500 animate-pulse">
+            ● REC <span x-text="recTime()"></span>
+          </p>
+
+          <!-- level meters -->
+          <div class="max-w-xs mx-auto mt-5 space-y-2">
+            <div class="flex items-center space-x-2 text-xs text-gray-500">
+              <span class="w-8 text-right">Rx</span>
+              <div class="flex-1 h-2 bg-gray-200 rounded-full overflow-hidden">
+                <div class="h-2 bg-green-500 rounded-full transition-all duration-100" :style="'width:' + audio.rxLevel + '%'"></div>
+              </div>
+            </div>
+            <div class="flex items-center space-x-2 text-xs text-gray-500">
+              <span class="w-8 text-right">Mic</span>
+              <div class="flex-1 h-2 bg-gray-200 rounded-full overflow-hidden">
+                <div class="h-2 rounded-full transition-all duration-100"
+                  :class="audio.muted ? 'bg-gray-400' : 'bg-blue-500'"
+                  :style="'width:' + audio.txLevel + '%'"></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="flex justify-center items-center space-x-6 mt-6">
+            <!-- record -->
+            <button @click="toggleRecord()" :disabled="recToggling"
+              :class="isRecording() ? 'bg-red-600 hover:bg-red-700' : 'bg-slate-600 hover:bg-slate-700'"
+              class="flex items-center justify-center h-12 w-12 text-white rounded-full shadow transition-all hover:scale-105"
+              :title="isRecording() ? locales.voice_stop_record : locales.voice_record">
+              <span x-show="!isRecording()" class="block h-4 w-4 rounded-full border-2 border-white bg-red-500"></span>
+              <span x-show="isRecording()" x-cloak class="block h-3.5 w-3.5 rounded-sm bg-white animate-pulse"></span>
+            </button>
+            <!-- mute -->
+            <button @click="toggleMute()"
+              :class="audio.muted ? 'bg-amber-500 hover:bg-amber-600' : 'bg-slate-600 hover:bg-slate-700'"
+              class="flex items-center justify-center h-12 w-12 text-white rounded-full shadow transition-all hover:scale-105"
+              :title="audio.muted ? 'Unmute' : 'Mute'">
+              <svg x-show="!audio.muted" class="h-5 w-5" fill="currentColor" viewBox="0 0 20 20">
+                <path fill-rule="evenodd" d="M7 4a3 3 0 016 0v4a3 3 0 11-6 0V4zm4 10.93A7.001 7.001 0 0017 8a1 1 0 10-2 0A5 5 0 015 8a1 1 0 00-2 0 7.001 7.001 0 006 6.93V17H6a1 1 0 100 2h8a1 1 0 100-2h-3v-2.07z" clip-rule="evenodd"></path>
+              </svg>
+              <svg x-show="audio.muted" class="h-5 w-5" fill="currentColor" viewBox="0 0 20 20">
+                <path fill-rule="evenodd" d="M13.477 14.89A6 6 0 015.11 6.524l8.367 8.368zm1.414-1.414L6.524 5.11a6 6 0 018.367 8.367zM18 10a8 8 0 11-16 0 8 8 0 0116 0z" clip-rule="evenodd"></path>
+              </svg>
+            </button>
+            <!-- hangup -->
+            <button @click="hangupCall()" :disabled="hangingUpCall"
+              class="flex items-center justify-center h-16 w-16 bg-red-500 hover:bg-red-600 disabled:bg-gray-300 text-white rounded-full shadow-lg transition-all hover:scale-105 active:scale-95">
+              <svg class="h-7 w-7 rotate-[135deg]" fill="currentColor" viewBox="0 0 20 20">
+                <path d="M2 3a1 1 0 011-1h2.153a1 1 0 01.986.836l.74 4.435a1 1 0 01-.54 1.06l-1.548.773a11.037 11.037 0 006.105 6.105l.774-1.548a1 1 0 011.059-.54l4.435.74a1 1 0 01.836.986V17a1 1 0 01-1 1h-2C7.82 18 2 12.18 2 5V3z"></path>
+              </svg>
+            </button>
+            <!-- reconnect audio -->
+            <button @click="startAudio()" x-show="!audio.connected"
+              class="flex items-center justify-center h-12 w-12 bg-blue-500 hover:bg-blue-600 text-white rounded-full shadow transition-all hover:scale-105"
+              title="Connect audio">
+              <svg class="h-5 w-5" fill="currentColor" viewBox="0 0 20 20">
+                <path fill-rule="evenodd" d="M9.383 3.076A1 1 0 0110 4v12a1 1 0 01-1.707.707L4.586 13H2a1 1 0 01-1-1V8a1 1 0 011-1h2.586l3.707-3.707a1 1 0 011.09-.217zM15.657 6.343a1 1 0 011.414 0A9.972 9.972 0 0119 12a9.972 9.972 0 01-1.929 5.657 1 1 0 01-1.414-1.414A7.972 7.972 0 0017 12a7.972 7.972 0 00-1.343-4.243 1 1 0 010-1.414z" clip-rule="evenodd"></path>
+              </svg>
+            </button>
+          </div>
+        </div>
+      </template>
+
+      <!-- ===== State: dialing / ringing =====
+           Covers the whole pre-connect window, not just the fraction of a
+           second the make POST is in flight: `dialing` clears as soon as that
+           request returns, but the call is only alerting by then. Setup takes
+           seconds that we do not control (~2s of it is EPS fallback off 5G-SA
+           before the INVITE even goes out), so the least we can do is say so
+           and offer a way out. -->
+      <template x-if="!incomingCall.active && (dialing || (callStatus.hasActiveCalls && !isConnected()))">
+        <div class="text-center py-10">
+          <div class="relative inline-block mb-4">
+            <div class="animate-spin rounded-full h-12 w-12 border-4 border-orange-200"></div>
+            <div class="animate-spin rounded-full h-12 w-12 border-4 border-orange-500 border-t-transparent absolute top-0"></div>
+          </div>
+          <p class="text-lg font-semibold text-gray-800"
+            x-text="callState() === 'alerting' ? locales.voice_ringing : locales.voice_calling"></p>
+          <p class="text-2xl font-mono text-orange-600" x-text="activeNumber() || dialNumber"></p>
+          <div x-show="callStatus.hasActiveCalls" class="mt-6">
+            <button @click="hangupCall()" :disabled="hangingUpCall"
+              class="inline-flex items-center justify-center h-14 w-14 bg-red-500 hover:bg-red-600 disabled:bg-gray-300 text-white rounded-full shadow-lg transition-all hover:scale-105 active:scale-95"
+              :title="locales.voice_cancel_call">
+              <svg class="h-6 w-6 rotate-[135deg]" fill="currentColor" viewBox="0 0 20 20">
+                <path d="M2 3a1 1 0 011-1h2.153a1 1 0 01.986.836l.74 4.435a1 1 0 01-.54 1.06l-1.548.773a11.037 11.037 0 006.105 6.105l.774-1.548a1 1 0 011.059-.54l4.435.74a1 1 0 01.836.986V17a1 1 0 01-1 1h-2C7.82 18 2 12.18 2 5V3z"></path>
+              </svg>
+            </button>
+          </div>
+        </div>
+      </template>
+    </div>
+
+    <!-- ============ Idle: iPhone-style dialer + recents + contacts ============ -->
+    <template x-if="!incomingCall.active && !callStatus.hasActiveCalls && !dialing">
+      <div>
+        <!-- mobile tab bar -->
+        <div class="mb-4 flex sm:hidden bg-gray-100 rounded-xl p-1">
+          <button @click="tab = 'recents'"
+            :class="tab === 'recents' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500'"
+            class="flex-1 flex flex-col items-center py-2 text-xs font-medium rounded-lg transition-all">
+            <svg class="h-5 w-5 mb-0.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+            </svg>
+            <span>{{ locales.voice_recents }}</span>
+          </button>
+          <button @click="tab = 'contacts'"
+            :class="tab === 'contacts' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500'"
+            class="flex-1 flex flex-col items-center py-2 text-xs font-medium rounded-lg transition-all">
+            <svg class="h-5 w-5 mb-0.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"></path>
+            </svg>
+            <span>{{ locales.voice_contacts }}</span>
+          </button>
+          <button @click="tab = 'recordings'; loadRecordings()"
+            :class="tab === 'recordings' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500'"
+            class="flex-1 flex flex-col items-center py-2 text-xs font-medium rounded-lg transition-all">
+            <svg class="h-5 w-5 mb-0.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 18v3m-4 0h8M12 15a4 4 0 004-4V7a4 4 0 10-8 0v4a4 4 0 004 4zM19 11a7 7 0 01-14 0"></path>
+            </svg>
+            <span>{{ locales.voice_recordings }}</span>
+          </button>
+          <button @click="tab = 'keypad'"
+            :class="tab === 'keypad' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500'"
+            class="flex-1 flex flex-col items-center py-2 text-xs font-medium rounded-lg transition-all">
+            <svg class="h-5 w-5 mb-0.5" fill="currentColor" viewBox="0 0 24 24">
+              <circle cx="6" cy="5" r="1.7"></circle><circle cx="12" cy="5" r="1.7"></circle><circle cx="18" cy="5" r="1.7"></circle>
+              <circle cx="6" cy="11" r="1.7"></circle><circle cx="12" cy="11" r="1.7"></circle><circle cx="18" cy="11" r="1.7"></circle>
+              <circle cx="6" cy="17" r="1.7"></circle><circle cx="12" cy="17" r="1.7"></circle><circle cx="18" cy="17" r="1.7"></circle>
+            </svg>
+            <span>{{ locales.voice_keypad }}</span>
+          </button>
+        </div>
+
+        <div class="sm:grid sm:grid-cols-5 sm:gap-6 sm:items-start">
+          <!-- ===== Dialer (keypad hidden on desktop) ===== -->
+          <div class="sm:col-span-2 sm:block" :class="tab === 'keypad' ? '' : 'hidden'">
+            <div class="bg-white rounded-2xl border border-gray-200 shadow-lg p-6">
+              <!-- number display -->
+              <div class="relative mb-1">
+                <input x-model="dialNumber" type="tel" placeholder="{{ locales.voice_enter_number }}"
+                  @keyup.enter="makeCall()"
+                  class="w-full bg-transparent text-3xl font-semibold tracking-wide text-center text-gray-900 placeholder-gray-300 py-3 px-10 focus:outline-none sm:bg-slate-50 sm:border sm:border-slate-200 sm:rounded-2xl sm:shadow-inner sm:text-2xl sm:font-mono">
+                <button x-show="dialNumber" @click="dialNumber = dialNumber.slice(0, -1)"
+                  @mousedown.prevent
+                  class="absolute right-1 top-1/2 -translate-y-1/2 p-2 text-gray-400 hover:text-gray-600">
+                  <svg class="h-6 w-6" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2M3 12l6.414 6.414a2 2 0 001.414.586H19a2 2 0 002-2V7a2 2 0 00-2-2h-8.172a2 2 0 00-1.414.586L3 12z"></path>
+                  </svg>
+                </button>
+              </div>
+              <p class="h-5 text-center text-sm font-medium text-gray-500 mb-3" x-text="contactName(dialNumber) || ''"></p>
+
+              <!-- iPhone-style keypad: mobile only -->
+              <div class="grid grid-cols-3 gap-y-3 gap-x-6 mb-5 max-w-[264px] mx-auto sm:hidden">
+                <template x-for="k in keypadKeys" :key="k[0]">
+                  <button @click="dialNumber += k[0]"
+                    class="mx-auto flex h-16 w-16 flex-col items-center justify-center rounded-full bg-gray-100 hover:bg-gray-200 active:bg-gray-300 transition-colors select-none">
+                    <span class="text-2xl font-semibold text-gray-900 leading-none" x-text="k[0]"></span>
+                    <span class="text-[10px] font-medium tracking-widest text-gray-500 leading-none mt-1" x-text="k[1]"></span>
+                  </button>
+                </template>
+              </div>
+
+              <!-- call button: round on mobile, full-width on desktop -->
+              <div class="flex justify-center sm:hidden mb-1">
+                <button @click="makeCall()" :disabled="!dialNumber"
+                  class="flex items-center justify-center h-16 w-16 bg-green-500 hover:bg-green-600 disabled:bg-gray-300 text-white rounded-full shadow-lg transition-all hover:scale-105 active:scale-95">
+                  <svg class="h-7 w-7" fill="currentColor" viewBox="0 0 20 20">
+                    <path d="M2 3a1 1 0 011-1h2.153a1 1 0 01.986.836l.74 4.435a1 1 0 01-.54 1.06l-1.548.773a11.037 11.037 0 006.105 6.105l.774-1.548a1 1 0 011.059-.54l4.435.74a1 1 0 01.836.986V17a1 1 0 01-1 1h-2C7.82 18 2 12.18 2 5V3z"></path>
+                  </svg>
+                </button>
+              </div>
+              <button @click="makeCall()" :disabled="!dialNumber"
+                class="hidden sm:flex w-full items-center justify-center space-x-2 h-12 rounded-xl bg-green-500 hover:bg-green-600 disabled:bg-gray-300 text-white font-semibold shadow transition-colors">
+                <svg class="h-5 w-5" fill="currentColor" viewBox="0 0 20 20">
                   <path d="M2 3a1 1 0 011-1h2.153a1 1 0 01.986.836l.74 4.435a1 1 0 01-.54 1.06l-1.548.773a11.037 11.037 0 006.105 6.105l.774-1.548a1 1 0 011.059-.54l4.435.74a1 1 0 01.836.986V17a1 1 0 01-1 1h-2C7.82 18 2 12.18 2 5V3z"></path>
                 </svg>
-              </div>
-              <h3 class="text-2xl font-bold text-gray-800 mb-2">📞 Smart Dialer</h3>
-              <p class="text-sm text-gray-600">{{locales["voice_call_under_development"]}}</p>
+                <span>{{ locales.voice_make_call }}</span>
+              </button>
+
             </div>
-            
-            <!-- Call Status Display -->
-            <div class="mb-6 p-6 bg-white rounded-2xl border border-slate-200 shadow-lg">
-              <div class="min-h-[80px] flex items-center justify-center">
-                <!-- Dialing State -->
-                <div x-show="dialing" class="flex flex-col items-center space-y-3 text-orange-500">
-                  <div class="relative">
-                    <div class="animate-spin rounded-full h-12 w-12 border-4 border-orange-200"></div>
-                    <div class="animate-spin rounded-full h-12 w-12 border-4 border-orange-500 border-t-transparent absolute top-0"></div>
+          </div>
+
+          <!-- ===== Recents / Contacts card ===== -->
+          <div class="sm:col-span-3 mt-4 sm:mt-0 sm:block" :class="tab === 'keypad' ? 'hidden' : ''">
+            <div class="bg-white rounded-2xl border border-gray-200 shadow-lg overflow-hidden">
+              <!-- desktop pane switcher -->
+              <div class="hidden sm:flex items-center px-5 pt-4">
+                <div class="flex space-x-1 bg-gray-100 rounded-lg p-1">
+                  <button @click="listTab = 'recents'"
+                    :class="listTab === 'recents' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-800'"
+                    class="px-4 py-1.5 text-sm font-medium rounded-md transition-all">{{ locales.voice_recents }}</button>
+                  <button @click="listTab = 'contacts'"
+                    :class="listTab === 'contacts' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-800'"
+                    class="px-4 py-1.5 text-sm font-medium rounded-md transition-all">{{ locales.voice_contacts }}</button>
+                  <button @click="listTab = 'recordings'; loadRecordings()"
+                    :class="listTab === 'recordings' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-800'"
+                    class="px-4 py-1.5 text-sm font-medium rounded-md transition-all">{{ locales.voice_recordings }}</button>
+                </div>
+              </div>
+
+              <!-- ============ Recents pane ============ -->
+              <div :class="(tab === 'recents' ? '' : 'hidden') + (listTab === 'recents' ? ' sm:block' : ' sm:hidden')">
+                <div class="px-5 py-4 border-b border-gray-100">
+                  <div class="flex items-center justify-between">
+                    <h3 class="text-lg font-bold text-gray-900 sm:hidden">{{ locales.voice_recents }}</h3>
+                    <div class="hidden sm:block"></div>
+                    <div class="flex space-x-2">
+                      <button @click="refreshCallHistory()" :disabled="refreshingHistory"
+                        class="flex items-center px-3 py-2 text-xs font-medium rounded-lg bg-blue-50 text-blue-700 hover:bg-blue-100 disabled:bg-gray-100 disabled:text-gray-400 transition-colors">
+                        <svg class="h-4 w-4 mr-1" :class="refreshingHistory && 'animate-spin'" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                          <path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                        </svg>
+                        <span>{{ locales.voice_refresh }}</span>
+                      </button>
+                      <button @click="clearCallHistory()" :disabled="clearingHistory"
+                        class="flex items-center px-3 py-2 text-xs font-medium rounded-lg bg-red-50 text-red-700 hover:bg-red-100 disabled:bg-gray-100 disabled:text-gray-400 transition-colors">
+                        <span>{{ locales.voice_clear }}</span>
+                      </button>
+                    </div>
                   </div>
-                  <div class="text-center">
-                    <p class="text-lg font-semibold text-gray-800">{{locales["voice_calling"]}}</p>
-                    <p class="text-xl font-mono text-orange-600" x-text="dialNumber"></p>
+
+                  <!-- filter tabs -->
+                  <div class="mt-3 flex space-x-1 bg-gray-100 rounded-lg p-1">
+                    <template x-for="f in [['all', locales['voice_all_calls']], ['outgoing', locales['voice_outgoing']], ['incoming', locales['voice_incoming']], ['missed', locales['voice_missed']]]" :key="f[0]">
+                      <button @click="historyFilter = f[0]"
+                        :class="historyFilter === f[0] ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-800'"
+                        class="flex-1 px-3 py-1.5 text-sm font-medium rounded-md transition-all" x-text="f[1]"></button>
+                    </template>
                   </div>
                 </div>
-                
-                <!-- Incoming Call Alert -->
-                <div x-show="incomingCall.active" class="text-center p-4 bg-gradient-to-r from-yellow-50 to-orange-50 border-2 border-orange-300 rounded-xl">
-                  <div class="text-6xl mb-3 animate-bounce">📞</div>
-                  <h3 class="text-xl font-bold text-orange-800 mb-2">INCOMING CALL</h3>
-                  <p class="text-lg font-mono text-orange-700 mb-2" x-text="incomingCall.number || 'Unknown Number'"></p>
-                  <p class="text-sm text-orange-600 mb-4">
-                    Ring #<span x-text="incomingCall.ring_count"></span> · 
-                    <span x-text="incomingCall.duration + 's'"></span>
-                  </p>
+
+                <!-- loading -->
+                <div x-show="callHistory.loading" class="text-center py-12">
+                  <div class="animate-spin rounded-full h-8 w-8 border-4 border-blue-200 border-t-blue-500 mx-auto"></div>
                 </div>
-                
-                <!-- Active Calls -->
-                <div x-show="!dialing && !callStatus.loading && callStatus.hasActiveCalls && !incomingCall.active" class="w-full">
-                  <template x-for="call in callStatus.calls" :key="call.id">
-                    <div class="flex items-center justify-between p-4 bg-gradient-to-r from-green-50 to-emerald-50 border border-green-200 rounded-xl shadow-sm">
-                      <div class="flex items-center space-x-3">
-                        <div class="w-3 h-3 bg-green-500 rounded-full animate-pulse"></div>
-                        <div>
-                          <p class="font-bold text-green-900 text-lg" x-text="call.number"></p>
-                          <p class="text-sm text-green-700 capitalize" x-text="call.status"></p>
+
+                <!-- list -->
+                <div x-show="!callHistory.loading && filteredCallHistory().length > 0" class="divide-y divide-gray-100">
+                  <template x-for="call in filteredCallHistory()" :key="call.id">
+                    <div class="flex items-center px-5 py-3 hover:bg-gray-50 transition-colors">
+                      <div class="flex-shrink-0 mr-4">
+                        <div class="w-9 h-9 rounded-full flex items-center justify-center"
+                          :class="call.type === 'outgoing' ? 'bg-green-100 text-green-600' : call.type === 'incoming' ? 'bg-blue-100 text-blue-600' : 'bg-red-100 text-red-600'">
+                          <svg x-show="call.type === 'outgoing'" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M7 17L17 7M17 7H9m8 0v8"></path>
+                          </svg>
+                          <svg x-show="call.type === 'incoming'" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M17 7L7 17M7 17h8m-8 0V9"></path>
+                          </svg>
+                          <svg x-show="call.type === 'missed'" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"></path>
+                          </svg>
                         </div>
+                      </div>
+                      <div class="flex-1 min-w-0 cursor-pointer" @click="dialNumber = call.number; tab = 'keypad'">
+                        <p class="font-semibold truncate"
+                          :class="call.type === 'missed' ? 'text-red-600' : 'text-gray-900'"
+                          x-text="contactName(call.number) || call.number"></p>
+                        <p class="text-xs text-gray-500">
+                          <span class="font-mono" x-show="contactName(call.number)" x-text="call.number + ' · '"></span>
+                          <span class="capitalize" x-text="call.type"></span>
+                          <!-- Number(): duration arrives as a string, so a
+                               missed call's "0" is truthy and would show a
+                               pointless "· 00:00" next to "Missed". -->
+                          <span x-show="Number(call.duration) > 0"> · <span x-text="fmtSeconds(call.duration)"></span></span>
+                        </p>
+                      </div>
+                      <span class="text-xs text-gray-400 mr-3 whitespace-nowrap" x-text="call.timestamp"></span>
+                      <div class="flex space-x-1">
+                        <button @click="callNumber(call.number)"
+                          class="p-2 text-green-600 hover:bg-green-50 rounded-full transition-colors" title="Call">
+                          <svg class="h-4 w-4" fill="currentColor" viewBox="0 0 20 20">
+                            <path d="M2 3a1 1 0 011-1h2.153a1 1 0 01.986.836l.74 4.435a1 1 0 01-.54 1.06l-1.548.773a11.037 11.037 0 006.105 6.105l.774-1.548a1 1 0 011.059-.54l4.435.74a1 1 0 01.836.986V17a1 1 0 01-1 1h-2C7.82 18 2 12.18 2 5V3z"></path>
+                          </svg>
+                        </button>
+                        <button x-show="!contactName(call.number)" @click="openAddContact(call.number)"
+                          class="p-2 text-blue-500 hover:bg-blue-50 rounded-full transition-colors" title="{{ locales.voice_add_contact }}">
+                          <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M18 9v3m0 0v3m0-3h3m-3 0h-3m-2-5a4 4 0 11-8 0 4 4 0 018 0zM3 20a6 6 0 0112 0v1H3v-1z"></path>
+                          </svg>
+                        </button>
+                        <button @click="deleteCallRecord(call.id)" :disabled="deletingRecord[call.id]"
+                          class="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-full transition-colors" title="{{ locales.voice_delete }}">
+                          <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+                          </svg>
+                        </button>
                       </div>
                     </div>
                   </template>
                 </div>
-              </div>
-            </div>
 
-            <!-- Simplified Dial Interface -->
-            <div class="space-y-8">
-              <!-- Phone Number Input -->
-              <div class="text-center">
-                <div class="bg-gradient-to-br from-slate-800 via-blue-900 to-indigo-900 rounded-2xl p-6 mb-6 shadow-inner border border-slate-600">
-                  <input x-model="dialNumber" type="tel" placeholder="Enter phone number" 
-                    @keyup.enter="makeCall()"
-                    class="w-full bg-transparent text-3xl font-mono text-center placeholder-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-400 focus:ring-opacity-50 rounded-lg p-2 gradient-text"
-                    :disabled="dialing">
+                <!-- empty -->
+                <div x-show="!callHistory.loading && filteredCallHistory().length === 0" class="text-center py-12">
+                  <svg class="mx-auto h-12 w-12 text-gray-300 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z"></path>
+                  </svg>
+                  <p class="text-sm text-gray-500">{{ locales.voice_no_calls }}</p>
                 </div>
               </div>
-              
-              <!-- Custom CSS for gradient text -->
-              <style>
-                .gradient-text {
-                  background: linear-gradient(135deg, #60a5fa 0%, #3b82f6 50%, #1d4ed8 100%);
-                  -webkit-background-clip: text;
-                  -webkit-text-fill-color: transparent;
-                  background-clip: text;
-                  color: transparent;
-                }
-                .gradient-text::placeholder {
-                  background: none;
-                  -webkit-text-fill-color: #d1d5db;
-                  color: #d1d5db;
-                }
-              </style>
 
-              <!-- Three Big Action Buttons -->
-              <div class="flex justify-center space-x-8">
-                <!-- Call Button -->
-                <button @click="makeCall()" :disabled="!dialNumber || dialing" 
-                  class="flex flex-col items-center justify-center h-20 w-20 bg-gradient-to-r from-green-500 to-emerald-500 hover:from-green-600 hover:to-emerald-600 disabled:from-gray-300 disabled:to-gray-300 text-white rounded-full shadow-xl transition-all duration-150 hover:scale-105 active:scale-95">
-                  <svg x-show="!dialing" class="h-8 w-8 mb-1" fill="currentColor" viewBox="0 0 20 20">
-                    <path d="M2 3a1 1 0 011-1h2.153a1 1 0 01.986.836l.74 4.435a1 1 0 01-.54 1.06l-1.548.773a11.037 11.037 0 006.105 6.105l.774-1.548a1 1 0 011.059-.54l4.435.74a1 1 0 01.836.986V17a1 1 0 01-1 1h-2C7.82 18 2 12.18 2 5V3z"></path>
-                  </svg>
-                  <div x-show="dialing" class="animate-spin rounded-full h-6 w-6 border-b-2 border-white mb-1"></div>
-                  <span class="text-sm font-bold" x-text="dialing ? locales['voice_calling'] : locales['voice_make_call']"></span>
-                </button>
-                
-                <!-- Pickup/Answer Button -->
-                <button @click="answerCall()" :disabled="answeringCall"
-                  :class="answeringCall ? 'from-gray-300 to-gray-300' : 'from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700'"
-                  class="flex flex-col items-center justify-center h-20 w-20 bg-gradient-to-r text-white rounded-full shadow-xl transition-all duration-150 hover:scale-105 active:scale-95">
-                  <svg x-show="!answeringCall" class="h-8 w-8 mb-1" fill="currentColor" viewBox="0 0 20 20">
-                    <path d="M2 3a1 1 0 011-1h2.153a1 1 0 01.986.836l.74 4.435a1 1 0 01-.54 1.06l-1.548.773a11.037 11.037 0 006.105 6.105l.774-1.548a1 1 0 011.059-.54l4.435.74a1 1 0 01.836.986V17a1 1 0 01-1 1h-2C7.82 18 2 12.18 2 5V3z"></path>
-                  </svg>
-                  <div x-show="answeringCall" class="animate-spin rounded-full h-6 w-6 border-b-2 border-white mb-1"></div>
-                  <span class="text-sm font-bold" x-text="answeringCall ? 'Answering...' : locales['voice_answer']"></span>
-                </button>
-
-                <!-- Hangup Button -->
-                <button @click="hangupCall()" :disabled="hangingUpCall"
-                  :class="hangingUpCall ? 'from-gray-300 to-gray-300' : 'from-red-500 to-red-600 hover:from-red-600 hover:to-red-700'"
-                  class="flex flex-col items-center justify-center h-20 w-20 bg-gradient-to-r text-white rounded-full shadow-xl transition-all duration-150 hover:scale-105 active:scale-95">
-                  <svg x-show="!hangingUpCall" class="h-8 w-8 mb-1" fill="currentColor" viewBox="0 0 20 20">
-                    <path d="M3.707 2.293a1 1 0 00-1.414 1.414l6.921 6.922c.05.062.105.118.168.167l6.91 6.911a1 1 0 001.415-1.414l-.675-.675a9.001 9.001 0 002.69-8.605l-.04-.1a2 2 0 00-1.73-1.378l-2.8-.4a2 2 0 00-1.908 1.072L9.573 9.573 3.707 2.293z"></path>
-                    <path d="M9.573 9.573L6.8 12.8a16.084 16.084 0 001.392 1.392l3.227-2.773a1 1 0 011.414 0l2.58 2.58 8.684-8.684a1 1 0 10-1.414-1.414l-8.684 8.684-2.58-2.58a1 1 0 000-1.414z"></path>
-                  </svg>
-                  <div x-show="hangingUpCall" class="animate-spin rounded-full h-6 w-6 border-b-2 border-white mb-1"></div>
-                  <span class="text-sm font-bold" x-text="hangingUpCall ? 'Hanging up...' : locales['voice_hangup']"></span>
-                </button>
-              </div>
-              
-              <!-- Enhanced Audio Path Settings -->
-              <div class="mt-6 p-4 bg-gray-50 rounded-xl border border-gray-200">
-                <label class="block text-sm font-semibold text-gray-800 mb-3 flex items-center">
-                  <svg class="h-4 w-4 mr-2 text-gray-600" fill="currentColor" viewBox="0 0 20 20">
-                    <path fill-rule="evenodd" d="M9.383 3.076A1 1 0 0110 4v12a1 1 0 01-1.707.707L4.586 13H2a1 1 0 01-1-1V8a1 1 0 011-1h2.586l3.707-3.707a1 1 0 011.09-.217zM15.657 6.343a1 1 0 011.414 0A9.972 9.972 0 0119 12a9.972 9.972 0 01-1.929 5.657 1 1 0 01-1.414-1.414A7.972 7.972 0 0017 12a7.972 7.972 0 00-1.343-4.243 1 1 0 010-1.414z" clip-rule="evenodd"></path>
-                    <path fill-rule="evenodd" d="M13.243 8.757a1 1 0 011.414 0A5.984 5.984 0 0116 12a5.984 5.984 0 01-1.343 3.243 1 1 0 01-1.414-1.414A3.984 3.984 0 0014 12a3.984 3.984 0 00-.757-2.243 1 1 0 010-1.414z" clip-rule="evenodd"></path>
-                  </svg>
-                  {{locales["voice_audio_path"]}}
-                </label>
-                <select x-model="audioPath" @change="setAudioPath()" class="w-full border border-gray-300 rounded-lg px-4 py-3 text-sm bg-white focus:ring-2 focus:ring-blue-500 focus:border-blue-500 shadow-sm">
-                  <option value="0">🔊 {{locales["voice_speaker"]}} (0)</option>
-                  <option value="1">📞 {{locales["voice_earpiece"]}} (1)</option>
-                  <option value="2">🎧 {{locales["voice_headset"]}} (2)</option>
-                  <option value="3">📶 {{locales["voice_bluetooth"]}} (3)</option>
-                </select>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Enhanced Call History Section -->
-        <div class="bg-gradient-to-br from-white to-gray-50 rounded-2xl border border-gray-200 shadow-xl">
-          <div class="px-6 py-5 border-b border-gray-200">
-            <div class="flex items-center justify-between">
-              <div class="flex items-center">
-                <div class="w-10 h-10 bg-gradient-to-r from-indigo-500 to-purple-600 rounded-full flex items-center justify-center mr-3">
-                  <svg class="h-5 w-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path>
-                  </svg>
+              <!-- ============ Contacts pane ============ -->
+              <div :class="(tab === 'contacts' ? '' : 'hidden') + (listTab === 'contacts' ? ' sm:block' : ' sm:hidden')">
+                <div class="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
+                  <h3 class="text-lg font-bold text-gray-900 sm:hidden">{{ locales.voice_contacts }}</h3>
+                  <div class="hidden sm:block"></div>
+                  <button @click="addingContact ? cancelAddContact() : openAddContact('')"
+                    class="flex items-center px-3 py-2 text-xs font-medium rounded-lg bg-blue-50 text-blue-700 hover:bg-blue-100 transition-colors">
+                    <svg x-show="!addingContact" class="h-4 w-4 mr-1" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"></path>
+                    </svg>
+                    <span x-text="addingContact ? locales.voice_cancel : locales.voice_add_contact"></span>
+                  </button>
                 </div>
-                <div>
-                  <h3 class="text-xl font-bold text-gray-900">📋 {{locales["voice_call_history"]}}</h3>
-                  <p class="text-sm text-gray-600">Recent call activities</p>
-                </div>
-              </div>
-              <div class="flex space-x-2">
-                <button @click="refreshCallHistory()" :disabled="refreshingHistory"
-                  :class="refreshingHistory ? 'bg-gray-200 text-gray-500' : 'bg-blue-100 text-blue-700 hover:bg-blue-200'"
-                  class="flex items-center px-3 py-2 text-xs font-medium rounded-lg transition-colors duration-150">
-                  <svg x-show="!refreshingHistory" class="h-4 w-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
-                  </svg>
-                  <div x-show="refreshingHistory" class="animate-spin rounded-full h-4 w-4 border-2 border-gray-400 border-t-transparent mr-1"></div>
-                  <span x-text="refreshingHistory ? 'Refreshing...' : locales['voice_refresh']"></span>
-                </button>
-                <button @click="clearCallHistory()" :disabled="clearingHistory"
-                  :class="clearingHistory ? 'bg-gray-200 text-gray-500' : 'bg-red-100 text-red-700 hover:bg-red-200'"
-                  class="flex items-center px-3 py-2 text-xs font-medium rounded-lg transition-colors duration-150">
-                  <svg x-show="!clearingHistory" class="h-4 w-4 mr-1" fill="currentColor" viewBox="0 0 20 20">
-                    <path fill-rule="evenodd" d="M9 2a1 1 0 000 2h2a1 1 0 100-2H9z" clip-rule="evenodd"></path>
-                    <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414L7.586 12l-1.293 1.293a1 1 0 101.414 1.414L9 13.414l3.293 3.293a1 1 0 001.414-1.414L12.414 12l1.293-1.293z" clip-rule="evenodd"></path>
-                  </svg>
-                  <div x-show="clearingHistory" class="animate-spin rounded-full h-4 w-4 border-2 border-gray-400 border-t-transparent mr-1"></div>
-                  <span x-text="clearingHistory ? 'Clearing...' : locales['voice_clear']"></span>
-                </button>
-              </div>
-            </div>
-            
-            <!-- Enhanced Filter Tabs -->
-            <div class="mt-4">
-              <div class="flex space-x-1 bg-gray-100 rounded-lg p-1">
-                <button @click="historyFilter = 'all'" 
-                  :class="historyFilter === 'all' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-600 hover:text-gray-900'" 
-                  class="flex-1 px-3 py-2 text-sm font-medium rounded-md transition-all duration-150">
-                  📊 {{locales["voice_all_calls"]}}
-                </button>
-                <button @click="historyFilter = 'outgoing'" 
-                  :class="historyFilter === 'outgoing' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-600 hover:text-gray-900'" 
-                  class="flex-1 px-3 py-2 text-sm font-medium rounded-md transition-all duration-150">
-                  <svg class="inline h-3 w-3 mr-1 text-green-500" fill="currentColor" viewBox="0 0 20 20">
-                    <path fill-rule="evenodd" d="M7.707 3.293a1 1 0 010 1.414L5.414 7H11a7 7 0 117 7v-1a1 1 0 112 0v1a9 9 0 01-9 9H5.414l2.293 2.293a1 1 0 11-1.414 1.414l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 0z" clip-rule="evenodd"></path>
-                  </svg>
-                  {{locales["voice_outgoing"]}}
-                </button>
-                <button @click="historyFilter = 'incoming'" 
-                  :class="historyFilter === 'incoming' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-600 hover:text-gray-900'" 
-                  class="flex-1 px-3 py-2 text-sm font-medium rounded-md transition-all duration-150">
-                  <svg class="inline h-3 w-3 mr-1 text-blue-500" fill="currentColor" viewBox="0 0 20 20">
-                    <path fill-rule="evenodd" d="M12.293 3.293a1 1 0 011.414 0l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414-1.414L14.586 9H9a7 7 0 00-7 7v1a1 1 0 01-2 0v-1a9 9 0 019-9h5.586l-2.293-2.293a1 1 0 010-1.414z" clip-rule="evenodd"></path>
-                  </svg>
-                  {{locales["voice_incoming"]}}
-                </button>
-                <button @click="historyFilter = 'missed'" 
-                  :class="historyFilter === 'missed' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-600 hover:text-gray-900'" 
-                  class="flex-1 px-3 py-2 text-sm font-medium rounded-md transition-all duration-150">
-                  <svg class="inline h-3 w-3 mr-1 text-red-500" fill="currentColor" viewBox="0 0 20 20">
-                    <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd"></path>
-                  </svg>
-                  {{locales["voice_missed"]}}
-                </button>
-              </div>
-            </div>
-          </div>
 
-          <!-- Enhanced Call History Loading -->
-          <div x-show="callHistory.loading" class="text-center py-16">
-            <div class="relative">
-              <div class="animate-spin rounded-full h-12 w-12 border-4 border-gray-200 mx-auto"></div>
-              <div class="animate-spin rounded-full h-12 w-12 border-4 border-blue-500 border-t-transparent absolute top-0 mx-auto"></div>
-            </div>
-            <div class="mt-4">
-              <p class="text-lg font-medium text-gray-900">🔄 Loading call history...</p>
-              <p class="text-sm text-gray-600">Please wait while we fetch your recent calls</p>
-            </div>
-          </div>
-
-          <!-- Enhanced Call History List -->
-          <div x-show="!callHistory.loading && filteredCallHistory.length > 0" class="p-4">
-            <div class="space-y-3">
-              <template x-for="call in filteredCallHistory" :key="call.id">
-                <div class="flex items-center justify-between p-4 bg-white border border-gray-200 rounded-xl shadow-sm hover:shadow-md transition-shadow duration-150">
-                  <div class="flex items-center space-x-4 flex-1">
-                    <!-- Call Type Icon -->
-                    <div class="flex-shrink-0">
-                      <div x-show="call.type === 'outgoing'" class="w-10 h-10 bg-green-100 rounded-full flex items-center justify-center">
-                        <svg class="h-5 w-5 text-green-600" fill="currentColor" viewBox="0 0 20 20">
-                          <path fill-rule="evenodd" d="M7.707 3.293a1 1 0 010 1.414L5.414 7H11a7 7 0 117 7v-1a1 1 0 112 0v1a9 9 0 01-9 9H5.414l2.293 2.293a1 1 0 11-1.414 1.414l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 0z" clip-rule="evenodd"></path>
-                        </svg>
-                      </div>
-                      <div x-show="call.type === 'incoming'" class="w-10 h-10 bg-blue-100 rounded-full flex items-center justify-center">
-                        <svg class="h-5 w-5 text-blue-600" fill="currentColor" viewBox="0 0 20 20">
-                          <path fill-rule="evenodd" d="M12.293 3.293a1 1 0 011.414 0l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414-1.414L14.586 9H9a7 7 0 00-7 7v1a1 1 0 01-2 0v-1a9 9 0 019-9h5.586l-2.293-2.293a1 1 0 010-1.414z" clip-rule="evenodd"></path>
-                        </svg>
-                      </div>
-                      <div x-show="call.type === 'missed'" class="w-10 h-10 bg-red-100 rounded-full flex items-center justify-center">
-                        <svg class="h-5 w-5 text-red-600" fill="currentColor" viewBox="0 0 20 20">
-                          <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd"></path>
-                        </svg>
-                      </div>
-                    </div>
-                    
-                    <!-- Call Details -->
-                    <div class="flex-1">
-                      <div class="flex items-center justify-between">
-                        <h4 class="text-lg font-semibold text-gray-900 font-mono" x-text="call.number"></h4>
-                        <span class="text-sm text-gray-500" x-text="call.timestamp"></span>
-                      </div>
-                      <div class="flex items-center space-x-4 mt-1">
-                        <span class="text-sm font-medium capitalize"
-                          :class="call.type === 'outgoing' ? 'text-green-700' : call.type === 'incoming' ? 'text-blue-700' : 'text-red-700'"
-                          x-text="call.type"></span>
-                        <span class="text-sm text-gray-600" x-text="call.duration || 'N/A'"></span>
-                      </div>
-                    </div>
-                    
-                    <!-- Actions -->
+                <!-- add form -->
+                <div x-show="addingContact" x-cloak class="px-5 py-4 bg-slate-50 border-b border-gray-100">
+                  <div class="space-y-3">
+                    <input x-model="newContact.name" type="text" maxlength="64" placeholder="{{ locales.voice_contact_name }}"
+                      x-ref="contactNameInput"
+                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none">
+                    <input x-model="newContact.number" type="tel" maxlength="32" placeholder="{{ locales.voice_contact_number }}"
+                      @keyup.enter="saveContact()"
+                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none">
                     <div class="flex space-x-2">
-                      <button @click="dialNumber = call.number" 
-                        class="flex items-center justify-center w-8 h-8 text-green-600 bg-green-50 hover:bg-green-100 rounded-full transition-colors duration-150"
-                        title="Call Back">
-                        <svg class="h-4 w-4" fill="currentColor" viewBox="0 0 20 20">
-                          <path d="M2 3a1 1 0 011-1h2.153a1 1 0 01.986.836l.74 4.435a1 1 0 01-.54 1.06l-1.548.773a11.037 11.037 0 006.105 6.105l.774-1.548a1 1 0 011.059-.54l4.435.74a1 1 0 01.836.986V17a1 1 0 01-1 1h-2C7.82 18 2 12.18 2 5V3z"></path>
-                        </svg>
+                      <button @click="saveContact()" :disabled="savingContact || !newContact.name.trim() || !newContact.number.trim()"
+                        class="flex-1 px-4 py-2 text-sm font-semibold rounded-lg bg-pcatblue text-white hover:bg-blue-600 disabled:bg-gray-300 transition-colors">
+                        {{ locales.voice_save }}
                       </button>
-                      <button @click="deleteCallRecord(call.id)" :disabled="deletingRecord[call.id]"
-                        :class="deletingRecord[call.id] ? 'bg-gray-200 text-gray-500' : 'bg-red-50 text-red-600 hover:bg-red-100'"
-                        class="flex items-center justify-center w-8 h-8 rounded-full transition-colors duration-150"
-                        title="Delete">
-                        <svg x-show="!deletingRecord[call.id]" class="h-4 w-4" fill="currentColor" viewBox="0 0 20 20">
-                          <path fill-rule="evenodd" d="M9 2a1 1 0 000 2h2a1 1 0 100-2H9z" clip-rule="evenodd"></path>
-                          <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414L7.586 12l-1.293 1.293a1 1 0 101.414 1.414L9 13.414l3.293 3.293a1 1 0 001.414-1.414L12.414 12l1.293-1.293z" clip-rule="evenodd"></path>
-                        </svg>
-                        <div x-show="deletingRecord[call.id]" class="animate-spin rounded-full h-4 w-4 border-2 border-gray-400 border-t-transparent"></div>
+                      <button @click="cancelAddContact()"
+                        class="px-4 py-2 text-sm font-medium rounded-lg bg-gray-200 text-gray-700 hover:bg-gray-300 transition-colors">
+                        {{ locales.voice_cancel }}
                       </button>
                     </div>
                   </div>
                 </div>
-              </template>
-            </div>
-          </div>
 
-          <!-- Enhanced No Call History -->
-          <div x-show="!callHistory.loading && filteredCallHistory.length === 0" class="text-center py-16">
-            <div class="text-6xl mb-6">📞</div>
-            <div class="mb-4">
-              <svg class="mx-auto h-16 w-16 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z"></path>
-              </svg>
+                <!-- loading -->
+                <div x-show="contacts.loading" class="text-center py-12">
+                  <div class="animate-spin rounded-full h-8 w-8 border-4 border-blue-200 border-t-blue-500 mx-auto"></div>
+                </div>
+
+                <!-- contact list -->
+                <div x-show="!contacts.loading && contacts.data.length > 0" class="divide-y divide-gray-100">
+                  <template x-for="c in contacts.data" :key="c.id">
+                    <div class="flex items-center px-5 py-3 hover:bg-gray-50 transition-colors">
+                      <div class="flex-shrink-0 mr-4">
+                        <div class="w-10 h-10 rounded-full bg-gradient-to-br from-slate-400 to-slate-500 flex items-center justify-center text-white font-semibold"
+                          x-text="(c.name || '?').trim().charAt(0).toUpperCase()"></div>
+                      </div>
+                      <div class="flex-1 min-w-0 cursor-pointer" @click="dialNumber = c.number; tab = 'keypad'">
+                        <p class="font-semibold text-gray-900 truncate" x-text="c.name"></p>
+                        <p class="text-xs font-mono text-gray-500 truncate" x-text="c.number"></p>
+                      </div>
+                      <div class="flex space-x-1">
+                        <button @click="callNumber(c.number)"
+                          class="p-2 text-green-600 hover:bg-green-50 rounded-full transition-colors" title="Call">
+                          <svg class="h-4 w-4" fill="currentColor" viewBox="0 0 20 20">
+                            <path d="M2 3a1 1 0 011-1h2.153a1 1 0 01.986.836l.74 4.435a1 1 0 01-.54 1.06l-1.548.773a11.037 11.037 0 006.105 6.105l.774-1.548a1 1 0 011.059-.54l4.435.74a1 1 0 01.836.986V17a1 1 0 01-1 1h-2C7.82 18 2 12.18 2 5V3z"></path>
+                          </svg>
+                        </button>
+                        <button @click="openEditContact(c)"
+                          class="p-2 text-blue-500 hover:bg-blue-50 rounded-full transition-colors" title="{{ locales.voice_edit }}">
+                          <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path>
+                          </svg>
+                        </button>
+                        <button @click="deleteContact(c.id)" :disabled="deletingContact[c.id]"
+                          class="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-full transition-colors" title="{{ locales.voice_delete }}">
+                          <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+                          </svg>
+                        </button>
+                      </div>
+                    </div>
+                  </template>
+                </div>
+
+                <!-- empty -->
+                <div x-show="!contacts.loading && contacts.data.length === 0" class="text-center py-12">
+                  <svg class="mx-auto h-12 w-12 text-gray-300 mb-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"></path>
+                  </svg>
+                  <p class="text-sm text-gray-500">{{ locales.voice_no_contacts }}</p>
+                </div>
+              </div>
+
+              <!-- ============ Recordings pane ============ -->
+              <div :class="(tab === 'recordings' ? '' : 'hidden') + (listTab === 'recordings' ? ' sm:block' : ' sm:hidden')">
+                <div class="px-5 py-4 border-b border-gray-100">
+                  <div class="flex items-center justify-between">
+                    <h3 class="text-lg font-bold text-gray-900 sm:hidden">{{ locales.voice_recordings }}</h3>
+                    <div class="hidden sm:block"></div>
+                    <button @click="loadRecordings()" :disabled="recordings.loading"
+                      class="flex items-center px-3 py-2 text-xs font-medium rounded-lg bg-blue-50 text-blue-700 hover:bg-blue-100 disabled:bg-gray-100 disabled:text-gray-400 transition-colors">
+                      <svg class="h-4 w-4 mr-1" :class="recordings.loading && 'animate-spin'" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                      </svg>
+                      <span>{{ locales.voice_refresh }}</span>
+                    </button>
+                  </div>
+                  <div class="mt-3 flex space-x-1 bg-gray-100 rounded-lg p-1">
+                    <template x-for="rf in [['all', locales['voice_rec_all']], ['call', locales['voice_rec_calls']], ['vm', locales['voice_vm']]]" :key="rf[0]">
+                      <button @click="recFilter = rf[0]"
+                        :class="recFilter === rf[0] ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-800'"
+                        class="flex-1 px-3 py-1.5 text-sm font-medium rounded-md transition-all" x-text="rf[1]"></button>
+                    </template>
+                  </div>
+                </div>
+
+                <!-- hidden shared player -->
+                <audio x-ref="recPlayer" @ended="playingRec = null" class="hidden"></audio>
+
+                <!-- loading -->
+                <div x-show="recordings.loading && recordings.data.length === 0" class="text-center py-12">
+                  <div class="animate-spin rounded-full h-8 w-8 border-4 border-blue-200 border-t-blue-500 mx-auto"></div>
+                </div>
+
+                <!-- recording list -->
+                <div x-show="!recordings.loading || recordings.data.length > 0" class="divide-y divide-gray-100">
+                  <template x-for="r in filteredRecordings()" :key="r.name">
+                    <div class="flex items-center px-5 py-3 hover:bg-gray-50 transition-colors">
+                      <div class="flex-shrink-0 mr-4">
+                        <div class="w-9 h-9 rounded-full flex items-center justify-center"
+                          :class="playingRec === r.name ? 'bg-red-100 text-red-600' : (r.kind === 'vm' ? 'bg-amber-100 text-amber-600' : 'bg-indigo-100 text-indigo-600')">
+                          <svg x-show="r.kind !== 'vm'" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M12 18v3m-4 0h8M12 15a4 4 0 004-4V7a4 4 0 10-8 0v4a4 4 0 004 4zM19 11a7 7 0 01-14 0"></path>
+                          </svg>
+                          <svg x-show="r.kind === 'vm'" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"></path>
+                          </svg>
+                        </div>
+                      </div>
+                      <div class="flex-1 min-w-0">
+                        <p class="font-semibold text-gray-900 truncate">
+                          <span x-text="(r.number && contactName(r.number)) || r.number || locales.voice_unknown"></span>
+                          <span x-show="r.kind === 'vm'"
+                            class="ml-1 px-1.5 py-0.5 text-[10px] font-semibold uppercase rounded bg-amber-100 text-amber-700"
+                            x-text="locales.voice_vm"></span>
+                        </p>
+                        <p class="text-xs text-gray-500">
+                          <span x-text="r.time"></span>
+                          <span> · <span x-text="fmtSeconds(r.seconds)"></span></span>
+                          <span> · <span x-text="fmtSize(r.size)"></span></span>
+                        </p>
+                        <p x-show="r.transcript" class="mt-1 text-xs text-gray-600 italic whitespace-pre-wrap" x-text="r.transcript"></p>
+                      </div>
+                      <div class="flex space-x-1">
+                        <button x-show="trans.ready && !r.transcript && !r.transcribing" @click="transcribeRec(r.name)"
+                          class="p-2 text-indigo-500 hover:bg-indigo-50 rounded-full transition-colors" title="{{ locales.voice_transcribe }}">
+                          <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                          </svg>
+                        </button>
+                        <span x-show="r.transcribing" x-cloak class="p-2">
+                          <svg class="animate-spin h-4 w-4 text-indigo-500" fill="none" viewBox="0 0 24 24">
+                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+                          </svg>
+                        </span>
+                        <button @click="playRecording(r)"
+                          :class="playingRec === r.name ? 'text-red-600 hover:bg-red-50' : 'text-blue-600 hover:bg-blue-50'"
+                          class="p-2 rounded-full transition-colors">
+                          <svg x-show="playingRec !== r.name" class="h-4 w-4" fill="currentColor" viewBox="0 0 20 20">
+                            <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clip-rule="evenodd"></path>
+                          </svg>
+                          <svg x-show="playingRec === r.name" x-cloak class="h-4 w-4" fill="currentColor" viewBox="0 0 20 20">
+                            <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8 7a1 1 0 00-1 1v4a1 1 0 002 0V8a1 1 0 00-1-1zm4 0a1 1 0 00-1 1v4a1 1 0 002 0V8a1 1 0 00-1-1z" clip-rule="evenodd"></path>
+                          </svg>
+                        </button>
+                        <a :href="'/api/v1/voice_call/recordings/' + r.name + '?download=1'" download
+                          class="p-2 text-gray-500 hover:text-blue-600 hover:bg-blue-50 rounded-full transition-colors" title="{{ locales.voice_download }}">
+                          <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
+                          </svg>
+                        </a>
+                        <button @click="deleteRecording(r.name)" :disabled="deletingRecording[r.name]"
+                          class="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-full transition-colors" title="{{ locales.voice_delete }}">
+                          <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+                          </svg>
+                        </button>
+                      </div>
+                    </div>
+                  </template>
+                </div>
+
+                <!-- empty -->
+                <div x-show="!recordings.loading && filteredRecordings().length === 0" class="text-center py-12">
+                  <svg class="mx-auto h-12 w-12 text-gray-300 mb-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 18v3m-4 0h8M12 15a4 4 0 004-4V7a4 4 0 10-8 0v4a4 4 0 004 4zM19 11a7 7 0 01-14 0"></path>
+                  </svg>
+                  <p class="text-sm text-gray-500">{{ locales.voice_no_recordings }}</p>
+                </div>
+              </div>
             </div>
-            <h3 class="text-lg font-semibold text-gray-900 mb-2">No call history found</h3>
-            <p class="text-gray-600 mb-6">
-              <span x-show="historyFilter === 'all'">🚀 Start making calls to see your history here!</span>
-              <span x-show="historyFilter !== 'all'">🔍 No <span x-text="historyFilter"></span> calls found in your records.</span>
-            </p>
-            <button @click="refreshCallHistory()" 
-              class="px-4 py-2 bg-blue-100 text-blue-700 hover:bg-blue-200 rounded-lg font-medium transition-colors duration-150">
-              🔄 Refresh History
-            </button>
           </div>
         </div>
       </div>
-    </div>
+    </template>
   </div>
 </div>
 {% endblock %}
 
 {% block bottom %}
 <script defer>
-  // Make locales available to JavaScript
   const locales = {{ locales | tojson }};
-  
+  // Wire rate of the modem PCM link; see pc_call_audio.py (16k wideband).
+  const MODEM_RATE = 16000;
+
   document.addEventListener("alpine:init", () => {
+    Alpine.store("app").set_page("phone");
+
     Alpine.data('voiceCallsManager', () => ({
-      // Locales for translations
       locales: locales,
-      // Initialization state
-      initialized: false,
-      
-      // Call state
+
+      tab: 'keypad',
+      listTab: 'recents',
+      keypadKeys: [
+        ['1', ''], ['2', 'ABC'], ['3', 'DEF'],
+        ['4', 'GHI'], ['5', 'JKL'], ['6', 'MNO'],
+        ['7', 'PQRS'], ['8', 'TUV'], ['9', 'WXYZ'],
+        ['*', ''], ['0', '+'], ['#', '']
+      ],
+
       dialNumber: '',
       dialing: false,
+      ringback: { ctx: null, timer: null },
       audioPath: '1',
-      
-      // Loading states for buttons
+
       answeringCall: false,
       hangingUpCall: false,
       refreshingHistory: false,
       clearingHistory: false,
       deletingRecord: {},
-      
-      // Call status
-      callStatus: {
-        loading: false,
-        hasActiveCalls: false,
-        hasIncomingCall: false,
-        calls: []
-      },
-      
-      // Incoming call state
-      incomingCall: {
-        active: false,
-        number: null,
-        ring_count: 0,
-        duration: 0
-      },
-      
-      // Call history
-      callHistory: {
-        loading: false,
-        data: []
-      },
+
+      callStatus: { loading: false, hasActiveCalls: false, hasIncomingCall: false, calls: [] },
+      incomingCall: { active: false, number: null, ring_count: 0, duration: 0 },
+      // The number the user chose to ignore. Keyed on the number rather than a
+      // boolean so the next caller still gets the overlay, and so a redial by
+      // the same person is not silently swallowed once the call has ended.
+      settingsOpen: false,
+      ignoredNumber: null,
+      ringerSilenced: false,
+      callHistory: { loading: false, data: [] },
       historyFilter: 'all',
-      
-      // Notification state
-      notification: {
-        show: false,
-        message: '',
-        type: 'info' // 'success', 'error', 'info'
+      notification: { show: false, message: '', type: 'info' },
+
+      // ---- address book ----
+      contacts: { loading: false, data: [] },
+      addingContact: false,
+      savingContact: false,
+      deletingContact: {},
+      newContact: { name: '', number: '' },
+      editingContactId: null,
+
+      // ---- call recording ----
+      recordings: { loading: false, data: [] },
+      deletingRecording: {},
+      playingRec: null,
+      autoRecord: false,
+      savingAutoRecord: false,
+      recToggling: false,
+      recFilter: 'all',
+
+      // ---- voicemail ----
+      vm: { enabled: false, answer_secs: '15', greeting: false },
+      savingVm: false,
+      greetingRecording: false,
+      greetingRecorder: null,
+      greetingChunks: [],
+
+      // ---- ring buzzer ----
+      ringer: { enabled: true, melody: 'classic' },
+      savingRinger: false,
+
+      // ---- text to speech ----
+      tts: { engine: false, voice: 'en', voices: [], downloading: false, download: {},
+             selected_engine: 'espeak',
+             kokoro: { engine: false, ready: false, model: 'full', voice: '3',
+                       voices: [], models: [], engine_size_mb: 21 } },
+      ttsText: '',
+      savingTts: false,
+
+      // ---- transcription ----
+      trans: { engine: false, ready: false, model: '', lang: 'auto', langs: ['auto'],
+               auto_vm: true, models: [], busy: false, queued: 0,
+               downloading: false, download: {} },
+      transPolling: false,
+      // one-shot guards for syncSelects(), see the note there
+      transSynced: false,
+      ttsSynced: false,
+      kokoroSynced: false,
+
+      // ---- in-call audio ----
+      secure: window.isSecureContext,
+      httpsUrl: 'https://' + location.hostname + ':9443' + location.pathname,
+      callTimer: '00:00',
+      callStartedAt: null,
+      timerInterval: null,
+      audio: {
+        connected: false,
+        muted: false,
+        rxLevel: 0,
+        txLevel: 0,
+        ctx: null,
+        playT: 0,
+        abort: null,
+        stream: null,
+        procNode: null,
+        srcNode: null,
+        txQueue: [],
+        txTimer: null,
+        txBusy: false,
+        daemon: null,      // {token, port, available} or null => Python bridge
       },
-      
-      // Computed
+
       filteredCallHistory() {
-        if (this.historyFilter === 'all') {
-          return this.callHistory.data;
-        }
+        if (this.historyFilter === 'all') return this.callHistory.data;
         return this.callHistory.data.filter(call => call.type === this.historyFilter);
       },
-      
-      // Initialization
+
+      activeNumber() {
+        const c = this.callStatus.calls[0];
+        return c ? c.number : '';
+      },
+
+      normNum(n) {
+        return (n || '').replace(/[^0-9+]/g, '');
+      },
+
+      // iPhone-style suffix matching: numbers stored with/without a country
+      // prefix still resolve to the same contact.
+      contactName(number) {
+        const n = this.normNum(number);
+        if (!n) return null;
+        for (const c of this.contacts.data) {
+          const cn = this.normNum(c.number);
+          if (!cn) continue;
+          if (cn === n) return c.name;
+          const shorter = n.length < cn.length ? n : cn;
+          const longer = n.length < cn.length ? cn : n;
+          if (shorter.length >= 7 && longer.endsWith(shorter.replace(/^\+/, ''))) return c.name;
+        }
+        return null;
+      },
+
       init() {
         this.refreshCallStatus();
         this.refreshCallHistory();
         this.refreshIncomingCall();
-        
-        // Auto-refresh call status every 2 seconds for more responsive updates
-        setInterval(() => {
-          this.refreshCallStatus();
-        }, 2000);
-        
-        // Monitor incoming calls every 1 second for faster response
-        setInterval(() => {
-          this.refreshIncomingCall();
-        }, 1000);
-        
-        // Set up call timeout tracking
-        this.callTimeoutTracker = null;
+        this.loadContacts();
+        this.loadRecordConfig();
+        this.loadRecordings();
+        this.loadVmConfig();
+        this.loadRingerConfig();
+        this.loadTransStatus();
+        this.loadTtsStatus();
+
+        // Poll faster while a call is happening. At a flat 2s an outgoing call
+        // could be answered and sit connected for most of two seconds before
+        // the timer started and audio was hooked up -- the caller hears the
+        // first words of the reply and we are still not streaming. Idle
+        // devices stay at 2s so the modem is left alone.
+        const pollStatus = async () => {
+          if (!document.hidden) await this.refreshCallStatus();
+          const busy = this.callStatus.hasActiveCalls || this.dialing ||
+                       this.incomingCall.active;
+          setTimeout(pollStatus, busy ? 500 : 2000);
+        };
+        pollStatus();
+        setInterval(() => { if (!document.hidden) this.refreshIncomingCall(); }, 1000);
+        window.addEventListener('beforeunload', () => this.stopAudio(false));
       },
-      
-      // Call management methods
+
+      // ============================ audio =============================
+      // Where the two audio endpoints live. The pcat-call-audio daemon serves
+      // them on its own port with ALSA driven directly from C -- no arecord,
+      // no pipes, no interpreter in the sample path. If it is not running
+      // (older package, no cert, no card) we fall back to the in-process
+      // Python bridge on this origin, which still works, just with more
+      // buffering. Resolved once per call in startAudio().
+      audioBase(path) {
+        const d = this.audio.daemon;
+        if (!d || !d.available) return path;
+        // Same host, different port => different origin. The daemon sends
+        // CORS headers for exactly this.
+        return 'https://' + location.hostname + ':' + d.port + path;
+      },
+
+      audioUrl(path) {
+        const d = this.audio.daemon;
+        const base = this.audioBase(path);
+        if (!d || !d.available) return base;
+        // Token on the query string for the streaming GET: it is the form
+        // that survives a plain fetch() with no custom headers, which keeps
+        // the request simple (no CORS preflight on the stream).
+        return base + '?token=' + encodeURIComponent(d.token);
+      },
+
+      async resolveAudioDaemon() {
+        try {
+          const r = await fetch('/api/v1/voice_call/audio/token.json');
+          const d = await r.json();
+          this.audio.daemon = d && d.success ? d : null;
+        } catch (e) {
+          this.audio.daemon = null;   // fall back to the Python bridge
+        }
+      },
+
+      async startAudio() {
+        if (this.audio.connected) return;
+        try {
+          await this.resolveAudioDaemon();
+          // Ask for a 16k context so the browser's own (properly filtered)
+          // resampler handles the microphone, instead of the naive
+          // decimation below. Falls back silently if unsupported.
+          if (!this.audio.ctx) {
+            const AC = window.AudioContext || window.webkitAudioContext;
+            try { this.audio.ctx = new AC({ sampleRate: MODEM_RATE }); }
+            catch (e) { this.audio.ctx = new AC(); }
+          }
+          await this.audio.ctx.resume();
+          // Start close to now; playChunk keeps it there. A big initial
+          // offset is delay paid for the whole call, not just the first chunk.
+          this.audio.playT = this.audio.ctx.currentTime + 0.04;
+          this.startRx();
+          if (this.secure) {
+            await this.startTx();
+          }
+          this.audio.connected = true;
+        } catch (e) {
+          this.showNotification('Audio start failed: ' + e.message, 'error');
+          this.stopAudio(false);
+        }
+      },
+
+      startRx() {
+        // Pull the raw 8kHz S16 stream and schedule it into WebAudio.
+        this.audio.abort = new AbortController();
+        fetch(this.audioUrl('/api/v1/voice_call/audio/stream'),
+              { signal: this.audio.abort.signal })
+          .then(async (resp) => {
+            if (!resp.ok) throw new Error('stream ' + resp.status);
+            const reader = resp.body.getReader();
+            let carry = new Uint8Array(0);
+            for (;;) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              let buf = new Uint8Array(carry.length + value.length);
+              buf.set(carry); buf.set(value, carry.length);
+              const usable = buf.length - (buf.length % 2);
+              carry = buf.slice(usable);
+              if (usable === 0) continue;
+              this.playChunk(new Int16Array(buf.buffer, 0, usable / 2));
+            }
+          })
+          .catch((e) => { if (e.name !== 'AbortError') console.error('rx stream:', e); });
+      },
+
+      playChunk(samples) {
+        const ctx = this.audio.ctx;
+        if (!ctx || samples.length === 0) return;
+        const buf = ctx.createBuffer(1, samples.length, MODEM_RATE);
+        const ch = buf.getChannelData(0);
+        let peak = 0;
+        for (let i = 0; i < samples.length; i++) {
+          ch[i] = samples[i] / 32768;
+          const a = Math.abs(ch[i]);
+          if (a > peak) peak = a;
+        }
+        this.audio.rxLevel = Math.min(100, Math.round(peak * 140));
+        const now = ctx.currentTime;
+        // Keep playback pinned just ahead of real time. playT is the running
+        // schedule; every chunk pushes it forward by its own duration, so any
+        // moment where chunks arrive faster than they play (a burst after a
+        // stall, a rate mismatch, a tab unhiding) walks it further into the
+        // future and stays there -- that delay is never repaid.
+        //
+        // The old rule dropped one chunk once playT passed now+1s, which
+        // trimmed the schedule to a second and pegged it there. Instead,
+        // resync hard: if we are further ahead than the jitter cushion needs,
+        // collapse the schedule back to the floor. Late audio is worthless on
+        // a live call, so throwing it away is strictly better than playing it.
+        const FLOOR = 0.04;   // ~2 chunks of cushion against jitter
+        const CEIL = 0.18;    // resync once the schedule exceeds this
+        if (this.audio.playT > now + CEIL) this.audio.playT = now + FLOOR;
+        if (this.audio.playT < now + FLOOR) this.audio.playT = now + FLOOR;
+        const src = ctx.createBufferSource();
+        src.buffer = buf;
+        src.connect(ctx.destination);
+        src.start(this.audio.playT);
+        this.audio.playT += buf.duration;
+      },
+
+      async startTx() {
+        this.audio.stream = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+        });
+        const ctx = this.audio.ctx;
+        const src = ctx.createMediaStreamSource(this.audio.stream);
+
+        // Preferred path: an AudioWorklet, whose render quantum is 128 frames
+        // = 8ms at our 16k context. The ScriptProcessor below costs its whole
+        // buffer in delay, and measured in Chrome that was 64ms -- the old
+        // "~21ms" assumed a 48k context, but we explicitly ask for 16k and get
+        // it. Worth 56ms, and it moves the mic off the main thread.
+        if (ctx.audioWorklet) {
+          try {
+            await ctx.audioWorklet.addModule(
+              '/static/mic-worklet.js?v={{ cache_bust_version }}');
+            const node = new AudioWorkletNode(ctx, 'mic-processor', {
+              numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1],
+              processorOptions: { targetRate: MODEM_RATE }
+            });
+            node.port.onmessage = (ev) => {
+              const d = ev.data;
+              if (!d || !d.pcm) return;
+              this.audio.txLevel = this.audio.muted ? 0
+                : Math.min(100, Math.round(d.peak * 140));
+              const frame = new Int16Array(d.pcm);
+              // Also zeroed here, not only in the worklet: the mute message
+              // takes a hop to reach the audio thread, and this closes that gap.
+              if (this.audio.muted) frame.fill(0);
+              this.audio.txQueue.push(frame);
+            };
+            // Muting in the worklet as well as here: the page can still be
+            // mid-batch when the user hits mute.
+            this.audio.micNode = node;
+            src.connect(node);
+            // Through a silent gain, not straight to the destination: the graph
+            // has to pull the node for process() to run, but routing the mic to
+            // the speakers would be local echo.
+            const sink = ctx.createGain();
+            sink.gain.value = 0;
+            node.connect(sink);
+            sink.connect(ctx.destination);
+            this.audio.micSink = sink;
+            this.audio.srcNode = src;
+            this.audio.procNode = node;      // stopAudio() disconnects this
+            this.audio.txTimer = setInterval(() => this.flushTx(), 40);
+            return;
+          } catch (e) {
+            console.warn('mic worklet unavailable, falling back:', e);
+          }
+        }
+
+        // Fallback for browsers without AudioWorklet. Size the buffer by the
+        // context's real rate for ~16ms rather than hard-coding 1024 frames,
+        // which is 64ms at 16k.
+        const want = Math.pow(2, Math.round(Math.log2(ctx.sampleRate * 0.016)));
+        const bufSize = Math.min(16384, Math.max(256, want));
+        const proc = ctx.createScriptProcessor(bufSize, 1, 1);
+        const ratio = ctx.sampleRate / MODEM_RATE;
+        // Box-average across each output period rather than picking one sample
+        // of every `ratio`. Nearest-neighbour decimation has no anti-aliasing,
+        // and folding 48k speech down to 16k that way is audibly garbled.
+        // Costs one add per input sample. When the context is already at
+        // MODEM_RATE this reduces to a straight copy.
+        let acc = 0, accN = 0, readPos = 0;
+        proc.onaudioprocess = (ev) => {
+          const inp = ev.inputBuffer.getChannelData(0);
+          const out = [];
+          let peak = 0;
+          for (let i = 0; i < inp.length; i++) {
+            const v = inp[i];
+            acc += v; accN++;
+            const a = Math.abs(v);
+            if (a > peak) peak = a;
+            readPos += 1;
+            if (readPos >= ratio) {
+              const m = acc / accN;
+              out.push(Math.max(-32768, Math.min(32767, Math.round(m * 32767))));
+              acc = 0; accN = 0; readPos -= ratio;
+            }
+          }
+          this.audio.txLevel = this.audio.muted ? 0 : Math.min(100, Math.round(peak * 140));
+          const frame = new Int16Array(out);
+          if (this.audio.muted) frame.fill(0);
+          this.audio.txQueue.push(frame);
+        };
+        src.connect(proc);
+        proc.connect(ctx.destination);   // required for onaudioprocess to fire
+        this.audio.srcNode = src;
+        this.audio.procNode = proc;
+        // 40ms: mic audio waits here before it is even sent, so the interval
+        // is added uplink delay one-for-one. The sink's ALSA buffer is 120ms
+        // and aplay stops the stream the moment it drains, so posting well
+        // inside that keeps it fed. 25 small POSTs a second is nothing next
+        // to the downlink stream itself.
+        this.audio.txTimer = setInterval(() => this.flushTx(), 40);
+      },
+
+      async flushTx() {
+        const q = this.audio.txQueue;
+        if (q.length === 0) return;
+        // One POST in flight at a time. These are ordered audio: if a slow
+        // request overlapped the next tick, two POSTs would race and the
+        // module could be fed mic audio out of order. Skipping a tick is
+        // harmless -- the queue simply carries into the next flush.
+        if (this.audio.txBusy) return;
+        this.audio.txBusy = true;
+        this.audio.txQueue = [];
+        let total = 0;
+        for (const f of q) total += f.length;
+        const merged = new Int16Array(total);
+        let off = 0;
+        for (const f of q) { merged.set(f, off); off += f.length; }
+        try {
+          // Token on the query string rather than a header: a custom header
+          // would make this a non-simple cross-origin request and cost a
+          // CORS preflight OPTIONS on every single POST -- 25 extra
+          // round-trips a second, straight onto uplink latency.
+          // Content-Type stays text/plain for the same reason.
+          await fetch(this.audioUrl('/api/v1/voice_call/audio/tx'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'text/plain' },
+            body: merged.buffer
+          });
+        } catch (e) { /* transient network errors are fine mid-call */ }
+        finally { this.audio.txBusy = false; }
+      },
+
+      stopAudio(tellServer = true) {
+        this.stopRingback();
+        if (this.audio.abort) { this.audio.abort.abort(); this.audio.abort = null; }
+        if (this.audio.txTimer) { clearInterval(this.audio.txTimer); this.audio.txTimer = null; }
+        if (this.audio.procNode) { this.audio.procNode.disconnect(); this.audio.procNode = null; }
+        if (this.audio.micSink) { this.audio.micSink.disconnect(); this.audio.micSink = null; }
+        this.audio.micNode = null;
+        if (this.audio.srcNode) { this.audio.srcNode.disconnect(); this.audio.srcNode = null; }
+        if (this.audio.stream) {
+          this.audio.stream.getTracks().forEach(t => t.stop());
+          this.audio.stream = null;
+        }
+        this.audio.txQueue = [];
+        this.audio.txBusy = false;
+        this.audio.micNode = null;
+        if (this.audio.ctx) {
+          // closing the context discards every already-scheduled buffer --
+          // without this, backlogged audio keeps playing long after hangup
+          this.audio.ctx.close().catch(() => {});
+          this.audio.ctx = null;
+        }
+        this.audio.playT = 0;
+        this.audio.connected = false;
+        this.audio.rxLevel = 0;
+        this.audio.txLevel = 0;
+        if (tellServer) {
+          // Always tell Flask: it owns the recording taps and the in-process
+          // bridge, both of which need an explicit stop. The C daemon has no
+          // stop endpoint by design -- aborting the stream fetch above closes
+          // its socket, which ends the capture, and its reaper closes the
+          // playback device once the POSTs stop.
+          fetch('/api/v1/voice_call/audio/stop', { method: 'POST' }).catch(() => {});
+        }
+        this.audio.daemon = null;
+      },
+
+      // The worklet zeroes samples itself, so a batch already in flight on the
+      // audio thread is muted too, not just what the page has yet to queue.
+      pushMuteToWorklet() {
+        const n = this.audio.micNode;
+        if (n && n.port) { try { n.port.postMessage({ muted: !!this.audio.muted }); } catch (e) {} }
+      },
+
+      toggleMute() { this.audio.muted = !this.audio.muted; this.pushMuteToWorklet(); },
+
+      // ---- call timer ----
+      // serverSeconds: how long the server says the call has been connected.
+      // The clock is anchored to that instead of to the moment this poll ran,
+      // so the timer is right from the first tick and a page reload mid-call
+      // picks up where it should rather than restarting at 00:00.
+      startTimer(serverSeconds) {
+        this.callStartedAt = Date.now() - (serverSeconds || 0) * 1000;
+        if (this.timerInterval) clearInterval(this.timerInterval);
+        const tick = () => {
+          const s = Math.max(0, Math.floor((Date.now() - this.callStartedAt) / 1000));
+          this.callTimer = this.fmtSeconds(s);
+        };
+        tick();
+        this.timerInterval = setInterval(tick, 500);
+      },
+
+      stopTimer() {
+        if (this.timerInterval) { clearInterval(this.timerInterval); this.timerInterval = null; }
+        this.callTimer = '00:00';
+        this.callStartedAt = null;
+      },
+
+      // ========================= call control =========================
+      callNumber(number) {
+        this.dialNumber = number;
+        this.makeCall();
+      },
+
       async makeCall() {
         if (!this.dialNumber || this.dialing) return;
-        
         this.dialing = true;
         try {
           const response = await fetch('/api/v1/voice_call/make', {
@@ -422,14 +1164,10 @@
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ number: this.dialNumber })
           });
-          
           const data = await response.json();
           if (data.success) {
-            this.showNotification('Call initiated', 'success');
             this.refreshCallStatus();
             this.refreshCallHistory();
-            // Clear dial number after successful call
-            this.dialNumber = '';
           } else {
             this.showNotification('Failed to make call: ' + (data.error || 'Unknown error'), 'error');
           }
@@ -439,7 +1177,105 @@
           this.dialing = false;
         }
       },
-      
+
+      // State of the call the modem is reporting: dialing -> alerting ->
+      // active for an outgoing call. AT+CLCC gives us this all along; the page
+      // simply was not looking at it, which is why it could not tell ringing
+      // from connected.
+      callState() {
+        const c = (this.callStatus.calls || [])[0];
+        return c ? (c.status || '') : '';
+      },
+
+      isConnected() {
+        return this.callState() === 'active';
+      },
+
+      isOutgoingRinging() {
+        const c = (this.callStatus.calls || [])[0];
+        return !!c && c.direction === 'outgoing' && c.status !== 'active';
+      },
+
+      // Local ringback, because the network gives us none: measured on a live
+      // call, the downlink carries digital silence (RMS < 300) from the moment
+      // it opens until the far end picks up, so without this the caller stares
+      // at a spinner in total silence for ten seconds and assumes it is broken.
+      // 450Hz, 1s on / 4s off is the Chinese ringback cadence, and these are
+      // Chinese-carrier SIMs.
+      //
+      // Deliberately on its own AudioContext: the call path's ctx is opened and
+      // closed by startAudio()/stopAudio() around the same events, and nothing
+      // about a courtesy tone is worth risking the actual call audio for.
+      startRingback() {
+        if (this.ringback.timer) return;
+        try {
+          if (!this.ringback.ctx) {
+            const AC = window.AudioContext || window.webkitAudioContext;
+            this.ringback.ctx = new AC();
+          }
+          this.ringback.ctx.resume().catch(() => {});
+          const burst = () => this.ringbackBurst();
+          burst();
+          this.ringback.timer = setInterval(burst, 5000);
+        } catch (e) { /* no audio output is not a reason to fail the call */ }
+      },
+
+      ringbackBurst() {
+        const ctx = this.ringback.ctx;
+        if (!ctx) return;
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.value = 450;
+        const t = ctx.currentTime;
+        // Ramped, not gated: a hard start/stop on a 450Hz sine clicks.
+        gain.gain.setValueAtTime(0, t);
+        gain.gain.linearRampToValueAtTime(0.12, t + 0.02);
+        gain.gain.setValueAtTime(0.12, t + 0.95);
+        gain.gain.linearRampToValueAtTime(0, t + 1.0);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(t);
+        osc.stop(t + 1.02);
+      },
+
+      stopRingback() {
+        if (this.ringback.timer) {
+          clearInterval(this.ringback.timer);
+          this.ringback.timer = null;
+        }
+        if (this.ringback.ctx) {
+          this.ringback.ctx.close().catch(() => {});
+          this.ringback.ctx = null;
+        }
+      },
+
+      // Who is calling, for the headline. The number itself is always shown
+      // underneath, so this never has to fall back to it.
+      callerTitle(number) {
+        return this.contactName(number) || number || '{{ locales.voice_unknown }}';
+      },
+
+      // Quiet, but still ringing: the caller hears ringback as before and
+      // voicemail still answers on schedule. Only the buzzer stops.
+      async silenceRinger() {
+        this.ringerSilenced = true;
+        try {
+          await fetch('/api/v1/voice_call/ringer/silence', { method: 'POST' });
+        } catch (error) {
+          this.ringerSilenced = false;
+          this.showNotification('Could not silence the ringer: ' + error.message, 'error');
+        }
+      },
+
+      // Dismiss the overlay without touching the call -- it keeps ringing and
+      // voicemail can still take it. Silences the buzzer too, since leaving it
+      // sounding with the dialog gone would be the worst of both.
+      ignoreCall() {
+        this.ignoredNumber = this.incomingCall.number || '?';
+        if (!this.ringerSilenced) this.silenceRinger();
+      },
+
       async answerCall() {
         this.answeringCall = true;
         try {
@@ -447,16 +1283,11 @@
             method: 'POST',
             headers: { 'Content-Type': 'application/json' }
           });
-          
           const data = await response.json();
           if (data.success) {
-            this.showNotification('Call answered', 'success');
-            this.refreshCallStatus();
-            // Clear incoming call state when answered
             this.incomingCall.active = false;
             this.callStatus.hasIncomingCall = false;
-            // Start timeout when call is answered
-            this.startCallTimeout();
+            this.refreshCallStatus();
           } else {
             this.showNotification('Failed to answer call: ' + (data.error || 'Unknown error'), 'error');
           }
@@ -466,7 +1297,7 @@
           this.answeringCall = false;
         }
       },
-      
+
       async hangupCall() {
         this.hangingUpCall = true;
         try {
@@ -474,12 +1305,8 @@
             method: 'POST',
             headers: { 'Content-Type': 'application/json' }
           });
-          
           const data = await response.json();
           if (data.success) {
-            this.showNotification('Call ended', 'success');
-            this.clearCallTimeout();
-            // Clear incoming call state when hung up
             this.incomingCall.active = false;
             this.callStatus.hasIncomingCall = false;
             this.refreshCallStatus();
@@ -493,21 +1320,43 @@
           this.hangingUpCall = false;
         }
       },
-      
+
       async refreshCallStatus() {
-        this.callStatus.loading = true;
         try {
           const response = await fetch('/api/v1/voice_call/status');
           const data = await response.json();
-          
           if (data.success) {
+            const wasActive = this.callStatus.hasActiveCalls;
             this.callStatus.calls = data.calls || [];
             this.callStatus.hasActiveCalls = data.has_active_calls || false;
+            this.callStatus.recording = data.recording || null;
+            // Ringback follows the reported state, so it stops the instant the
+            // call connects and the real downlink takes over.
+            if (this.isOutgoingRinging()) this.startRingback();
+            else this.stopRingback();
+            // audio + timer follow the call state. Audio still starts here
+            // rather than at connect: the modem clocks the card while dialling
+            // (verified -- the stream opens 200 OK and delivers bytes), so the
+            // token, TLS handshake, ALSA open and getUserMedia are all paid
+            // during setup instead of in the first second of conversation.
+            if (this.callStatus.hasActiveCalls && !wasActive) {
+              this.startTimer(data.call_seconds);
+              this.startAudio();
+            } else if (this.callStatus.hasActiveCalls && this.timerInterval) {
+              // Re-anchor on every poll: cheap, and it keeps the display from
+              // drifting away from the server's idea of the call length.
+              this.callStartedAt = Date.now() - (data.call_seconds || 0) * 1000;
+            } else if (!this.callStatus.hasActiveCalls && wasActive) {
+              this.stopTimer();
+              this.stopRingback();
+              this.stopAudio();
+              this.refreshCallHistory();
+              // let the background opus encode land, then show the new file
+              setTimeout(() => this.loadRecordings(), 2500);
+            }
           }
         } catch (error) {
           console.error('Error refreshing call status:', error);
-        } finally {
-          this.callStatus.loading = false;
         }
       },
 
@@ -518,154 +1367,708 @@
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ path: parseInt(this.audioPath) })
           });
-          
           const data = await response.json();
-          if (data.success) {
-            this.showNotification('Audio path updated', 'success');
-          } else {
+          if (!data.success) {
             this.showNotification('Failed to set audio path: ' + (data.error || 'Unknown error'), 'error');
           }
         } catch (error) {
           this.showNotification('Error setting audio path: ' + error.message, 'error');
         }
       },
-      
-      // Incoming call monitoring
+
       async refreshIncomingCall() {
         try {
           const response = await fetch('/api/v1/voice_call/incoming');
           const data = await response.json();
-          
           if (data.success) {
-            const incoming = data.incoming_call;
             const wasActive = this.incomingCall.active;
-            
-            // Update incoming call state
-            this.incomingCall = incoming;
-            
-            // Show notification when new incoming call starts
-            if (incoming.active && !wasActive) {
-              const callerInfo = incoming.number || 'Unknown Number';
-              this.showNotification(`📞 Incoming call from ${callerInfo}`, 'info');
-              
-              // Update call status to show incoming call
+            this.incomingCall = data.incoming_call;
+            if (this.incomingCall.active && !wasActive) {
+              this.showNotification('Incoming call from ' + (this.contactName(this.incomingCall.number) || this.incomingCall.number || 'Unknown'), 'info');
               this.callStatus.hasIncomingCall = true;
-            } else if (!incoming.active && wasActive) {
-              // Call ended, refresh call history
+            } else if (!this.incomingCall.active && wasActive) {
               this.refreshCallHistory();
               this.callStatus.hasIncomingCall = false;
+              // Clear per-call dismissal, or the next caller would arrive
+              // already ignored and already silenced.
+              this.ignoredNumber = null;
+              this.ringerSilenced = false;
             }
           }
         } catch (error) {
           console.error('Error checking incoming calls:', error);
         }
       },
-      
-      // Call history methods
+
       async refreshCallHistory() {
-        this.callHistory.loading = true;
+        this.callHistory.loading = this.callHistory.data.length === 0;
         this.refreshingHistory = true;
         try {
           const response = await fetch('/api/v1/voice_call/history');
           const data = await response.json();
-          
-          if (data.success) {
-            this.callHistory.data = data.history || [];
-            this.showNotification('Call history refreshed', 'success');
-          } else {
-            this.showNotification('Failed to refresh call history: ' + (data.error || 'Unknown error'), 'error');
-          }
+          if (data.success) this.callHistory.data = data.history || [];
         } catch (error) {
           console.error('Error refreshing call history:', error);
-          this.showNotification('Error refreshing call history: ' + error.message, 'error');
         } finally {
           this.callHistory.loading = false;
           this.refreshingHistory = false;
         }
       },
-      
+
       async clearCallHistory() {
-        if (!confirm('Are you sure you want to clear all call history?')) return;
-        
+        if (!confirm('Clear all call history?')) return;
         this.clearingHistory = true;
         try {
-          const response = await fetch('/api/v1/voice_call/clear_history', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' }
-          });
-          
+          const response = await fetch('/api/v1/voice_call/history', { method: 'DELETE' });
           const data = await response.json();
-          if (data.success) {
-            this.showNotification('Call history cleared', 'success');
-            this.refreshCallHistory();
-          } else {
-            this.showNotification('Failed to clear history: ' + (data.error || 'Unknown error'), 'error');
-          }
+          if (data.success) this.refreshCallHistory();
+          else this.showNotification('Failed to clear history: ' + (data.error || 'Unknown error'), 'error');
         } catch (error) {
           this.showNotification('Error clearing history: ' + error.message, 'error');
         } finally {
           this.clearingHistory = false;
         }
       },
-      
+
       async deleteCallRecord(callId) {
-        // Set loading state for this specific record
         this.deletingRecord[callId] = true;
         try {
-          const response = await fetch('/api/v1/voice_call/delete_history', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ call_id: callId })
-          });
-          
+          const response = await fetch('/api/v1/voice_call/history/' + encodeURIComponent(callId), { method: 'DELETE' });
           const data = await response.json();
-          if (data.success) {
-            this.showNotification('Call record deleted', 'success');
-            this.refreshCallHistory();
-          } else {
-            this.showNotification('Failed to delete record: ' + (data.error || 'Unknown error'), 'error');
-          }
+          if (data.success) this.refreshCallHistory();
+          else this.showNotification('Failed to delete record: ' + (data.error || 'Unknown error'), 'error');
         } catch (error) {
           this.showNotification('Error deleting record: ' + error.message, 'error');
         } finally {
-          // Clear loading state for this specific record
           this.deletingRecord[callId] = false;
         }
       },
-      
-      // Call timeout management
-      startCallTimeout() {
-        this.clearCallTimeout();
-        // Set timeout for 30 minutes
-        this.callTimeoutTracker = setTimeout(() => {
-          this.refreshCallStatus();
-          this.refreshCallHistory();
-        }, 30 * 60 * 1000);
-      },
-      
-      clearCallTimeout() {
-        if (this.callTimeoutTracker) {
-          clearTimeout(this.callTimeoutTracker);
-          this.callTimeoutTracker = null;
+
+      // ========================= address book =========================
+      async loadContacts() {
+        this.contacts.loading = this.contacts.data.length === 0;
+        try {
+          const response = await fetch('/api/v1/voice_call/contacts');
+          const data = await response.json();
+          if (data.success) this.contacts.data = data.contacts || [];
+        } catch (error) {
+          console.error('Error loading contacts:', error);
+        } finally {
+          this.contacts.loading = false;
         }
       },
-      
-      // Notification system
+
+      openAddContact(number) {
+        this.newContact = { name: '', number: number || '' };
+        this.editingContactId = null;
+        this.addingContact = true;
+        this.tab = 'contacts';
+        this.listTab = 'contacts';
+        this.$nextTick(() => { if (this.$refs.contactNameInput) this.$refs.contactNameInput.focus(); });
+      },
+
+      openEditContact(c) {
+        this.newContact = { name: c.name, number: c.number };
+        this.editingContactId = c.id;
+        this.addingContact = true;
+        this.$nextTick(() => { if (this.$refs.contactNameInput) this.$refs.contactNameInput.focus(); });
+      },
+
+      cancelAddContact() {
+        this.addingContact = false;
+        this.editingContactId = null;
+        this.newContact = { name: '', number: '' };
+      },
+
+      async saveContact() {
+        const name = this.newContact.name.trim();
+        const number = this.newContact.number.trim();
+        if (!name || !number || this.savingContact) return;
+        this.savingContact = true;
+        const editing = this.editingContactId;
+        const url = editing
+          ? '/api/v1/voice_call/contacts/' + encodeURIComponent(editing)
+          : '/api/v1/voice_call/contacts';
+        try {
+          const response = await fetch(url, {
+            method: editing ? 'PUT' : 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: name, number: number })
+          });
+          const data = await response.json();
+          if (data.success) {
+            this.cancelAddContact();
+            this.loadContacts();
+          } else {
+            this.showNotification('Failed to save contact: ' + (data.error || 'Unknown error'), 'error');
+          }
+        } catch (error) {
+          this.showNotification('Error saving contact: ' + error.message, 'error');
+        } finally {
+          this.savingContact = false;
+        }
+      },
+
+      async deleteContact(contactId) {
+        if (!confirm('Delete this contact?')) return;
+        this.deletingContact[contactId] = true;
+        try {
+          const response = await fetch('/api/v1/voice_call/contacts/' + encodeURIComponent(contactId), { method: 'DELETE' });
+          const data = await response.json();
+          if (data.success) this.loadContacts();
+          else this.showNotification('Failed to delete contact: ' + (data.error || 'Unknown error'), 'error');
+        } catch (error) {
+          this.showNotification('Error deleting contact: ' + error.message, 'error');
+        } finally {
+          this.deletingContact[contactId] = false;
+        }
+      },
+
+      // ========================= call recording =========================
+      isRecording() {
+        return !!(this.callStatus.recording && this.callStatus.recording.recording);
+      },
+
+      recTime() {
+        const s = Math.floor((this.callStatus.recording && this.callStatus.recording.seconds) || 0);
+        return this.fmtSeconds(s);
+      },
+
+      fmtSeconds(s) {
+        s = Math.max(0, Math.floor(s || 0));
+        const mm = String(Math.floor(s / 60)).padStart(2, '0');
+        const ss = String(s % 60).padStart(2, '0');
+        return mm + ':' + ss;
+      },
+
+      fmtSize(bytes) {
+        if (!bytes) return '0 KB';
+        if (bytes < 1024 * 1024) return Math.round(bytes / 1024) + ' KB';
+        return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+      },
+
+      async toggleRecord() {
+        this.recToggling = true;
+        const url = this.isRecording() ? '/api/v1/voice_call/record/stop' : '/api/v1/voice_call/record/start';
+        try {
+          const response = await fetch(url, { method: 'POST' });
+          const data = await response.json();
+          if (!data.success) {
+            this.showNotification('Recording failed: ' + (data.error || 'Unknown error'), 'error');
+          }
+          this.refreshCallStatus();
+        } catch (error) {
+          this.showNotification('Recording error: ' + error.message, 'error');
+        } finally {
+          this.recToggling = false;
+        }
+      },
+
+      async loadRecordConfig() {
+        try {
+          const response = await fetch('/api/v1/voice_call/record/config');
+          const data = await response.json();
+          if (data.success) this.autoRecord = !!data.auto_record;
+        } catch (error) {
+          console.error('Error loading record config:', error);
+        }
+      },
+
+      async toggleAutoRecord() {
+        const next = !this.autoRecord;
+        this.savingAutoRecord = true;
+        try {
+          const response = await fetch('/api/v1/voice_call/record/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ auto_record: next })
+          });
+          const data = await response.json();
+          if (data.success) this.autoRecord = !!data.auto_record;
+          else this.showNotification('Failed to save setting: ' + (data.error || 'Unknown error'), 'error');
+        } catch (error) {
+          this.showNotification('Error saving setting: ' + error.message, 'error');
+        } finally {
+          this.savingAutoRecord = false;
+        }
+      },
+
+      async loadRecordings() {
+        this.recordings.loading = true;
+        try {
+          const response = await fetch('/api/v1/voice_call/recordings');
+          const data = await response.json();
+          if (data.success) this.recordings.data = data.recordings || [];
+        } catch (error) {
+          console.error('Error loading recordings:', error);
+        } finally {
+          this.recordings.loading = false;
+        }
+      },
+
+      playRecording(r) {
+        const player = this.$refs.recPlayer;
+        if (!player) return;
+        if (this.playingRec === r.name) {
+          player.pause();
+          this.playingRec = null;
+          return;
+        }
+        player.src = '/api/v1/voice_call/recordings/' + r.name;
+        player.play().then(() => { this.playingRec = r.name; })
+          .catch((e) => { this.showNotification('Playback failed: ' + e.message, 'error'); });
+      },
+
+      filteredRecordings() {
+        if (this.recFilter === 'all') return this.recordings.data;
+        return this.recordings.data.filter(r => r.kind === this.recFilter);
+      },
+
+      // ========================= voicemail =========================
+      async loadVmConfig() {
+        try {
+          const response = await fetch('/api/v1/voice_call/voicemail/config');
+          const data = await response.json();
+          if (data.success) {
+            this.vm.enabled = !!data.enabled;
+            this.vm.answer_secs = String(data.answer_secs || 15);
+            this.vm.greeting = !!data.greeting;
+          }
+        } catch (error) {
+          console.error('Error loading voicemail config:', error);
+        }
+      },
+
+      async saveVmConfig() {
+        this.savingVm = true;
+        try {
+          const response = await fetch('/api/v1/voice_call/voicemail/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: this.vm.enabled, answer_secs: parseInt(this.vm.answer_secs) })
+          });
+          const data = await response.json();
+          if (data.success) {
+            this.vm.enabled = !!data.enabled;
+            this.vm.answer_secs = String(data.answer_secs);
+          } else {
+            this.showNotification('Failed to save voicemail settings: ' + (data.error || 'Unknown error'), 'error');
+            this.loadVmConfig();
+          }
+        } catch (error) {
+          this.showNotification('Error saving voicemail settings: ' + error.message, 'error');
+          this.loadVmConfig();
+        } finally {
+          this.savingVm = false;
+        }
+      },
+
+      // ========================= ring buzzer =========================
+      async loadRingerConfig() {
+        try {
+          const response = await fetch('/api/v1/voice_call/ringer/config');
+          const data = await response.json();
+          if (data.success) {
+            this.ringer.enabled = !!data.enabled;
+            this.ringer.melody = data.melody || 'classic';
+          }
+        } catch (error) {
+          console.error('Error loading ringer config:', error);
+        }
+      },
+
+      async saveRingerConfig() {
+        this.savingRinger = true;
+        try {
+          const response = await fetch('/api/v1/voice_call/ringer/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: this.ringer.enabled, melody: this.ringer.melody })
+          });
+          const data = await response.json();
+          if (data.success) {
+            this.ringer.enabled = !!data.enabled;
+            this.ringer.melody = data.melody;
+          } else {
+            this.showNotification('Failed to save ringer settings: ' + (data.error || 'Unknown error'), 'error');
+            this.loadRingerConfig();
+          }
+        } catch (error) {
+          this.showNotification('Error saving ringer settings: ' + error.message, 'error');
+          this.loadRingerConfig();
+        } finally {
+          this.savingRinger = false;
+        }
+      },
+
+      async previewMelody() {
+        try {
+          const response = await fetch('/api/v1/voice_call/ringer/preview', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ melody: this.ringer.melody })
+          });
+          const data = await response.json();
+          if (!data.success) {
+            this.showNotification('Preview failed: ' + (data.error || 'Unknown error'), 'error');
+          }
+        } catch (error) {
+          this.showNotification('Preview error: ' + error.message, 'error');
+        }
+      },
+
+      // Alpine applies x-model to a <select> before the <template x-for>
+      // inside it has produced any <option>, so a stored value that is not the
+      // first option matches nothing and the browser snaps the element to
+      // index 0 -- the page claims "tiny"/"int8" while the device is really on
+      // "medium"/"full". Re-assign once the options exist; blanking first
+      // forces the write even when the value is unchanged, which a plain
+      // same-value assignment would skip. Only the initial render is affected,
+      // so each loader does this once rather than on every poll (which would
+      // otherwise stomp on a selection the user is in the middle of making).
+      syncSelects(pairs) {
+        pairs.forEach(([obj, key]) => { obj[key] = ''; });
+        this.$nextTick(() => pairs.forEach(([obj, key, value]) => { obj[key] = value; }));
+      },
+
+      // ========================= text to speech =========================
+      async loadTtsStatus() {
+        try {
+          const response = await fetch('/api/v1/voice_call/tts/status');
+          const data = await response.json();
+          if (data.success) {
+            this.tts.engine = !!data.engine;
+            this.tts.voice = data.voice || 'en';
+            this.tts.voices = data.voices || [];
+            this.tts.downloading = !!data.downloading;
+            this.tts.download = data.download || {};
+            this.tts.selected_engine = data.selected_engine || 'espeak';
+            if (data.kokoro) this.tts.kokoro = data.kokoro;
+            if (!this.ttsSynced) {
+              this.ttsSynced = true;
+              this.syncSelects([[this.tts, 'voice', data.voice || 'en'],
+                                [this.tts.kokoro, 'voice', this.tts.kokoro.voice]]);
+            }
+            // the neural model picker only mounts once that engine is
+            // installed, so it gets its own one-shot when the block appears
+            if (!this.kokoroSynced && this.tts.kokoro.engine) {
+              this.kokoroSynced = true;
+              this.syncSelects([[this.tts.kokoro, 'model', this.tts.kokoro.model]]);
+            }
+          }
+          if (this.tts.downloading) setTimeout(() => this.loadTtsStatus(), 2000);
+        } catch (error) {
+          console.error('Error loading TTS status:', error);
+        }
+      },
+
+      ttsPct() {
+        const d = this.tts.download || {};
+        if (!d.total) return 0;
+        return Math.min(100, Math.round((d.done || 0) * 100 / d.total));
+      },
+
+      async installTts() {
+        try {
+          const response = await fetch('/api/v1/voice_call/tts/engine', { method: 'POST' });
+          const data = await response.json();
+          if (!data.success) {
+            this.showNotification('TTS install failed: ' + (data.error || 'Unknown error'), 'error');
+          }
+          this.loadTtsStatus();
+        } catch (error) {
+          this.showNotification('TTS install error: ' + error.message, 'error');
+        }
+      },
+
+      ttsVoice() {
+        return this.tts.selected_engine === 'kokoro' ? this.tts.kokoro.voice : this.tts.voice;
+      },
+
+      async saveTtsConfig() {
+        try {
+          await fetch('/api/v1/voice_call/tts/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ engine: this.tts.selected_engine,
+                                   kokoro_model: this.tts.kokoro.model,
+                                   kokoro_voice: this.tts.kokoro.voice })
+          });
+          this.loadTtsStatus();
+        } catch (error) {
+          console.error('Error saving TTS config:', error);
+        }
+      },
+
+      async installKokoro(kind) {
+        try {
+          const response = await fetch('/api/v1/voice_call/tts/engine', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ kind: kind, model: this.tts.kokoro.model })
+          });
+          const data = await response.json();
+          if (!data.success) {
+            this.showNotification('Install failed: ' + (data.error || 'Unknown error'), 'error');
+          }
+          this.loadTtsStatus();
+        } catch (error) {
+          this.showNotification('Install error: ' + error.message, 'error');
+        }
+      },
+
+      async previewTts() {
+        try {
+          const response = await fetch('/api/v1/voice_call/tts/preview', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: this.ttsText, voice: this.ttsVoice(),
+                                   engine: this.tts.selected_engine })
+          });
+          if (!response.ok) {
+            const data = await response.json().catch(() => ({}));
+            this.showNotification('Preview failed: ' + (data.error || response.status), 'error');
+            return;
+          }
+          const blob = await response.blob();
+          const player = this.$refs.recPlayer;
+          if (player) {
+            this.playingRec = null;
+            player.src = URL.createObjectURL(blob);
+            player.play().catch((e) => this.showNotification('Playback failed: ' + e.message, 'error'));
+          }
+        } catch (error) {
+          this.showNotification('Preview error: ' + error.message, 'error');
+        }
+      },
+
+      async saveTtsGreeting() {
+        this.savingTts = true;
+        try {
+          const response = await fetch('/api/v1/voice_call/tts/greeting', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: this.ttsText, voice: this.ttsVoice(),
+                                   engine: this.tts.selected_engine })
+          });
+          const data = await response.json();
+          if (data.success) {
+            this.vm.greeting = true;
+            this.showNotification('Greeting saved', 'info');
+          } else {
+            this.showNotification('Greeting failed: ' + (data.error || 'Unknown error'), 'error');
+          }
+        } catch (error) {
+          this.showNotification('Greeting error: ' + error.message, 'error');
+        } finally {
+          this.savingTts = false;
+        }
+      },
+
+      // ========================= transcription =========================
+      async loadTransStatus() {
+        try {
+          const response = await fetch('/api/v1/voice_call/transcribe/status');
+          const data = await response.json();
+          if (data.success) {
+            this.trans.engine = !!data.engine;
+            this.trans.ready = !!data.ready;
+            this.trans.model = data.model;
+            this.trans.lang = data.lang;
+            this.trans.langs = data.langs || ['auto'];
+            this.trans.auto_vm = !!data.auto_vm;
+            this.trans.models = data.models || [];
+            this.trans.busy = !!data.busy;
+            this.trans.queued = data.queued || 0;
+            this.trans.downloading = !!data.downloading;
+            this.trans.download = data.download || {};
+            if (!this.transSynced) {
+              this.transSynced = true;
+              this.syncSelects([[this.trans, 'model', data.model],
+                                [this.trans, 'lang', data.lang]]);
+            }
+          }
+          // keep polling while work is in flight, then refresh the list once
+          if (this.trans.downloading || this.trans.busy || this.trans.queued > 0) {
+            if (!this.transPolling) this.transPolling = true;
+            setTimeout(() => this.loadTransStatus(), 2500);
+          } else if (this.transPolling) {
+            this.transPolling = false;
+            this.loadRecordings();
+          }
+        } catch (error) {
+          this.transPolling = false;
+          console.error('Error loading transcribe status:', error);
+        }
+      },
+
+      activeModelInstalled() {
+        const m = this.trans.models.find(m => m.name === this.trans.model);
+        return m ? m.installed : false;
+      },
+
+      downloadPct() {
+        const d = this.trans.download || {};
+        if (!d.total) return 0;
+        return Math.min(100, Math.round((d.done || 0) * 100 / d.total));
+      },
+
+      async saveTransConfig() {
+        try {
+          const response = await fetch('/api/v1/voice_call/transcribe/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model: this.trans.model, lang: this.trans.lang, auto_vm: this.trans.auto_vm })
+          });
+          const data = await response.json();
+          if (!data.success) {
+            this.showNotification('Failed to save transcription settings: ' + (data.error || 'Unknown error'), 'error');
+          }
+          this.loadTransStatus();
+        } catch (error) {
+          this.showNotification('Error saving transcription settings: ' + error.message, 'error');
+        }
+      },
+
+      async installEngine() {
+        try {
+          const response = await fetch('/api/v1/voice_call/transcribe/engine', { method: 'POST' });
+          const data = await response.json();
+          if (!data.success) {
+            this.showNotification('Engine install failed: ' + (data.error || 'Unknown error'), 'error');
+          }
+          this.loadTransStatus();
+        } catch (error) {
+          this.showNotification('Engine install error: ' + error.message, 'error');
+        }
+      },
+
+      async downloadModel() {
+        try {
+          const response = await fetch('/api/v1/voice_call/transcribe/download', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model: this.trans.model })
+          });
+          const data = await response.json();
+          if (!data.success) {
+            this.showNotification('Download failed: ' + (data.error || 'Unknown error'), 'error');
+          }
+          this.loadTransStatus();
+        } catch (error) {
+          this.showNotification('Download error: ' + error.message, 'error');
+        }
+      },
+
+      async transcribeRec(name) {
+        try {
+          const response = await fetch('/api/v1/voice_call/transcribe/run', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: name })
+          });
+          const data = await response.json();
+          if (data.success) {
+            const r = this.recordings.data.find(r => r.name === name);
+            if (r) r.transcribing = true;
+            this.loadTransStatus();
+          } else {
+            this.showNotification('Transcription failed: ' + (data.error || 'Unknown error'), 'error');
+          }
+        } catch (error) {
+          this.showNotification('Transcription error: ' + error.message, 'error');
+        }
+      },
+
+      async toggleGreetingRecord() {
+        if (this.greetingRecording) {
+          if (this.greetingRecorder && this.greetingRecorder.state === 'recording') this.greetingRecorder.stop();
+          return;
+        }
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          const mr = new MediaRecorder(stream);
+          this.greetingChunks = [];
+          mr.ondataavailable = (e) => { if (e.data.size) this.greetingChunks.push(e.data); };
+          mr.onstop = async () => {
+            stream.getTracks().forEach(t => t.stop());
+            this.greetingRecording = false;
+            const blob = new Blob(this.greetingChunks, { type: mr.mimeType || 'audio/webm' });
+            try {
+              const resp = await fetch('/api/v1/voice_call/voicemail/greeting', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/octet-stream' },
+                body: blob
+              });
+              const data = await resp.json();
+              if (data.success) {
+                this.vm.greeting = true;
+                this.showNotification('Greeting saved', 'info');
+              } else {
+                this.showNotification('Greeting save failed: ' + (data.error || 'Unknown error'), 'error');
+              }
+            } catch (e) {
+              this.showNotification('Greeting upload error: ' + e.message, 'error');
+            }
+          };
+          mr.start();
+          this.greetingRecorder = mr;
+          this.greetingRecording = true;
+          // hard cap so a forgotten recorder can't run forever
+          setTimeout(() => {
+            if (this.greetingRecording && mr.state === 'recording') mr.stop();
+          }, 30000);
+        } catch (e) {
+          this.showNotification('Microphone error: ' + e.message, 'error');
+        }
+      },
+
+      playGreeting() {
+        const player = this.$refs.recPlayer;
+        if (!player) return;
+        this.playingRec = null;
+        player.src = '/api/v1/voice_call/voicemail/greeting?t=' + Date.now();
+        player.play().catch((e) => { this.showNotification('Playback failed: ' + e.message, 'error'); });
+      },
+
+      async deleteGreeting() {
+        if (!confirm('Delete the greeting?')) return;
+        try {
+          const response = await fetch('/api/v1/voice_call/voicemail/greeting', { method: 'DELETE' });
+          const data = await response.json();
+          if (data.success) this.vm.greeting = false;
+          else this.showNotification('Failed to delete greeting: ' + (data.error || 'Unknown error'), 'error');
+        } catch (error) {
+          this.showNotification('Error deleting greeting: ' + error.message, 'error');
+        }
+      },
+
+      async deleteRecording(name) {
+        if (!confirm('Delete this recording?')) return;
+        this.deletingRecording[name] = true;
+        try {
+          if (this.playingRec === name && this.$refs.recPlayer) {
+            this.$refs.recPlayer.pause();
+            this.playingRec = null;
+          }
+          const response = await fetch('/api/v1/voice_call/recordings/' + encodeURIComponent(name), { method: 'DELETE' });
+          const data = await response.json();
+          if (data.success) this.loadRecordings();
+          else this.showNotification('Failed to delete recording: ' + (data.error || 'Unknown error'), 'error');
+        } catch (error) {
+          this.showNotification('Error deleting recording: ' + error.message, 'error');
+        } finally {
+          this.deletingRecording[name] = false;
+        }
+      },
+
       showNotification(message, type = 'info') {
-        // Set notification data
         this.notification.message = message;
         this.notification.type = type;
         this.notification.show = true;
-        
-        // Auto-hide after 4 seconds for success and info messages
         if (type !== 'error') {
-          setTimeout(() => {
-            this.notification.show = false;
-          }, 4000);
+          setTimeout(() => { this.notification.show = false; }, 4000);
         }
-        
-        // Also log to console for debugging
-        console.log(type.toUpperCase() + ': ' + message);
       }
     }));
   });

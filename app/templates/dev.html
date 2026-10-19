@@ -1,0 +1,2143 @@
+{% extends '_base.html' %}
+{% block page_title %}{{locales["dev_title"]}}{% endblock %}
+{% block html_head %}
+<style>
+  #modem-log-pane {
+    background: #1a1a2e;
+    color: #d8dee9;
+    font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    line-height: 1.45;
+    height: calc(100vh - 320px);
+    min-height: 260px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+    padding: 8px 10px;
+    border-radius: 0.25rem;
+  }
+
+  /* ── Live 3D device model (G-sensor orientation) ──────────────────────
+     A WebGL canvas showing the real enclosure (app/static/photonicat2.glb,
+     decimated from the 37 MB CAD render by tools/cad_to_glb.sh). The renderer
+     lives in src/pcat_model.js, bundled to app/static/pcat3d.min.js; the
+     gsensor component below keeps owning the orientation math and pushes a
+     quaternion in. The canvas sizes itself from this box via ResizeObserver. */
+  .pcat3d-scene {
+    position: relative;
+    width: 220px;
+    height: 180px;
+  }
+  .pcat3d-canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+  /* Loading / failure text, centred over the canvas area. */
+  .pcat3d-overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 12px;
+    text-align: center;
+    pointer-events: none;
+  }
+
+  /* ── 18650 pack diagram (2S2P) ─────────────────────────────────────────
+     Four upright cells drawn side by side like "||||". Each cell is a
+     vertical tube with a positive nub on top; an inner bar fills bottom-up
+     with the cell's charge (mapped 2.5–4.2 V). Cells 1–2 (left) belong to
+     the lower series stage, cells 3–4 (right) to the upper stage, matching
+     the physical center-tap the MCU measures. */
+  .cell18650 {
+    position: relative;
+    width: 34px;
+    height: 132px;
+    border: 2px solid #00274D;
+    border-radius: 6px;
+    background: #f3f4f6;
+    overflow: hidden;
+  }
+  .cell18650::before {           /* positive terminal nub */
+    content: "";
+    position: absolute;
+    top: -6px; left: 50%;
+    transform: translateX(-50%);
+    width: 14px; height: 5px;
+    border-radius: 2px 2px 0 0;
+    background: #00274D;
+  }
+  .cell18650-fill {
+    position: absolute;
+    left: 0; right: 0; bottom: 0;
+    transition: height 0.4s ease, background-color 0.4s ease;
+  }
+  .cell18650-label {             /* + / − markings, drawn over the fill */
+    position: absolute;
+    left: 0; right: 0;
+    text-align: center;
+    font-size: 11px;
+    font-weight: 700;
+    color: #00274D;
+    pointer-events: none;
+  }
+</style>
+{% endblock %}
+{% block content %}
+<div class="container mx-auto w-full pt-14 pb-6 sm:pt-24 sm:pb-8 md:pt-28 lg:px-4">
+  <div class="flex items-center justify-between px-3 py-4">
+    <h1 class="font-bold uppercase text-gray-600">{{locales["dev_title"]}}</h1>
+    {% if hardware_revision %}
+    <span class="text-sm text-gray-500">{{locales["dev_hw_revision"]}}:
+      <code class="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-gray-700">{{hardware_revision}}</code>
+    </span>
+    {% endif %}
+  </div>
+
+  <!-- ─── Battery ─────────────────────────────────────────────────────────
+       Lifted from the former /battery page (battery.html); same component and
+       endpoint, now one section of the unified diagnostics page. -->
+  <div class="mb-6" x-data="battery_health">
+    <h2 class="px-3 pb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">{{locales["dev_section_battery"]}}</h2>
+
+    {% include '_notification.html' %}
+
+    <div class="flex w-full leading-normal text-gray-800">
+      <div class="grow">
+        <div class="rounded border bg-white p-4 shadow sm:p-6">
+
+          {% if not stm32_firmware_exist %}
+          <!-- Home model: no MCU at all, nothing to report -->
+          <div class="rounded border border-gray-200 bg-gray-50 p-4 text-sm text-gray-600">
+            {{locales["battery_no_mcu"]}}
+          </div>
+          {% else %}
+
+          <!-- Loading -->
+          <div x-show="loading" class="py-6 text-center text-sm text-gray-400">…</div>
+
+          <!-- MCU firmware too old to answer the query -->
+          <div x-cloak x-show="!loading && !supported"
+               class="rounded border border-orange-200 bg-orange-50 p-4">
+            <div class="font-semibold text-orange-800">{{locales["battery_unsupported"]}}</div>
+            <div class="mt-1 text-sm text-orange-700">{{locales["battery_unsupported_tip"]}}</div>
+            <a href="/update" class="mt-2 inline-block text-sm text-pcatblue hover:underline">{{locales["nav_update"]}}</a>
+          </div>
+
+          <div x-cloak x-show="!loading && supported">
+            <div class="mb-4 text-sm text-gray-500">{{locales["battery_subtitle"]}}</div>
+
+            <!-- Health: only meaningful once the MCU has actually measured the pack
+                 from a real 100% (health_pct is null otherwise) -->
+            <div x-show="capacity_learned && health_pct !== null" class="mb-6">
+              <div class="mb-1 flex items-end justify-between">
+                <span class="text-sm text-gray-600" title="{{locales['battery_health_tip']}}">{{locales["battery_health"]}}</span>
+                <span class="text-2xl font-bold" :class="health_color()" x-text="health_pct !== null ? health_pct + '%' : '--'"></span>
+              </div>
+              <div class="h-2 w-full overflow-hidden rounded bg-gray-200">
+                <div class="h-2 rounded transition-all" :class="health_bar_color()"
+                     :style="'width: ' + Math.max(0, Math.min(100, health_pct || 0)) + '%'"></div>
+              </div>
+            </div>
+
+            <!-- Not measured yet: say so plainly, otherwise the rated capacity
+                 below reads as if it were a measurement.
+                 Two separate blocks rather than an x-text ternary holding the
+                 strings: locale text must stay in HTML text nodes, never inside a
+                 JS string literal, or an apostrophe in a translation breaks the
+                 expression (EN battery_cycle_count_tip already has one). -->
+            <div x-show="!capacity_learned && learning_active"
+                 class="mb-6 rounded border border-blue-200 bg-blue-50 p-3">
+              <div class="text-sm font-semibold text-blue-800">{{locales["battery_learning_active"]}}</div>
+              <div class="mt-1 text-xs text-blue-700">{{locales["battery_learning_active_tip"]}}</div>
+            </div>
+            <div x-show="!capacity_learned && !learning_active"
+                 class="mb-6 rounded border border-blue-200 bg-blue-50 p-3">
+              <div class="text-sm font-semibold text-blue-800">{{locales["battery_not_learned"]}}</div>
+              <div class="mt-1 text-xs text-blue-700">{{locales["battery_not_learned_tip"]}}</div>
+            </div>
+            <!-- Never charged to 100% (typically a charge limit below 100%):
+                 the MCU withholds health, so explain why instead of showing it. -->
+            <div x-show="capacity_learned && full_charge_seen === false"
+                 class="mb-6 rounded border border-blue-200 bg-blue-50 p-3">
+              <div class="text-sm font-semibold text-blue-800">{{locales["battery_needs_full_charge"]}}</div>
+              <div class="mt-1 text-xs text-blue-700">{{locales["battery_needs_full_charge_tip"]}}</div>
+            </div>
+
+            <dl class="grid grid-cols-1 gap-4 sm:grid-cols-3">
+              <div class="rounded border border-gray-200 p-3">
+                <dt class="text-xs text-gray-500">{{locales["battery_full_capacity"]}}</dt>
+                <dd class="mt-1">
+                  <span class="text-xl font-semibold" x-text="full_capacity !== null ? full_capacity : '--'"></span>
+                  <span class="ml-1 text-xs text-gray-500">{{locales["battery_unit_mah"]}}</span>
+                  <span x-show="capacity_learned" class="ml-1 rounded bg-green-100 px-1.5 py-0.5 text-xs text-green-700">{{locales["battery_learned"]}}</span>
+                  <span x-show="!capacity_learned" class="ml-1 rounded bg-gray-100 px-1.5 py-0.5 text-xs text-gray-500">{{locales["battery_not_learned"]}}</span>
+                  <!-- Measured value reads low while the current-meter gain is
+                       uncalibrated; suggested pump-up factor (nominal/measured)
+                       to compile into the MCU after multimeter verification. -->
+                  <div x-show="suggest_factor !== null" class="mt-1 text-xs text-gray-400"
+                       title="suggested capacity correction factor = nominal / measured; apply as ax+b current trim in MCU after multimeter calibration"
+                       x-text="'suggest ×' + suggest_factor"></div>
+                </dd>
+              </div>
+
+              <div class="rounded border border-gray-200 p-3">
+                <dt class="text-xs text-gray-500">{{locales["battery_nominal_capacity"]}}</dt>
+                <dd class="mt-1">
+                  <span class="text-xl font-semibold" x-text="nominal_capacity !== null ? nominal_capacity : '--'"></span>
+                  <span class="ml-1 text-xs text-gray-500">{{locales["battery_unit_mah"]}}</span>
+                </dd>
+              </div>
+
+              <div class="rounded border border-gray-200 p-3">
+                <dt class="text-xs text-gray-500" title="{{locales['battery_cycle_count_tip']}}">{{locales["battery_cycle_count"]}}</dt>
+                <dd class="mt-1">
+                  <span class="text-xl font-semibold" x-text="cycle_count !== null ? cycle_count : '--'"></span>
+                  <span class="ml-1 text-xs text-gray-500">{{locales["battery_unit_times"]}}</span>
+                </dd>
+              </div>
+
+              <!-- Extended fields: only sent by MCU fw >= RA2E1260717006, hide otherwise.
+                   internal_resistance is the whole-loop total (cells + wiring + MOSFET). -->
+              <div x-show="internal_resistance !== null" class="rounded border border-gray-200 p-3">
+                <dt class="text-xs text-gray-500" title="{{locales['battery_internal_resistance_tip']}}">{{locales["battery_internal_resistance"]}}</dt>
+                <dd class="mt-1">
+                  <span class="text-xl font-semibold" x-text="internal_resistance !== null ? internal_resistance : '--'"></span>
+                  <span class="ml-1 text-xs text-gray-500">{{locales["battery_unit_mohm"]}}</span>
+                </dd>
+              </div>
+
+              <!-- Cell-only resistance (total - ~35mOhm parasitic): only sent by
+                   MCU fw >= RA2E1260721001, hide otherwise -->
+              <div x-show="internal_resistance_battery !== null" class="rounded border border-gray-200 p-3">
+                <dt class="text-xs text-gray-500" title="{{locales['battery_internal_resistance_battery_tip']}}">{{locales["battery_internal_resistance_battery"]}}</dt>
+                <dd class="mt-1">
+                  <span class="text-xl font-semibold" x-text="internal_resistance_battery !== null ? internal_resistance_battery : '--'"></span>
+                  <span class="ml-1 text-xs text-gray-500">{{locales["battery_unit_mohm"]}}</span>
+                </dd>
+              </div>
+
+              <div x-show="runtime_hours !== null" class="rounded border border-gray-200 p-3">
+                <dt class="text-xs text-gray-500" title="{{locales['battery_runtime_hours_tip']}}">{{locales["battery_runtime_hours"]}}</dt>
+                <dd class="mt-1">
+                  <span class="text-xl font-semibold" x-text="runtime_hours !== null ? runtime_hours : '--'"></span>
+                  <span class="ml-1 text-xs text-gray-500">{{locales["battery_unit_hours"]}}</span>
+                </dd>
+              </div>
+
+              <!-- MCU uptime (time without a reset): only sent by MCU fw >= RA2E1260721006 (proto v9), hide otherwise -->
+              <div x-show="mcu_uptime_seconds !== null" class="rounded border border-gray-200 p-3">
+                <dt class="text-xs text-gray-500" title="{{locales['battery_mcu_uptime_tip']}}">{{locales["battery_mcu_uptime"]}}</dt>
+                <dd class="mt-1">
+                  <span class="text-xl font-semibold" x-text="fmt_duration(mcu_uptime_seconds)"></span>
+                </dd>
+              </div>
+
+              <!-- Time since the MCU last woke from standby: only sent by MCU fw >= RA2E1260721006 (proto v9), hide otherwise -->
+              <div x-show="mcu_since_sleep_seconds !== null" class="rounded border border-gray-200 p-3">
+                <dt class="text-xs text-gray-500" title="{{locales['battery_since_sleep_tip']}}">{{locales["battery_since_sleep"]}}</dt>
+                <dd class="mt-1">
+                  <span class="text-xl font-semibold" x-text="fmt_duration(mcu_since_sleep_seconds)"></span>
+                  <span x-show="mcu_sleep_count !== null" class="ml-1 text-xs text-gray-500"
+                        x-text="mcu_sleep_count !== null ? (mcu_sleep_count + ' {{locales['battery_sleep_count']}}') : ''"></span>
+                </dd>
+              </div>
+
+              <!-- 2P2S pack middle-point tap voltage: only sent by MCU fw >= RA2E1260718001, hide otherwise -->
+              <div x-show="mid_voltage !== null" class="rounded border border-gray-200 p-3">
+                <dt class="text-xs text-gray-500" title="{{locales['battery_mid_voltage_tip']}}">{{locales["battery_mid_voltage"]}}</dt>
+                <dd class="mt-1">
+                  <span class="text-xl font-semibold" x-text="mid_voltage !== null ? mid_voltage : '--'"></span>
+                  <span class="ml-1 text-xs text-gray-500">{{locales["battery_unit_volt"]}}</span>
+                </dd>
+              </div>
+
+              <!-- Remaining capacity / energy counters: only sent by MCU fw >= RA2E1260719002, hide otherwise -->
+              <div x-show="remain_mah !== null" class="rounded border border-gray-200 p-3">
+                <dt class="text-xs text-gray-500" title="{{locales['battery_remain_mah_tip']}}">{{locales["battery_remain_mah"]}}</dt>
+                <dd class="mt-1">
+                  <span class="text-xl font-semibold" x-text="remain_mah !== null ? remain_mah : '--'"></span>
+                  <span class="ml-1 text-xs text-gray-500">{{locales["battery_unit_mah"]}}</span>
+                </dd>
+              </div>
+
+              <div x-show="consumed_wh !== null" class="rounded border border-gray-200 p-3">
+                <dt class="text-xs text-gray-500" title="{{locales['battery_consumed_wh_tip']}}">{{locales["battery_consumed_wh"]}}</dt>
+                <dd class="mt-1">
+                  <span class="text-xl font-semibold" x-text="consumed_wh !== null ? consumed_wh : '--'"></span>
+                  <span class="ml-1 text-xs text-gray-500">{{locales["battery_unit_wh"]}}</span>
+                </dd>
+              </div>
+
+              <div x-show="charged_wh !== null" class="rounded border border-gray-200 p-3">
+                <dt class="text-xs text-gray-500" title="{{locales['battery_charged_wh_tip']}}">{{locales["battery_charged_wh"]}}</dt>
+                <dd class="mt-1">
+                  <span class="text-xl font-semibold" x-text="charged_wh !== null ? charged_wh : '--'"></span>
+                  <span class="ml-1 text-xs text-gray-500">{{locales["battery_unit_wh"]}}</span>
+                </dd>
+              </div>
+
+              <!-- The MCU "time to 0%" / "time to full" estimates used to sit
+                   here. Both extrapolate from an averaged current against a
+                   derated capacity, so they swung with load and read as wrong
+                   far more often than they read as useful. Measured
+                   on-battery time below is the honest version of the same
+                   question, so the estimates are gone rather than duplicated. -->
+
+              <!-- Temperature compensation: only sent by MCU fw >= RA2E1260719009 (proto v7), hide otherwise -->
+              <div x-show="gauge_temp_c !== null" class="rounded border border-gray-200 p-3">
+                <dt class="text-xs text-gray-500" title="{{locales['battery_gauge_temp_tip']}}">{{locales["battery_gauge_temp"]}}</dt>
+                <dd class="mt-1">
+                  <span class="text-xl font-semibold" x-text="gauge_temp_c !== null ? gauge_temp_c : '--'"></span>
+                  <span class="ml-1 text-xs text-gray-500">{{locales["battery_unit_celsius"]}}</span>
+                </dd>
+              </div>
+
+              <!-- On-battery session: how long the device has been awake on
+                   battery since DC was last unplugged. Resets when DC is
+                   plugged back in; while on DC the last completed run is shown
+                   greyed out. Derived from the persisted power event log, so a
+                   reboot mid-run does not count the powered-off gap. -->
+              <div x-show="on_battery_seconds !== null" class="rounded border border-gray-200 p-3">
+                <dt class="text-xs text-gray-500" title="{{locales['battery_on_battery_time_tip']}}">{{locales["battery_on_battery_time"]}}</dt>
+                <dd class="mt-1">
+                  <span class="text-xl font-semibold" :class="on_battery_active ? '' : 'text-gray-400'"
+                        x-text="fmt_duration(on_battery_seconds)"></span>
+                  <span x-show="!on_battery_active" class="ml-1 rounded bg-gray-100 px-1.5 py-0.5 text-xs text-gray-500">{{locales["battery_on_battery_last_run"]}}</span>
+                  <div x-show="on_battery_since" class="mt-1 text-xs text-gray-400"
+                       x-text="on_battery_since_text()"></div>
+                </dd>
+              </div>
+            </dl>
+
+          </div>
+
+          {% endif %}
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── Battery Pack (2S2P 18650) ──────────────────────────────────────
+       Four 18650 cells drawn "||||". Left pair = lower series stage (its
+       voltage is the MCU center-tap, mid_voltage_v); right pair = upper
+       stage (total pack voltage − center-tap). Current / power come from the
+       same battery gauge exposed on the dashboard. -->
+  <div class="mb-6" x-data="battery_pack">
+    <h2 class="px-3 pb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">{{locales["dev_section_pack"]}}</h2>
+    <div class="rounded border bg-white p-4 shadow sm:p-6">
+      <div x-show="loading" class="py-6 text-center text-sm text-gray-400">…</div>
+
+      <div x-cloak x-show="!loading">
+        <div class="mb-4 text-sm text-gray-500">{{locales["dev_pack_subtitle"]}}</div>
+
+        <!-- Firmware without center-tap sensing: total still shown, split can't be -->
+        <div x-show="mid_v === null"
+             class="mb-4 rounded border border-orange-200 bg-orange-50 p-3 text-xs text-orange-700">
+          {{locales["dev_pack_unavailable"]}}
+        </div>
+
+        <div class="flex flex-col items-start gap-6 lg:flex-row lg:items-center lg:justify-between">
+
+          <!-- Cell diagram: | | | | with a series link and a center tap -->
+          <div class="shrink-0">
+            <div class="flex items-end gap-4">
+              <!-- Lower stage: cells 1 & 2 (left pair) -->
+              <div class="flex flex-col items-center">
+                <div class="flex items-end gap-2">
+                  <template x-for="i in 2" :key="'lo'+i">
+                    <div class="flex flex-col items-center">
+                      <div class="cell18650">
+                        <div class="cell18650-fill" :style="cell_style(lower_v)"></div>
+                        <span class="cell18650-label" style="top:4px;">+</span>
+                        <span class="cell18650-label" style="bottom:4px;">−</span>
+                      </div>
+                      <div class="mt-1 text-[10px] text-gray-400" x-text="'{{locales['dev_pack_cell']}} ' + i"></div>
+                    </div>
+                  </template>
+                </div>
+                <div class="mt-1 text-center">
+                  <div class="text-sm font-semibold text-pcatgray" x-text="fmt_v(lower_v)"></div>
+                  <div class="text-[11px] text-gray-500">{{locales["dev_pack_lower"]}}</div>
+                </div>
+              </div>
+
+              <!-- Center tap between the two stages -->
+              <div class="flex flex-col items-center pb-8">
+                <div class="h-8 w-px bg-gray-300"></div>
+                <div class="whitespace-nowrap rounded bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-500"
+                     x-text="'{{locales['dev_pack_mid']}} ' + fmt_v(mid_v)"></div>
+              </div>
+
+              <!-- Upper stage: cells 3 & 4 (right pair) -->
+              <div class="flex flex-col items-center">
+                <div class="flex items-end gap-2">
+                  <template x-for="i in 2" :key="'up'+i">
+                    <div class="flex flex-col items-center">
+                      <div class="cell18650">
+                        <div class="cell18650-fill" :style="cell_style(upper_v)"></div>
+                        <span class="cell18650-label" style="top:4px;">+</span>
+                        <span class="cell18650-label" style="bottom:4px;">−</span>
+                      </div>
+                      <div class="mt-1 text-[10px] text-gray-400" x-text="'{{locales['dev_pack_cell']}} ' + (i + 2)"></div>
+                    </div>
+                  </template>
+                </div>
+                <div class="mt-1 text-center">
+                  <div class="text-sm font-semibold text-pcatgray" x-text="fmt_v(upper_v)"></div>
+                  <div class="text-[11px] text-gray-500">{{locales["dev_pack_upper"]}}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Readouts: total, current, power -->
+          <dl class="grid w-full grid-cols-2 gap-3 sm:grid-cols-4 lg:w-auto lg:max-w-md">
+            <div class="rounded border border-gray-200 p-3">
+              <dt class="text-xs text-gray-500">{{locales["dev_pack_total"]}}</dt>
+              <dd class="mt-1">
+                <span class="text-xl font-semibold tabular-nums" x-text="fmt_v(total_v)"></span>
+              </dd>
+            </div>
+            <div class="rounded border border-gray-200 p-3">
+              <dt class="text-xs text-gray-500">{{locales["dev_pack_mid"]}}</dt>
+              <dd class="mt-1">
+                <span class="text-xl font-semibold tabular-nums" x-text="fmt_v(mid_v)"></span>
+              </dd>
+            </div>
+            {% if is_photonicat2 %}
+            <!-- Current and power come from the Photonicat 2 fuel gauge; a
+                 Photonicat 1 has no current sensor at all. -->
+            <div class="rounded border border-gray-200 p-3">
+              <dt class="text-xs text-gray-500">{{locales["dev_pack_current"]}}</dt>
+              <dd class="mt-1">
+                <span class="text-xl font-semibold tabular-nums" :class="flow_color()" x-text="fmt_a(current_a)"></span>
+              </dd>
+            </div>
+            <div class="rounded border border-gray-200 p-3">
+              <dt class="text-xs text-gray-500">{{locales["dev_pack_power"]}}</dt>
+              <dd class="mt-1">
+                <span class="text-xl font-semibold tabular-nums" :class="flow_color()" x-text="fmt_w(power_w)"></span>
+              </dd>
+            </div>
+            <div class="col-span-2 sm:col-span-4">
+              <span class="rounded-full px-2 py-0.5 text-xs" :class="flow_badge()" x-text="flow_label()"></span>
+            </div>
+            {% endif %}
+          </dl>
+        </div>
+
+        <div class="mt-4 px-1 text-xs text-gray-400">{{locales["dev_pack_note"]}}</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── Orientation (accelerometer / G-sensor) ─────────────────────────
+       Live 3D device model driven by the photonicat-pm g-sensor
+       (/api/v1/gsensor.json → gs_x/gs_y/gs_z). The box tilts with the
+       physical device. If the sensor is absent (Home model) the component
+       reports supported=false and only the note shows. -->
+  <div class="mb-6" x-data="gsensor">
+    <h2 class="px-3 pb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">{{locales["dev_section_accel"]}}</h2>
+    <div class="rounded border bg-white p-4 shadow sm:p-6">
+
+      <!-- No g-sensor on this hardware -->
+      <div x-cloak x-show="!loading && !supported">
+        <div class="rounded border border-gray-200 bg-gray-50 p-3 text-sm text-gray-600">
+          {{locales["dev_accel_unavailable"]}}
+        </div>
+        <div class="mt-2 px-1 text-xs text-gray-400">{{locales["dev_accel_unavailable_tip"]}}</div>
+      </div>
+
+      <!-- Live orientation -->
+      <div x-cloak x-show="supported" class="flex flex-col items-center gap-6 sm:flex-row sm:items-start sm:justify-around">
+        <!-- 3D device model. In calibrate mode it can be dragged with the mouse
+             to fine-tune the device→model rotation. -->
+        <div class="shrink-0 select-none">
+          <div class="pcat3d-scene" :class="calibrating ? 'cursor-grab' : ''"
+               @pointerdown="drag_start($event)" @pointermove="drag_move($event)"
+               @pointerup="drag_end()" @pointerleave="drag_end()">
+            <canvas class="pcat3d-canvas" x-ref="canvas3d"></canvas>
+            <div class="pcat3d-overlay text-xs text-gray-400" x-show="!model_ready && !model_error">
+              {{locales["dev_accel_model_loading"]}}
+            </div>
+            <div class="pcat3d-overlay text-xs text-red-500" x-cloak x-show="model_error">
+              {{locales["dev_accel_model_error"]}}
+            </div>
+          </div>
+        </div>
+
+        <!-- Readouts + calibration -->
+        <div class="w-full max-w-xs">
+          <dl class="grid grid-cols-3 gap-2 text-center">
+            <div class="rounded border border-gray-200 p-2">
+              <dt class="text-xs text-gray-500">X</dt>
+              <dd class="text-lg font-semibold tabular-nums" x-text="fmt_g(g.x)"></dd>
+            </div>
+            <div class="rounded border border-gray-200 p-2">
+              <dt class="text-xs text-gray-500">Y</dt>
+              <dd class="text-lg font-semibold tabular-nums" x-text="fmt_g(g.y)"></dd>
+            </div>
+            <div class="rounded border border-gray-200 p-2">
+              <dt class="text-xs text-gray-500">Z</dt>
+              <dd class="text-lg font-semibold tabular-nums" x-text="fmt_g(g.z)"></dd>
+            </div>
+          </dl>
+          <div class="mt-2 grid grid-cols-2 gap-2 text-center text-xs text-gray-500">
+            <div class="rounded bg-gray-50 px-2 py-1">
+              {{locales["dev_accel_pitch"]}} <span class="font-semibold text-gray-700 tabular-nums" x-text="pitch + '°'"></span>
+            </div>
+            <div class="rounded bg-gray-50 px-2 py-1">
+              {{locales["dev_accel_roll"]}} <span class="font-semibold text-gray-700 tabular-nums" x-text="roll + '°'"></span>
+            </div>
+          </div>
+          <div class="mt-2 text-center">
+            <span x-show="movement" class="rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-700">{{locales["dev_accel_moving"]}}</span>
+            <span class="ml-1 text-xs text-gray-400" x-text="'|g| ' + magnitude"></span>
+          </div>
+          <div x-show="error_text" class="mt-2 text-center text-xs text-red-500" x-text="error_text"></div>
+
+          <!-- Calibrate entry -->
+          <div x-show="!calibrating" class="mt-3 text-center">
+            <button type="button" @click="calibrate_start()"
+                    class="rounded border border-pcatblue px-3 py-1 text-sm text-pcatblue hover:bg-pcatblue hover:text-white">
+              {{locales["dev_accel_calibrate"]}}
+            </button>
+            <span x-show="calibrated" class="ml-2 rounded-full bg-green-100 px-2 py-0.5 text-xs text-green-700">{{locales["dev_accel_calibrated"]}}</span>
+          </div>
+
+          <!-- Guided calibration: step 1 asks for a known position, step 2 lets
+               the user rotate the model with keys/buttons to match, then Save. -->
+          <div x-show="calibrating" x-cloak
+               class="mt-3 rounded border border-pcatblue/40 bg-blue-50 p-3"
+               @keydown.window="on_key($event)" tabindex="0" x-ref="calibpanel">
+
+            <!-- STEP 1: put the device in the guided position -->
+            <div x-show="calib_step === 1">
+              <div class="text-sm font-semibold text-pcatblue">{{locales["dev_accel_step1_title"]}}</div>
+              <div class="mt-1 flex items-start gap-2 rounded bg-white p-2">
+                <span class="text-2xl leading-none">🛏️</span>
+                <div class="text-xs text-gray-700">{{locales["dev_accel_step1_guide"]}}</div>
+              </div>
+              <div class="mt-2 flex items-center gap-2 text-xs text-gray-500">
+                <span x-text="'(' + fmt_g(g.x) + ', ' + fmt_g(g.y) + ', ' + fmt_g(g.z) + ')'"></span>
+                <span x-show="pose_ok" class="rounded-full bg-green-100 px-2 py-0.5 text-green-700">{{locales["dev_accel_pose_detected"]}}</span>
+              </div>
+              <div class="mt-2 flex gap-1">
+                <button type="button" @click="calib_next()"
+                        class="rounded bg-pcatblue px-3 py-1 text-xs text-white hover:opacity-90">
+                  {{locales["dev_accel_next"]}}
+                </button>
+                <button type="button" @click="calibrate_cancel()"
+                        class="rounded border border-gray-300 px-2 py-1 text-xs text-gray-600 hover:bg-gray-100">
+                  {{locales["dev_accel_cancel"]}}
+                </button>
+              </div>
+            </div>
+
+            <!-- STEP 2: rotate the model to match the physical device -->
+            <div x-show="calib_step === 2">
+              <div class="text-sm font-semibold text-pcatblue">{{locales["dev_accel_step2_title"]}}</div>
+              <div class="mt-1 text-xs text-gray-700">{{locales["dev_accel_step2_guide"]}}</div>
+
+              <!-- Key legend + clickable buttons (each shows its key) -->
+              <div class="mt-2 grid grid-cols-3 gap-1 text-center">
+                <button type="button" @click="key_rot('w')" class="rounded border border-gray-300 py-1 text-xs hover:bg-gray-100"><b>W</b><br><span class="text-gray-400">{{locales["dev_accel_tip_up"]}}</span></button>
+                <button type="button" @click="key_rot('e')" class="rounded border border-gray-300 py-1 text-xs hover:bg-gray-100"><b>Q/E</b><br><span class="text-gray-400">{{locales["dev_accel_roll"]}}</span></button>
+                <button type="button" @click="key_rot('s')" class="rounded border border-gray-300 py-1 text-xs hover:bg-gray-100"><b>S</b><br><span class="text-gray-400">{{locales["dev_accel_tip_down"]}}</span></button>
+                <button type="button" @click="key_rot('a')" class="rounded border border-gray-300 py-1 text-xs hover:bg-gray-100"><b>A</b><br><span class="text-gray-400">{{locales["dev_accel_turn_left"]}}</span></button>
+                <button type="button" @click="snap()" class="rounded border border-gray-300 py-1 text-xs text-pcatblue hover:bg-gray-100">{{locales["dev_accel_snap"]}}</button>
+                <button type="button" @click="key_rot('d')" class="rounded border border-gray-300 py-1 text-xs hover:bg-gray-100"><b>D</b><br><span class="text-gray-400">{{locales["dev_accel_turn_right"]}}</span></button>
+              </div>
+              <div class="mt-1 text-center text-xs text-gray-400">{{locales["dev_accel_step_hint"]}}</div>
+
+              <div class="mt-2 flex gap-1">
+                <button type="button" @click="save_calibration()"
+                        class="rounded bg-green-600 px-3 py-1 text-xs text-white hover:opacity-90">
+                  {{locales["dev_accel_save"]}}
+                </button>
+                <button type="button" @click="calib_step = 1"
+                        class="rounded border border-gray-300 px-2 py-1 text-xs text-gray-600 hover:bg-gray-100">
+                  {{locales["dev_accel_back"]}}
+                </button>
+                <button type="button" @click="reset_calibration()"
+                        class="rounded border border-red-300 px-2 py-1 text-xs text-red-600 hover:bg-red-50">
+                  {{locales["dev_accel_reset"]}}
+                </button>
+                <button type="button" @click="calibrate_cancel()"
+                        class="rounded border border-gray-300 px-2 py-1 text-xs text-gray-600 hover:bg-gray-100">
+                  {{locales["dev_accel_cancel"]}}
+                </button>
+              </div>
+            </div>
+
+            <div x-show="calib_msg" class="mt-1 text-xs" :class="calib_msg_ok ? 'text-green-600' : 'text-red-500'" x-text="calib_msg"></div>
+          </div>
+
+          <div class="mt-2 px-1 text-center text-xs text-gray-400">{{locales["dev_accel_source_note"]}}</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── Buzzer ──────────────────────────────────────────────────────────
+       Lifted from the former /buzzer page (buzzer.html); same component and
+       endpoint, now one section of the unified diagnostics page. -->
+  <div class="mb-6" x-data="buzzer_page">
+    <h2 class="px-3 pb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">{{locales["dev_section_buzzer"]}}</h2>
+    <div class="flex w-full leading-normal text-gray-800">
+      <div class="grow">
+        <div class="rounded border bg-white p-4 shadow sm:p-6">
+
+          {% if not stm32_firmware_exist %}
+          <!-- Home model: no MCU at all, no buzzer to drive -->
+          <div class="rounded border border-gray-200 bg-gray-50 p-4 text-sm text-gray-600">
+            {{locales["buzzer_no_mcu"]}}
+          </div>
+          {% else %}
+
+          <div class="mb-4 text-sm text-gray-500">{{locales["buzzer_subtitle"]}}</div>
+
+          <!-- Errors are enum flags toggled from JS; the text itself stays in
+               HTML text nodes so an apostrophe in a translation can never break
+               a JS string literal. -->
+          <div x-cloak x-show="error === 'send_failed'" class="mb-4 rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">{{locales["buzzer_send_failed"]}}</div>
+          <div x-cloak x-show="error === 'parse_failed'" class="mb-4 rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">{{locales["buzzer_midi_parse_failed"]}}</div>
+          <div x-cloak x-show="error === 'empty'" class="mb-4 rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">{{locales["buzzer_midi_empty"]}}</div>
+
+          <!-- Test tones -->
+          <div class="mb-6">
+            <h3 class="mb-2 text-sm font-semibold text-gray-600">{{locales["buzzer_tone_section"]}}</h3>
+            <div class="flex flex-wrap gap-2">
+              <button @click="play_preset('short')" class="rounded bg-pcatblue px-4 py-2 text-sm text-white hover:bg-blue-700">{{locales["buzzer_beep_short"]}}</button>
+              <button @click="play_preset('double')" class="rounded bg-pcatblue px-4 py-2 text-sm text-white hover:bg-blue-700">{{locales["buzzer_beep_double"]}}</button>
+              <button @click="play_preset('chime')" class="rounded bg-pcatblue px-4 py-2 text-sm text-white hover:bg-blue-700">{{locales["buzzer_chime"]}}</button>
+              <button @click="stop()" class="rounded bg-gray-200 px-4 py-2 text-sm text-gray-700 hover:bg-gray-300">{{locales["buzzer_stop"]}}</button>
+            </div>
+          </div>
+
+          <!-- Custom tone -->
+          <div class="mb-6">
+            <h3 class="mb-2 text-sm font-semibold text-gray-600">{{locales["buzzer_custom_section"]}}</h3>
+            <div class="flex flex-wrap items-end gap-2">
+              <label class="block">
+                <span class="text-xs text-gray-500">{{locales["buzzer_freq_label"]}}</span>
+                <input type="number" x-model.number="custom_hz" min="50" max="12000" class="mt-1 block w-32 rounded border-gray-300 text-sm" />
+              </label>
+              <label class="block">
+                <span class="text-xs text-gray-500">{{locales["buzzer_duration_label"]}}</span>
+                <input type="number" x-model.number="custom_ms" min="10" max="5000" class="mt-1 block w-32 rounded border-gray-300 text-sm" />
+              </label>
+              <button @click="play_custom()" class="rounded bg-pcatblue px-4 py-2 text-sm text-white hover:bg-blue-700">{{locales["buzzer_play"]}}</button>
+            </div>
+          </div>
+
+          <!-- MIDI player -->
+          <div>
+            <h3 class="mb-2 text-sm font-semibold text-gray-600">{{locales["buzzer_midi_section"]}}</h3>
+            <p class="mb-3 text-xs text-gray-500">{{locales["buzzer_midi_tip"]}}</p>
+
+            <div class="mb-3 flex flex-wrap items-end gap-2">
+              <label class="block">
+                <span class="text-xs text-gray-500">{{locales["buzzer_octave_label"]}}</span>
+                <select x-model.number="octave" class="mt-1 block w-40 rounded border-gray-300 text-sm">
+                  <option value="0">{{locales["buzzer_octave_0"]}}</option>
+                  <option value="1">{{locales["buzzer_octave_1"]}}</option>
+                  <option value="2">{{locales["buzzer_octave_2"]}}</option>
+                </select>
+              </label>
+            </div>
+
+            <div class="mb-3">
+              <span class="mr-2 text-xs text-gray-500">{{locales["buzzer_sample_label"]}}</span>
+              <div class="mt-1 flex flex-wrap gap-2">
+                <button @click="play_sample('twinkle_twinkle')" class="rounded bg-pcatblue px-4 py-2 text-sm text-white hover:bg-blue-700">{{locales["buzzer_sample_twinkle"]}}</button>
+                <button @click="play_sample('ode_to_joy')" class="rounded bg-pcatblue px-4 py-2 text-sm text-white hover:bg-blue-700">{{locales["buzzer_sample_ode"]}}</button>
+                <button @click="stop()" class="rounded bg-gray-200 px-4 py-2 text-sm text-gray-700 hover:bg-gray-300">{{locales["buzzer_stop"]}}</button>
+              </div>
+            </div>
+
+            <label class="mb-3 block">
+              <span class="text-xs text-gray-500">{{locales["buzzer_midi_file_label"]}}</span>
+              <input type="file" accept=".mid,.midi" @change="play_file($event)"
+                     class="mt-1 block w-full max-w-md text-sm text-gray-600 file:mr-3 file:rounded file:border-0 file:bg-gray-100 file:px-3 file:py-1.5 file:text-sm file:text-gray-700 hover:file:bg-gray-200" />
+            </label>
+
+            <!-- Progress -->
+            <div x-cloak x-show="playing" class="max-w-md">
+              <div class="mb-1 flex items-center justify-between text-xs text-gray-500">
+                <span>{{locales["buzzer_playing"]}}</span>
+                <span><span x-text="Math.ceil(elapsed_ms / 1000)"></span>s / <span x-text="Math.ceil(total_ms / 1000)"></span>s</span>
+              </div>
+              <div class="h-2 w-full overflow-hidden rounded bg-gray-200">
+                <div class="h-2 rounded bg-pcatblue transition-all"
+                     :style="'width: ' + Math.max(0, Math.min(100, total_ms ? (elapsed_ms / total_ms) * 100 : 0)) + '%'"></div>
+              </div>
+            </div>
+          </div>
+
+          {% endif %}
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── Bluetooth ───────────────────────────────────────────────────────
+       Whether BT works is decided at kernel-build time, not at runtime: the
+       vendor aic_btusb driver either registers a BlueZ adapter or an Android
+       char device depending on CONFIG_BLUEDROID. The panel therefore leads
+       with the diagnosis and only offers a scan when there is an adapter to
+       scan with -- a bare "scan failed" would send someone hunting a radio
+       fault that is really a firmware build problem. -->
+  <div class="mb-6" x-data="bluetooth_panel">
+    <h2 class="px-3 pb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">{{locales["dev_section_bluetooth"]}}</h2>
+    <div class="flex w-full leading-normal text-gray-800">
+      <div class="grow">
+        <div class="rounded border bg-white p-4 shadow sm:p-6">
+
+          <div x-cloak x-show="loading" class="text-sm text-gray-500">{{locales["bt_loading"]}}</div>
+
+          <template x-if="!loading">
+            <div>
+              <!-- Radio state -->
+              <div class="mb-4 flex flex-wrap items-center gap-2">
+                <span class="rounded px-2 py-1 text-xs font-semibold"
+                      :class="state.usable ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'"
+                      x-text="state.usable ? adapterLabel() : notReadyLabel()"></span>
+                <span x-cloak x-show="state.chip_present" class="rounded bg-gray-100 px-2 py-1 text-xs text-gray-600">{{locales["bt_chip_present"]}}</span>
+                <span x-cloak x-show="state.daemon_running" class="rounded bg-gray-100 px-2 py-1 text-xs text-gray-600">{{locales["bt_daemon_running"]}}</span>
+                <span x-cloak x-show="state.soft_blocked || state.hard_blocked" class="rounded bg-yellow-100 px-2 py-1 text-xs text-yellow-800">{{locales["bt_rfkill_blocked"]}}</span>
+              </div>
+
+              <!-- Why there is no adapter. This is the useful half on a board
+                   whose driver was built in bluedroid mode. -->
+              <div x-cloak x-show="state.diagnosis"
+                   class="mb-4 rounded border border-yellow-200 bg-yellow-50 p-3 text-sm text-yellow-800">
+                <div class="font-semibold">{{locales["bt_diagnosis"]}}</div>
+                <div class="mt-1" x-text="state.diagnosis"></div>
+                <div x-cloak x-show="state.bluedroid_build === true" class="mt-2 text-xs">{{locales["bt_bluedroid_hint"]}}</div>
+              </div>
+
+              <div class="mb-4 flex flex-wrap items-center gap-3">
+                <button type="button" @click="scan()" :disabled="scanning"
+                        class="rounded bg-pcatblue px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">
+                  <span x-show="!scanning">{{locales["bt_scan_button"]}}</span>
+                  <span x-cloak x-show="scanning" x-text="scanningLabel()"></span>
+                </button>
+                <button type="button" @click="load()" :disabled="scanning"
+                        class="rounded border border-gray-300 px-4 py-2 text-sm text-gray-700 disabled:opacity-50">
+                  {{locales["bt_refresh_button"]}}
+                </button>
+              </div>
+
+              <!-- Recovery transcript: shown only when a scan had to try to
+                   bring the radio up, so a healthy board stays uncluttered. -->
+              <template x-if="recovery && recovery.steps && recovery.steps.length">
+                <div class="mb-4 rounded border border-gray-200 bg-gray-50 p-3 text-xs">
+                  <div class="mb-1 font-semibold text-gray-600">{{locales["bt_recovery_steps"]}}</div>
+                  <template x-for="s in recovery.steps" :key="s.step">
+                    <div class="flex gap-2">
+                      <span :class="s.ok ? 'text-green-700' : 'text-red-700'" x-text="s.ok ? '✓' : '✗'"></span>
+                      <span class="text-gray-700" x-text="s.step"></span>
+                      <span class="text-gray-400" x-text="s.detail"></span>
+                    </div>
+                  </template>
+                </div>
+              </template>
+
+              <div x-cloak x-show="scanError"
+                   class="mb-4 rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700" x-text="scanError"></div>
+
+              <!-- Results. An empty list after a successful scan is reported
+                   as "nothing nearby", never as a failure. -->
+              <template x-if="scanned && !scanError">
+                <div>
+                  <div x-cloak x-show="devices.length === 0" class="rounded border border-gray-200 bg-gray-50 p-3 text-sm text-gray-600">
+                    {{locales["bt_no_devices"]}}
+                  </div>
+                  <div x-cloak x-show="devices.length > 0" class="overflow-x-auto">
+                    <table class="w-full text-sm">
+                      <thead>
+                        <tr class="border-b text-left text-xs uppercase tracking-wide text-gray-500">
+                          <th class="py-2 pr-4">{{locales["bt_col_name"]}}</th>
+                          <th class="py-2">{{locales["bt_col_address"]}}</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <template x-for="d in devices" :key="d.address">
+                          <tr class="border-b last:border-0">
+                            <td class="py-2 pr-4" x-text="d.name || unnamedLabel()"></td>
+                            <td class="py-2 font-mono text-xs text-gray-600" x-text="d.address"></td>
+                          </tr>
+                        </template>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </template>
+
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── SOC gauge log ───────────────────────────────────────────────────
+       The MCU keeps a 32-slot RAM ring covering the window nothing else can
+       see (RK powered down, MCU awake or in standby), writing a before/after
+       pair at every anchor that moves SoC. The daemon drains it over com=173.
+       Anchor pairs are what explain "shut down at 10%, booted at 0%". -->
+  <div class="mb-6" x-data="soc_log">
+    <h2 class="px-3 pb-1 text-sm font-semibold uppercase tracking-wide text-gray-500">{{locales["dev_section_soc_log"]}}</h2>
+    <!-- Retention/storage wording lives here rather than inline in the toolbar
+         below: the toolbar is a flex row of controls, and a full sentence there
+         squeezed the buttons on narrow screens. -->
+    <p class="px-3 pb-2 text-xs text-gray-500">{{locales["dev_soc_log_subtitle"]}}</p>
+    <div class="rounded border bg-white shadow">
+      <div class="flex flex-wrap items-center gap-2 border-b px-3 py-2 text-xs">
+        <span class="rounded-full bg-gray-800 px-2 py-0.5 font-medium text-white">soc</span>
+        <span class="ml-auto text-gray-400" x-show="records.length" x-text="records.length + ' / seq ' + seq_oldest + '–' + (seq_next > 0 ? seq_next - 1 : 0)"></span>
+        <label class="flex items-center gap-1 text-gray-600">
+          <input type="checkbox" x-model="anchors_only" class="h-3 w-3">
+          {{locales["dev_soc_log_anchors_only"]}}
+        </label>
+        <button type="button" class="rounded border border-gray-200 px-2 py-0.5 text-gray-600 hover:bg-gray-100"
+                @click="paused = !paused"
+                x-text="paused ? '{{locales['modem_log_resume']}}' : '{{locales['modem_log_pause']}}'"></button>
+        <button type="button" class="rounded border border-gray-200 px-2 py-0.5 text-gray-600 hover:bg-gray-100"
+                @click="download_log()">{{locales["modem_log_download"]}}</button>
+      </div>
+
+      <div class="p-2">
+        <div x-show="error_text" class="px-2 py-3 text-xs text-orange-700" x-text="error_text"></div>
+        <div x-show="!error_text && !records.length" class="px-2 py-3 text-xs text-gray-500">{{locales["dev_soc_log_empty"]}}</div>
+
+        <div x-show="!error_text && records.length" class="max-h-96 overflow-auto">
+          <table class="w-full text-left text-xs tabular-nums">
+            <thead class="sticky top-0 bg-gray-50 text-gray-500">
+              <tr>
+                <th class="px-2 py-1 font-medium">{{locales["dev_soc_log_col_time"]}}</th>
+                <th class="px-2 py-1 font-medium">{{locales["dev_soc_log_col_event"]}}</th>
+                <th class="px-2 py-1 text-right font-medium">{{locales["dev_soc_log_col_raw"]}}</th>
+                <th class="px-2 py-1 text-right font-medium">{{locales["dev_soc_log_col_disp"]}}</th>
+                <th class="px-2 py-1 text-right font-medium">{{locales["dev_soc_log_col_v"]}}</th>
+                <th class="px-2 py-1 text-right font-medium">{{locales["dev_soc_log_col_i"]}}</th>
+                <th class="px-2 py-1 text-right font-medium">{{locales["dev_soc_log_col_temp"]}}</th>
+                <th class="px-2 py-1 font-medium">{{locales["dev_soc_log_col_flags"]}}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="r in visible_records()" :key="r.seq">
+                <tr class="border-t border-gray-100" :class="r.anchor ? 'bg-amber-50' : ''">
+                  <td class="whitespace-nowrap px-2 py-1 text-gray-500" x-text="fmt_t(r.t)"></td>
+                  <td class="whitespace-nowrap px-2 py-1">
+                    <span class="rounded px-1.5 py-0.5"
+                          :class="r.anchor ? 'bg-amber-200 text-amber-900' : 'bg-gray-100 text-gray-600'"
+                          x-text="r.event_name"></span>
+                    <span x-show="r.pre" class="ml-1 text-[10px] uppercase text-gray-400">{{locales["dev_soc_log_before"]}}</span>
+                  </td>
+                  <td class="px-2 py-1 text-right font-medium text-pcatgray">
+                    <span x-text="r.soc_raw.toFixed(1) + '%'"></span>
+                    <!-- delta against the paired "before" record: this is the jump -->
+                    <span x-show="delta_of(r) !== null"
+                          class="ml-1 text-[10px]"
+                          :class="delta_class(r)"
+                          x-text="delta_label(r)"></span>
+                  </td>
+                  <td class="px-2 py-1 text-right text-gray-600" x-text="r.soc_disp + '%'"></td>
+                  <td class="px-2 py-1 text-right text-gray-600" x-text="(r.v_mv / 1000).toFixed(3)"></td>
+                  <td class="px-2 py-1 text-right" :class="r.i_ma < 0 ? 'text-green-700' : 'text-gray-600'" x-text="r.i_ma"></td>
+                  <td class="px-2 py-1 text-right text-gray-600" x-text="r.temp_c + '°'"></td>
+                  <td class="whitespace-nowrap px-2 py-1 text-[10px]">
+                    <span x-show="r.charger" class="mr-1 rounded bg-green-50 px-1 text-green-700">DC</span>
+                    <span x-show="r.rk_on" class="mr-1 rounded bg-blue-50 px-1 text-pcatblue">RK</span>
+                    <span x-show="!r.trusted" class="rounded bg-red-50 px-1 text-red-700">{{locales["dev_soc_log_untrusted"]}}</span>
+                  </td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── WAN interface metrics ───────────────────────────────────────────
+       Live ladder vs UCI vs kernel default-route metric (moved from
+       /device_control). Auto-refreshes every 5s via /api/v1/wan_priority.json. -->
+  <div class="mb-6" x-data="wan_metrics">
+    <h2 class="px-3 pb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">{{locales["dev_section_wan_metrics"]}}</h2>
+    <div class="rounded border bg-white shadow">
+      <div class="flex items-center justify-between border-b border-gray-200 px-3 py-1.5">
+        <span class="text-xs font-medium text-gray-600">{{locales["wan_metrics_title"]}}</span>
+        <span class="text-[10px] text-gray-400">{{locales["wan_metrics_refresh"]}}</span>
+      </div>
+      <div x-show="loading && iface_metrics.length === 0" class="px-3 py-4 text-center text-sm text-gray-400">…</div>
+      <div x-show="!loading && iface_metrics.length === 0" x-cloak class="px-3 py-4 text-sm text-gray-500">
+        {{locales["wan_metrics_empty"]}}
+      </div>
+      <div x-show="iface_metrics.length > 0" class="overflow-x-auto">
+        <table class="w-full text-left text-[11px] text-gray-600">
+          <thead class="bg-gray-100 text-gray-500">
+            <tr>
+              <th class="px-2 py-1 font-medium">{{locales["wan_metrics_slot"]}}</th>
+              <th class="px-2 py-1 font-medium">{{locales["wan_metrics_iface"]}}</th>
+              <th class="px-2 py-1 font-medium">{{locales["wan_metrics_device"]}}</th>
+              <th class="px-2 py-1 font-medium">{{locales["wan_metrics_preferred"]}}</th>
+              <th class="px-2 py-1 font-medium">{{locales["wan_metrics_uci"]}}</th>
+              <th class="px-2 py-1 font-medium">{{locales["wan_metrics_route"]}}</th>
+              <th class="px-2 py-1 font-medium">{{locales["wan_metrics_flags"]}}</th>
+            </tr>
+          </thead>
+          <tbody>
+            <template x-for="row in iface_metrics" :key="row.iface">
+              <tr class="border-t border-gray-100" :class="row.drifted ? 'bg-amber-50 text-amber-900' : (row.route_metric !== null && row.route_metric !== undefined ? 'bg-green-50' : '')">
+                <td class="px-2 py-1" x-text="slot_label(row.slot)"></td>
+                <td class="px-2 py-1 font-mono" x-text="row.iface"></td>
+                <td class="px-2 py-1 font-mono" x-text="row.device || '—'"></td>
+                <td class="px-2 py-1 font-mono" x-text="row.preferred != null ? row.preferred : '—'"></td>
+                <td class="px-2 py-1 font-mono" :class="row.drifted ? 'font-semibold text-amber-700' : ''" x-text="row.uci_metric != null ? row.uci_metric : '—'"></td>
+                <td class="px-2 py-1 font-mono" x-text="row.route_metric != null ? row.route_metric : '—'"></td>
+                <td class="px-2 py-1">
+                  <span x-show="row.drifted" class="mr-1 rounded bg-amber-200 px-1 text-amber-800">{{locales["wan_metrics_drift"]}}</span>
+                  <span x-show="row.demoted" class="mr-1 rounded bg-gray-200 px-1 text-gray-600">{{locales["wan_metrics_demoted"]}}</span>
+                  <span x-show="!row.enabled" class="mr-1 rounded bg-gray-200 px-1 text-gray-500">off</span>
+                  <span x-show="row.up" class="rounded bg-green-200 px-1 text-green-800">up</span>
+                </td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── Modem log ───────────────────────────────────────────────────────
+       Lifted from the /modem_log page; same component and /api/v1/modem/log.json
+       endpoint (the daemon retains up to 16MB). -->
+  <div class="mb-2" x-data="modem_log">
+    <h2 class="px-3 pb-1 text-sm font-semibold uppercase tracking-wide text-gray-500">{{locales["dev_section_modem_log"]}}</h2>
+    <p class="px-3 pb-2 text-xs text-gray-500">{{locales["dev_modem_log_subtitle"]}}</p>
+    <div class="rounded border bg-white shadow">
+      <div class="flex flex-wrap items-center gap-2 border-b px-3 py-2 text-xs">
+        <span class="rounded-full bg-gray-800 px-2 py-0.5 font-medium text-white" x-text="source.id || 'modem'"></span>
+        <span class="text-gray-600" x-show="source.exec" x-text="source.exec"></span>
+        <span class="rounded bg-gray-100 px-1.5 py-0.5 text-gray-500" x-show="source.usb_id" x-text="'USB ' + source.usb_id"></span>
+        <template x-for="dev in source.dev_paths"><span class="rounded bg-blue-50 px-1.5 py-0.5 text-pcatblue" x-text="dev"></span></template>
+        <template x-for="dev in source.netdevs"><span class="rounded bg-green-50 px-1.5 py-0.5 text-green-700" x-text="dev"></span></template>
+        <span class="ml-auto text-gray-400" x-text="buffer_info()"></span>
+        <button type="button" class="rounded border border-gray-200 px-2 py-0.5 text-gray-600 hover:bg-gray-100"
+                @click="paused = !paused"
+                x-text="paused ? '{{locales['modem_log_resume']}}' : '{{locales['modem_log_pause']}}'"></button>
+        <button type="button" class="rounded border border-gray-200 px-2 py-0.5 text-gray-600 hover:bg-gray-100"
+                @click="clear_view()">{{locales["modem_log_clear"]}}</button>
+        <button type="button" class="rounded border border-gray-200 px-2 py-0.5 text-gray-600 hover:bg-gray-100"
+                @click="download_log()">{{locales["modem_log_download"]}}</button>
+      </div>
+
+      <div class="p-2">
+        <div id="modem-log-pane" x-ref="pane"><span x-text="log_text"></span><span x-show="!log_text && !error_text" class="text-gray-500">{{locales["modem_log_empty"]}}</span><span x-show="error_text" class="text-red-400" x-text="error_text"></span></div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block bottom %}
+<script>
+  // The /dev 3D renderer is deliberately held OUTSIDE any Alpine data object.
+  // Alpine wraps component state in a reactive Proxy, and three.js objects carry
+  // read-only, non-configurable properties (Object3D.modelViewMatrix and
+  // friends). A Proxy may not legally report a different value for those, so
+  // merely reading them through Alpine throws
+  //   'get' on proxy: property 'modelViewMatrix' is a read-only and
+  //   non-configurable data property on the proxy target ...
+  // on every single frame. Keeping the instance in this plain script-scope slot
+  // leaves the scene graph un-proxied; only the booleans that drive x-show stay
+  // in the component.
+  let pcat3d_model = null;
+
+  document.addEventListener("alpine:init", () => {
+    // No nav item points at /dev, so nothing in the top/bottom bar should
+    // highlight — leave $store.app.page untouched (do not call set_page).
+
+    // Components below define init() and Alpine calls it automatically, so the
+    // markup deliberately carries NO x-init="init()". Adding one back runs init
+    // twice: two poll timers per component, and for the log components a second
+    // full fetch whose records get concat'd onto the first (the SOC log header
+    // read "36 / seq 120–137" for 18 records).
+
+    // Live WAN metric ladder (preferred / UCI / kernel route). Same payload as
+    // the priority table on /device_control, but diagnostics-only here.
+    Alpine.data("wan_metrics", () => ({
+      loading: true,
+      iface_metrics: [],
+      slot_labels: {
+        wan: "{{locales['wan_slot_wan']}}",
+        wifi: "{{locales['wan_slot_wifi']}}",
+        lan: "{{locales['wan_slot_lan']}}",
+        cellular: "{{locales['wan_slot_cellular']}}",
+      },
+      init() {
+        this.fetch_metrics();
+        setInterval(() => {
+          if (document.hidden) return;
+          this.fetch_metrics();
+        }, 5000);
+      },
+      fetch_metrics() {
+        fetch("/api/v1/wan_priority.json")
+          .then((r) => r.json())
+          .then((data) => {
+            if (data.status !== "ok") return;
+            this.iface_metrics = data.iface_metrics || [];
+          })
+          .catch(() => {})
+          .finally(() => { this.loading = false; });
+      },
+      slot_label(id) {
+        return this.slot_labels[id] || id;
+      },
+    }));
+
+    Alpine.data("battery_health", () => ({
+      loading: true,
+      supported: false,
+      full_capacity: null,
+      nominal_capacity: null,
+      cycle_count: null,
+      capacity_learned: false,
+      learning_active: false,
+      health_pct: null,
+      full_charge_seen: null,
+      internal_resistance: null,
+      internal_resistance_battery: null,
+      runtime_hours: null,
+      mid_voltage: null,
+      suggest_factor: null,
+      remain_mah: null,
+      consumed_wh: null,
+      charged_wh: null,
+      gauge_temp_c: null,
+      on_battery_seconds: null,
+      on_battery_active: false,
+      on_battery_since: null,
+      soc_raw_pct: null,
+      soc_empty_learned_pct: null,
+      soc_disp_a: null,
+      soc_disp_b: null,
+      chg_gain: null,
+      cur_trim_a: null,
+      cur_trim_b_ma: null,
+      mcu_uptime_seconds: null,
+      mcu_since_sleep_seconds: null,
+      mcu_sleep_count: null,
+
+      // Required by the shared _notification.html partial. Without this the
+      // partial's notification.* references throw "notification is not defined"
+      // in Alpine because it renders inside this component's x-data scope.
+      notification: {
+        show: false,
+        message: '',
+        message_en: '',
+        message_cn: '',
+        type: 'info' // 'success', 'error', 'warning', 'info'
+      },
+
+      // Seconds -> "13d 4h" / "4h 12m" / "12m" / "45s", for the MCU uptime
+      // tiles and the on-battery counter. Sub-minute values fall back to
+      // seconds: the on-battery run restarts at 0 on every unplug, and "0m"
+      // for the first minute reads as broken rather than as "just started".
+      fmt_duration(s) {
+        if (s === null || s === undefined) return "--";
+        s = Math.floor(s);
+        const d = Math.floor(s / 86400);
+        const h = Math.floor((s % 86400) / 3600);
+        const m = Math.floor((s % 3600) / 60);
+        if (d > 0) return d + "d " + h + "h";
+        if (h > 0) return h + "h " + m + "m";
+        if (m > 0) return m + "m";
+        return s + "s";
+      },
+
+      // "since 2026-08-09 11:42" under the on-battery counter, so a long run
+      // can be read against the wall clock rather than a duration alone.
+      on_battery_since_text() {
+        if (!this.on_battery_since) return "";
+        const d = new Date(this.on_battery_since * 1000);
+        const p = (n) => String(n).padStart(2, "0");
+        return "{{locales['battery_on_battery_since']}} " +
+          d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) +
+          " " + p(d.getHours()) + ":" + p(d.getMinutes());
+      },
+
+      init() {
+        this.fetch_battery_info();
+        // Most of this panel is slow-moving (capacity re-learns only after a
+        // full discharge, cycles tick about once a day), but the on-battery
+        // counter is a live session that RESETS the moment DC is plugged or
+        // unplugged. A 60s poll meant an unplug went unnoticed for up to a
+        // minute while the local tick below kept counting the dead session up
+        // from the previous run's total -- looking like a stuck "1d 3h" when
+        // the true answer was seconds. Poll often enough to catch the switch.
+        setInterval(() => this.fetch_battery_info(), 5000);
+        // Tick locally between polls so the counter reads as a clock rather
+        // than jumping every refresh.
+        setInterval(() => {
+          if (this.on_battery_active && this.on_battery_seconds !== null) {
+            this.on_battery_seconds += 1;
+          }
+        }, 1000);
+      },
+
+      fetch_battery_info() {
+        fetch("/api/v1/battery_info.json")
+          .then((r) => r.json())
+          .then((d) => {
+            // Full battery detail dump for bench diagnosis (SOC empty-point
+            // autolearn, display ax+b factors, current trim, suggested
+            // capacity factor). Open the browser console on /dev to view.
+            console.log("battery_info", d);
+            if (d.soc_raw_pct !== undefined && d.soc_raw_pct !== null) {
+              console.log(
+                "soc factor: raw=" + d.soc_raw_pct + "% displayed=a*raw+b" +
+                " a=" + d.soc_disp_a + " b=" + d.soc_disp_b +
+                " empty_learned=" + d.soc_empty_learned_pct + "%" +
+                " chg_gain=" + d.chg_gain +
+                " cur_trim: a=" + d.cur_trim_a + " b=" + d.cur_trim_b_ma + "mA");
+            }
+            if (d.suggested_capacity_factor !== undefined &&
+                d.suggested_capacity_factor !== null) {
+              console.log(
+                "measured capacity " + d.full_capacity + "mAh vs nominal " +
+                d.nominal_capacity + "mAh -> suggest pump factor x" +
+                d.suggested_capacity_factor +
+                " (set as MCU current trim after multimeter calibration)");
+            }
+            this.supported = !!d.supported;
+            if (this.supported) {
+              this.full_capacity = d.full_capacity ?? null;
+              this.nominal_capacity = d.nominal_capacity ?? null;
+              this.cycle_count = d.cycle_count ?? null;
+              this.capacity_learned = !!d.capacity_learned;
+              this.learning_active = !!d.learning_active;
+              this.health_pct = d.health_pct ?? null;
+              this.full_charge_seen = d.full_charge_seen ?? null;
+              this.internal_resistance = d.internal_resistance_mohm ?? null;
+              this.internal_resistance_battery = d.internal_resistance_battery_mohm ?? null;
+              this.runtime_hours = d.runtime_hours ?? null;
+              this.mid_voltage = d.mid_voltage_v ?? null;
+              this.suggest_factor = d.suggested_capacity_factor ?? null;
+              this.remain_mah = d.remain_mah ?? null;
+              this.consumed_wh = d.consumed_wh ?? null;
+              this.charged_wh = d.charged_wh ?? null;
+              this.gauge_temp_c = d.gauge_temp_c ?? null;
+              this.on_battery_seconds = d.on_battery_seconds ?? null;
+              this.on_battery_active = !!d.on_battery_active;
+              this.on_battery_since = d.on_battery_since ?? null;
+              this.soc_raw_pct = d.soc_raw_pct ?? null;
+              this.soc_empty_learned_pct = d.soc_empty_learned_pct ?? null;
+              this.soc_disp_a = d.soc_disp_a ?? null;
+              this.soc_disp_b = d.soc_disp_b ?? null;
+              this.chg_gain = d.chg_gain ?? null;
+              this.cur_trim_a = d.cur_trim_a ?? null;
+              this.cur_trim_b_ma = d.cur_trim_b_ma ?? null;
+              this.mcu_uptime_seconds = d.mcu_uptime_seconds ?? null;
+              this.mcu_since_sleep_seconds = d.mcu_since_sleep_seconds ?? null;
+              this.mcu_sleep_count = d.mcu_sleep_count ?? null;
+            }
+            this.loading = false;
+          })
+          .catch((e) => {
+            console.error("battery_info fetch failed", e);
+            this.loading = false;
+          });
+      },
+
+      health_color() {
+        if (this.health_pct === null) return "text-gray-400";
+        if (this.health_pct >= 80) return "text-green-600";
+        if (this.health_pct >= 60) return "text-orange-500";
+        return "text-red-600";
+      },
+
+      health_bar_color() {
+        if (this.health_pct === null) return "bg-gray-300";
+        if (this.health_pct >= 80) return "bg-green-500";
+        if (this.health_pct >= 60) return "bg-orange-400";
+        return "bg-red-500";
+      },
+    }));
+
+    // 2S2P 18650 pack view. Total pack voltage + current/power come from the
+    // dashboard (same battery gauge as the header). The 2S center-tap voltage
+    // (mid_voltage_v) comes from battery_info.json — present only on MCU fw
+    // with center-tap sensing. Lower stage voltage = center tap; upper stage
+    // voltage = total − center tap. Cells within a stage are in parallel, so
+    // both cells of a stage share that stage's voltage.
+    Alpine.data("battery_pack", () => ({
+      loading: true,
+      total_v: null,     // whole-pack voltage (V)
+      mid_v: null,       // 2S center-tap voltage (V), null if unsupported
+      current_a: null,   // pack current (A); sign per gauge convention
+      power_w: null,     // pack power (W)
+
+      // Cell voltage window for the fill bar. 18650 Li-ion: ~2.5 V empty,
+      // ~4.2 V full. A parallel pair shares one cell voltage.
+      V_MIN: 2.5,
+      V_MAX: 4.2,
+
+      get lower_v() { return this.mid_v; },
+      get upper_v() {
+        if (this.total_v === null || this.mid_v === null) return null;
+        return Math.max(0, this.total_v - this.mid_v);
+      },
+
+      init() {
+        this.refresh();
+        // Voltages/current drift slowly; a few seconds is plenty and keeps it
+        // roughly in step with the dashboard cache.
+        setInterval(() => { if (!document.hidden) this.refresh(); }, 5000);
+      },
+
+      refresh() {
+        // Total voltage + current + wattage from the dashboard body payload.
+        fetch("/api/v1/dashboard.json?type=body")
+          .then((r) => r.json())
+          .then((d) => {
+            // PCAT2 exposes measured sysfs values; fall back to the socket
+            // client's pack voltage when the detailed fields are absent.
+            const tv = (d.battery_voltage_v ?? d.voltage);
+            this.total_v = (tv === undefined || tv === null) ? null : Number(tv);
+            this.current_a = (d.battery_current_a === undefined || d.battery_current_a === null)
+              ? null : Number(d.battery_current_a);
+            this.power_w = (d.battery_wattage_w === undefined || d.battery_wattage_w === null)
+              ? null : Number(d.battery_wattage_w);
+            this.loading = false;
+          })
+          .catch(() => { this.loading = false; });
+
+        // Center-tap voltage from the battery gauge.
+        fetch("/api/v1/battery_info.json")
+          .then((r) => r.json())
+          .then((d) => {
+            this.mid_v = (d.mid_voltage_v === undefined || d.mid_voltage_v === null)
+              ? null : Number(d.mid_voltage_v);
+          })
+          .catch(() => {});
+      },
+
+      // Fill height + color for one cell, from its stage voltage.
+      cell_style(v) {
+        if (v === null || v === undefined) {
+          return "height: 0%; background-color: #e5e7eb;";
+        }
+        const frac = Math.max(0, Math.min(1, (v - this.V_MIN) / (this.V_MAX - this.V_MIN)));
+        const pct = Math.round(frac * 100);
+        let color;
+        if (v >= 3.7) color = "#22c55e";        // green: healthy
+        else if (v >= 3.3) color = "#eab308";   // amber: getting low
+        else color = "#ef4444";                 // red: near empty
+        return "height: " + pct + "%; background-color: " + color + ";";
+      },
+
+      fmt_v(v) {
+        if (v === null || v === undefined) return "--";
+        return Number(v).toFixed(3) + " V";
+      },
+      fmt_a(a) {
+        if (a === null || a === undefined) return "--";
+        return (a >= 0 ? "+" : "") + Number(a).toFixed(4) + " A";
+      },
+      fmt_w(w) {
+        if (w === null || w === undefined) return "--";
+        return Number(w).toFixed(2) + " W";
+      },
+
+      // Sign convention from the sysfs gauge: positive current = charging,
+      // negative = discharging (energy leaving the pack).
+      charging() { return this.current_a !== null && this.current_a > 0.005; },
+      discharging() { return this.current_a !== null && this.current_a < -0.005; },
+      flow_color() {
+        if (this.charging()) return "text-green-600";
+        if (this.discharging()) return "text-orange-600";
+        return "text-gray-500";
+      },
+      flow_badge() {
+        if (this.charging()) return "bg-green-100 text-green-700";
+        if (this.discharging()) return "bg-orange-100 text-orange-700";
+        return "bg-gray-100 text-gray-500";
+      },
+      flow_label() {
+        if (this.charging()) return "{{locales['dev_pack_charging']}}";
+        if (this.discharging()) return "{{locales['dev_pack_discharging']}}";
+        return "{{locales['dev_pack_idle']}}";
+      },
+    }));
+
+    Alpine.data("gsensor", () => ({
+      loading: true,
+      supported: false,
+      g: { x: 0, y: 0, z: 0 },
+      pitch: 0,
+      roll: 0,
+      magnitude: 0,
+      movement: false,
+      error_text: "",
+      _timer: null,
+
+      // Calibration: rendered model orientation = R ⊗ qDev, where qDev comes
+      // from gravity and R is the stored device→model offset quaternion
+      // [w,x,y,z]. Guided flow: step 1 = put device flat (gives a reference),
+      // step 2 = nudge the model with W/A/S/D/Q/E keys until it matches.
+      R: [1, 0, 0, 0],
+      calibrated: false,
+      calibrating: false,
+      calib_step: 1,
+      pose_ok: false,
+      NUDGE_DEG: 15,          // per-keypress rotation step
+      calib_msg: "",
+      calib_msg_ok: true,
+      _drag: null,
+
+      // 3D renderer state (src/pcat_model.js via app/static/pcat3d.min.js).
+      // Only these flags live here; the renderer itself sits in the script-scope
+      // pcat3d_model slot above, out of Alpine's reactive Proxy.
+      model_ready: false,
+      model_error: false,
+      _model_pending: false,
+
+      init() {
+        // The whole block is hidden until the first poll confirms a sensor, so
+        // the canvas has no layout before then; mount once `supported` flips.
+        this.$watch("supported", (v) => {
+          if (v) this.$nextTick(() => this.mount_model());
+        });
+        // g and R are always reassigned rather than mutated in place, so these
+        // two watches catch every source of change: polling, guided
+        // calibration, key nudges, drag-to-rotate and reset.
+        this.$watch("g", () => this.push_orientation());
+        this.$watch("R", () => this.push_orientation());
+
+        this.poll();
+        // ~3 Hz: smooth enough for a live tilt without hammering the sysfs read.
+        // Keep polling on calibration step 1 (we need live gravity to detect the
+        // flat pose); freeze on step 2 so the model holds still while nudging.
+        this._timer = setInterval(() => {
+          if (document.hidden) return;
+          if (this.calibrating && this.calib_step !== 1) return;
+          this.poll();
+        }, 330);
+      },
+
+      poll() {
+        fetch("/api/v1/gsensor.json")
+          .then((r) => r.json())
+          .then((d) => {
+            this.loading = false;
+            if (d.status !== "ok") { this.error_text = d.message || ""; return; }
+            this.supported = !!d.supported;
+            if (!this.supported) return;
+            this.error_text = "";
+            this.g = d.g || this.g;
+            this.pitch = d.pitch ?? 0;
+            this.roll = d.roll ?? 0;
+            this.magnitude = d.magnitude ?? 0;
+            this.movement = !!d.movement;
+            // "flat" = gravity mostly on +Z (device on its back, screen up)
+            this.pose_ok = this.g.z > 0.85 && Math.abs(this.g.x) < 0.35 && Math.abs(this.g.y) < 0.35;
+            if (Array.isArray(d.calibration) && d.calibration.length === 4) {
+              this.R = d.calibration.slice();
+              this.calibrated = true;
+            }
+          })
+          .catch(() => { this.loading = false; });
+      },
+
+      fmt_g(v) {
+        if (v === null || v === undefined) return "--";
+        return (v >= 0 ? "+" : "") + Number(v).toFixed(2);
+      },
+
+      // ── quaternion helpers ([w,x,y,z], right-handed) ──────────────────────
+      qMul(a, b) {
+        return [
+          a[0]*b[0] - a[1]*b[1] - a[2]*b[2] - a[3]*b[3],
+          a[0]*b[1] + a[1]*b[0] + a[2]*b[3] - a[3]*b[2],
+          a[0]*b[2] - a[1]*b[3] + a[2]*b[0] + a[3]*b[1],
+          a[0]*b[3] + a[1]*b[2] - a[2]*b[1] + a[3]*b[0],
+        ];
+      },
+      qNorm(q) {
+        const n = Math.hypot(q[0], q[1], q[2], q[3]) || 1;
+        return [q[0]/n, q[1]/n, q[2]/n, q[3]/n];
+      },
+      // unit quaternion rotating unit vector a onto unit vector b
+      qFromVecs(a, b) {
+        const d = a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
+        if (d > 0.999999) return [1, 0, 0, 0];
+        if (d < -0.999999) {
+          let ax = Math.abs(a[0]) < 0.9 ? [1,0,0] : [0,1,0];
+          let c = [a[1]*ax[2]-a[2]*ax[1], a[2]*ax[0]-a[0]*ax[2], a[0]*ax[1]-a[1]*ax[0]];
+          const n = Math.hypot(c[0],c[1],c[2]) || 1;
+          return [0, c[0]/n, c[1]/n, c[2]/n];
+        }
+        const c = [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];
+        return this.qNorm([1 + d, c[0], c[1], c[2]]);
+      },
+      qFromAxisAngle(ax, ay, az, deg) {
+        const r = deg * Math.PI / 360; // half-angle
+        const s = Math.sin(r), n = Math.hypot(ax, ay, az) || 1;
+        return [Math.cos(r), (ax/n)*s, (ay/n)*s, (az/n)*s];
+      },
+
+      // qDev: device orientation from gravity. Box rest gravity is CSS (0,0,1);
+      // measured device gravity maps to CSS as (gx, −gy, gz). Identity when flat.
+      qDev() {
+        let a = [0, 0, 1];
+        let b = [this.g.x, -this.g.y, this.g.z];
+        const n = Math.hypot(b[0], b[1], b[2]) || 1;
+        return this.qFromVecs(a, [b[0]/n, b[1]/n, b[2]/n]);
+      },
+
+      // ── 3D model plumbing ─────────────────────────────────────────────────
+      // Pull the renderer in lazily, the first time a g-sensor is actually
+      // detected, so hardware without one never downloads a bundle it cannot
+      // use. Any failure (no WebGL, missing .glb, decode error) just sets
+      // model_error and leaves the numeric readouts running.
+      async mount_model() {
+        if (pcat3d_model || this._model_pending) return;
+        this._model_pending = true;
+        try {
+          const mod = await import("/static/pcat3d.min.js");
+          pcat3d_model = await mod.mount({
+            canvas: this.$refs.canvas3d,
+            modelUrl: "/static/photonicat2.glb",
+            dracoPath: "/static/",
+          });
+          this.model_ready = true;
+          this.push_orientation();
+          pcat3d_model.snapToTarget();  // no fly-in from identity on first paint
+        } catch (e) {
+          console.error("pcat3d:", e);
+          this.model_error = true;
+        } finally {
+          this._model_pending = false;
+        }
+      },
+
+      // Orientation handed to the renderer: R ⊗ qDev, exactly what the CSS box
+      // used. It stays in the CSS frame -- pcat_model.js converts to three.js
+      // at the render boundary -- so calibrations saved by earlier builds keep
+      // their meaning.
+      model_quat() {
+        return this.qMul(this.R, this.qDev());
+      },
+      push_orientation() {
+        if (pcat3d_model) pcat3d_model.setQuaternionCss(this.model_quat());
+      },
+
+      // ── guided calibration flow ───────────────────────────────────────────
+      calibrate_start() {
+        this.calibrating = true;
+        this.calib_step = 1;
+        this.calib_msg = "";
+        this.poll();   // fresh reading so pose_ok is current
+        this.$nextTick(() => { if (this.$refs.calibpanel) this.$refs.calibpanel.focus(); });
+      },
+      calibrate_cancel() { this.calibrating = false; this._drag = null; },
+
+      // Step 1 → 2: anchor the model flat. With the device lying flat, set R so
+      // the model also shows flat (R = qDev⁻¹ ⇒ R⊗qDev = identity). From there
+      // the keys correct any remaining axis mismatch, and the freeze on step 2
+      // holds the model still while the user nudges it.
+      calib_next() {
+        this.R = this.qConj(this.qDev());   // conjugate = inverse for a unit quaternion
+        this.calib_step = 2;
+        this.calib_msg = "";
+        this.$nextTick(() => { if (this.$refs.calibpanel) this.$refs.calibpanel.focus(); });
+      },
+
+      // Rotate the model one step about a SCREEN axis (pre-multiply into R).
+      nudge(ax, ay, az, deg) {
+        this.R = this.qNorm(this.qMul(this.qFromAxisAngle(ax, ay, az, deg), this.R));
+      },
+      // Snap R to the nearest 90° on each screen axis (tidies a hand-nudged R).
+      snap() {
+        // decompose current model-up and re-round is complex; simplest useful
+        // snap: round each of the 6 nudge axes is overkill — instead round the
+        // rotation to 90° increments by converting to matrix, rounding, refit.
+        const q = this.qNorm(this.R);
+        // approximate: rebuild from rounded Euler (screen ZYX) angles
+        const m = this.qToMatrixArr(q);
+        let ry = Math.asin(Math.max(-1, Math.min(1, -m[6])));
+        let rx = Math.atan2(m[7], m[8]);
+        let rz = Math.atan2(m[3], m[0]);
+        const r90 = a => Math.round(a / (Math.PI/2)) * (Math.PI/2);
+        rx = r90(rx); ry = r90(ry); rz = r90(rz);
+        const qx = this.qFromAxisAngle(1,0,0, rx*180/Math.PI);
+        const qy = this.qFromAxisAngle(0,1,0, ry*180/Math.PI);
+        const qz = this.qFromAxisAngle(0,0,1, rz*180/Math.PI);
+        this.R = this.qNorm(this.qMul(qz, this.qMul(qy, qx)));
+      },
+      // 3x3 as row-major array (helper for snap)
+      qToMatrixArr(q) {
+        const [w,x,y,z] = this.qNorm(q);
+        return [1-2*(y*y+z*z), 2*(x*y-w*z), 2*(x*z+w*y),
+                2*(x*y+w*z), 1-2*(x*x+z*z), 2*(y*z-w*x),
+                2*(x*z-w*y), 2*(y*z+w*x), 1-2*(x*x+y*y)];
+      },
+
+      // Keyboard nudging on step 2. W/S = tip forward/back, A/D = turn left/right,
+      // Q/E = roll. Arrow keys mirror W/A/S/D. Ignored elsewhere.
+      key_rot(k) {
+        const d = this.NUDGE_DEG;
+        switch (k) {
+          case 'w': this.nudge(1, 0, 0,  d); break;  // tip top away (about screen X)
+          case 's': this.nudge(1, 0, 0, -d); break;  // tip top toward
+          case 'a': this.nudge(0, 1, 0, -d); break;  // turn left (about screen Y)
+          case 'd': this.nudge(0, 1, 0,  d); break;  // turn right
+          case 'q': this.nudge(0, 0, 1,  d); break;  // roll CCW (about screen Z)
+          case 'e': this.nudge(0, 0, 1, -d); break;  // roll CW
+        }
+      },
+      on_key(e) {
+        if (!this.calibrating || this.calib_step !== 2) return;
+        const map = { ArrowUp:'w', ArrowDown:'s', ArrowLeft:'a', ArrowRight:'d' };
+        const k = map[e.key] || (e.key || '').toLowerCase();
+        if ('wasdqe'.includes(k)) { e.preventDefault(); this.key_rot(k); }
+      },
+
+      save_calibration() {
+        fetch("/api/v1/gsensor_calibration.json", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ quaternion: this.R }),
+        }).then(r => r.json()).then(d => {
+          if (d.status === "ok") {
+            this.calibrated = true;
+            this.calibrating = false;
+            this.calib_step = 1;
+            this.calib_msg = "{{locales['dev_accel_saved']}}"; this.calib_msg_ok = true;
+          } else {
+            this.calib_msg = d.message || "save failed"; this.calib_msg_ok = false;
+          }
+        }).catch(() => { this.calib_msg = "save failed"; this.calib_msg_ok = false; });
+      },
+
+      reset_calibration() {
+        fetch("/api/v1/gsensor_calibration.json", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ reset: true }),
+        }).then(() => {
+          this.R = [1, 0, 0, 0];
+          this.calibrated = false;
+          this.calib_msg = "{{locales['dev_accel_reset_done']}}"; this.calib_msg_ok = true;
+        });
+      },
+
+      // ── drag-to-rotate (trackball) — fallback fine-tune on step 2 ─────────
+      drag_start(e) {
+        if (!this.calibrating || this.calib_step !== 2) return;
+        this._drag = { x: e.clientX, y: e.clientY };
+        if (e.target.setPointerCapture) { try { e.target.setPointerCapture(e.pointerId); } catch (_) {} }
+      },
+      drag_move(e) {
+        if (!this._drag) return;
+        const dx = e.clientX - this._drag.x, dy = e.clientY - this._drag.y;
+        this._drag = { x: e.clientX, y: e.clientY };
+        // horizontal drag → rotate about screen Y, vertical → screen X (pre-mul
+        // so the model spins in screen space regardless of its current pose).
+        const ry = this.qFromAxisAngle(0, 1, 0, dx * 0.5);
+        const rx = this.qFromAxisAngle(1, 0, 0, dy * 0.5);
+        this.R = this.qNorm(this.qMul(rx, this.qMul(ry, this.R)));
+      },
+      drag_end() { this._drag = null; },
+    }));
+
+    // Buzzer tester, lifted unchanged from the former /buzzer page.
+    Alpine.data("buzzer_page", () => ({
+      playing: false,
+      error: null,
+      octave: 1,
+      custom_hz: 2700,
+      custom_ms: 300,
+      elapsed_ms: 0,
+      total_ms: 0,
+      chunk_timers: [],
+      progress_timer: null,
+
+      init() {},
+
+      send_tones(tones, loop) {
+        return fetch("/api/v1/buzzer_play.json", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ tones: tones, loop: loop ? 1 : 0 }),
+        })
+          .then((r) => r.json())
+          .then((d) => {
+            if (d.status !== "ok") this.error = "send_failed";
+            return d;
+          })
+          .catch(() => {
+            this.error = "send_failed";
+            return { status: "error" };
+          });
+      },
+
+      play_preset(name) {
+        this.stop_local();
+        this.error = null;
+        const presets = {
+          short: [{ hz: 2700, ms: 200 }],
+          double: [{ hz: 2700, ms: 150 }, { hz: 0, ms: 80 }, { hz: 2700, ms: 150 }],
+          chime: [{ hz: 1047, ms: 150 }, { hz: 1319, ms: 150 }, { hz: 1568, ms: 150 }, { hz: 2093, ms: 300 }],
+        };
+        this.send_tones(presets[name], false);
+      },
+
+      play_custom() {
+        this.stop_local();
+        this.error = null;
+        const hz = Math.max(50, Math.min(12000, this.custom_hz || 2700));
+        const ms = Math.max(10, Math.min(5000, this.custom_ms || 300));
+        this.send_tones([{ hz: hz, ms: ms }], false);
+      },
+
+      play_sample(name) {
+        this.error = null;
+        fetch("/static/midi/" + name + ".mid")
+          .then((r) => r.arrayBuffer())
+          .then((buf) => this.play_midi_buffer(buf))
+          .catch(() => {
+            this.error = "parse_failed";
+          });
+      },
+
+      play_file(event) {
+        this.error = null;
+        const file = event.target.files[0];
+        if (!file) return;
+        file
+          .arrayBuffer()
+          .then((buf) => this.play_midi_buffer(buf))
+          .catch(() => {
+            this.error = "parse_failed";
+          });
+        event.target.value = "";
+      },
+
+      play_midi_buffer(buf) {
+        let steps;
+        try {
+          steps = this.midi_to_steps(buf, this.octave);
+        } catch (e) {
+          console.error("MIDI parse failed", e);
+          this.error = "parse_failed";
+          return;
+        }
+        if (!steps.length) {
+          this.error = "empty";
+          return;
+        }
+        this.play_steps(steps);
+      },
+
+      // Chunk the step list by the MCU's 20-steps-per-command limit and pace
+      // the chunks so each lands right as the previous one finishes. A new
+      // pmu-beep-play interrupts the running sequence, so a slightly late
+      // chunk only causes a tiny gap, never overlap.
+      play_steps(steps) {
+        this.stop_local();
+        const chunks = [];
+        for (let i = 0; i < steps.length; i += 20) chunks.push(steps.slice(i, i + 20));
+
+        let offset = 0;
+        this.total_ms = 0;
+        for (const c of chunks) for (const s of c) this.total_ms += s.ms;
+
+        chunks.forEach((chunk, i) => {
+          if (i === 0) {
+            this.send_tones(chunk, false);
+          } else {
+            this.chunk_timers.push(setTimeout(() => this.send_tones(chunk, false), offset));
+          }
+          for (const s of chunk) offset += s.ms;
+        });
+
+        this.playing = true;
+        this.elapsed_ms = 0;
+        const started = Date.now();
+        this.progress_timer = setInterval(() => {
+          this.elapsed_ms = Date.now() - started;
+          if (this.elapsed_ms >= this.total_ms) this.stop_local();
+        }, 200);
+      },
+
+      // Cancel scheduled chunks and the progress display, without touching the
+      // MCU (used before starting a new sequence, which interrupts anyway).
+      stop_local() {
+        for (const t of this.chunk_timers) clearTimeout(t);
+        this.chunk_timers = [];
+        if (this.progress_timer) clearInterval(this.progress_timer);
+        this.progress_timer = null;
+        this.playing = false;
+      },
+
+      // Full stop: also silence the MCU by playing a 1ms rest, which replaces
+      // whatever sequence is currently running.
+      stop() {
+        this.stop_local();
+        this.error = null;
+        this.send_tones([{ hz: 0, ms: 1 }], false);
+      },
+
+      // --- MIDI file -> [{hz, ms}] -------------------------------------------
+      // Minimal SMF reader: format 0/1, note on/off, tempo meta. The buzzer is
+      // monophonic, so of all simultaneously held notes the highest one wins.
+      // Tolerates RIFF/RMID wrappers, alien chunks and SMPTE division, and
+      // skips data it can't decode instead of rejecting the whole file.
+      midi_to_steps(buf, octave_shift) {
+        let bytes = new Uint8Array(buf);
+
+        // Some files wrap the SMF in a RIFF/RMID container or prepend junk;
+        // start at the first "MThd" signature wherever it is.
+        let start = -1;
+        for (let i = 0; i + 3 < bytes.length; i++) {
+          if (bytes[i] === 0x4d && bytes[i + 1] === 0x54 && bytes[i + 2] === 0x68 && bytes[i + 3] === 0x64) {
+            start = i;
+            break;
+          }
+        }
+        if (start < 0) throw new Error("not a MIDI file");
+        if (start > 0) {
+          buf = buf.slice(start);
+          bytes = new Uint8Array(buf);
+        }
+
+        const view = new DataView(buf);
+        let pos = 0;
+
+        const str4 = () => {
+          const s = String.fromCharCode(bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]);
+          pos += 4;
+          return s;
+        };
+        const u32 = () => {
+          const v = view.getUint32(pos);
+          pos += 4;
+          return v;
+        };
+        const u16 = () => {
+          const v = view.getUint16(pos);
+          pos += 2;
+          return v;
+        };
+        const varlen = () => {
+          let v = 0, b;
+          do {
+            b = bytes[pos++];
+            v = (v << 7) | (b & 0x7f);
+          } while (b & 0x80);
+          return v;
+        };
+
+        if (str4() !== "MThd") throw new Error("not a MIDI file");
+        const hlen = u32();
+        u16(); // format
+        const ntrks = u16();
+        const division = u16();
+        pos += hlen - 6;
+
+        // SMPTE division: high byte is the negated frame rate, low byte is
+        // ticks per frame, giving a fixed ms-per-tick (no tempo map).
+        let msPerTickSmpte = null;
+        if (division & 0x8000) {
+          const fps = 256 - (division >> 8);
+          const tpf = division & 0xff;
+          if (!fps || !tpf) throw new Error("bad SMPTE division");
+          msPerTickSmpte = 1000 / (fps * tpf);
+        } else if (!division) {
+          throw new Error("bad division");
+        }
+
+        // Collect note and tempo events from every track on one absolute-tick
+        // timeline. Priority orders same-tick events: tempo, then off, then on,
+        // so a retriggered note releases before it re-sounds. Chunks that are
+        // not MTrk (XF info, proprietary extensions) are skipped per the SMF
+        // spec, and a track is abandoned at the first event we can't decode.
+        const events = [];
+        let tracksParsed = 0;
+        while (tracksParsed < ntrks && pos + 8 <= bytes.length) {
+          const id = str4();
+          const tlen = u32();
+          const end = Math.min(pos + tlen, bytes.length);
+          if (id !== "MTrk") {
+            pos = end;
+            continue;
+          }
+          tracksParsed++;
+          let tick = 0, status = 0;
+          while (pos < end) {
+            tick += varlen();
+            if (pos >= end) break;
+            if (bytes[pos] & 0x80) status = bytes[pos++];
+            const type = status & 0xf0;
+            if (type === 0x90 || type === 0x80) {
+              const note = bytes[pos++], vel = bytes[pos++];
+              if (note > 127) continue; // corrupt/overrun read
+              if (type === 0x90 && vel > 0) events.push({ tick: tick, prio: 2, on: true, note: note });
+              else events.push({ tick: tick, prio: 1, on: false, note: note });
+            } else if (type === 0xa0 || type === 0xb0 || type === 0xe0) {
+              pos += 2;
+            } else if (type === 0xc0 || type === 0xd0) {
+              pos += 1;
+            } else if (status === 0xff) {
+              const meta = bytes[pos++];
+              const mlen = varlen();
+              if (meta === 0x51 && mlen === 3) {
+                const us = (bytes[pos] << 16) | (bytes[pos + 1] << 8) | bytes[pos + 2];
+                events.push({ tick: tick, prio: 0, tempo: us });
+              }
+              pos += mlen;
+            } else if (status === 0xf0 || status === 0xf7) {
+              pos += varlen();
+            } else if (status === 0xf2) {
+              pos += 2; // song position
+            } else if (status === 0xf1 || status === 0xf3) {
+              pos += 1; // MTC quarter frame / song select
+            } else if (status >= 0xf4 && status <= 0xfe) {
+              // system common/realtime with no data bytes — ignore
+            } else {
+              console.warn("buzzer: skipping rest of track at unsupported event 0x" + status.toString(16));
+              break;
+            }
+          }
+          pos = end;
+        }
+        events.sort((a, b) => a.tick - b.tick || a.prio - b.prio);
+
+        // Walk the timeline: ticks -> ms via the tempo map (or the fixed
+        // SMPTE rate), and cut a segment whenever the audible (highest held)
+        // note changes.
+        let usPerQn = 500000, anchorTick = 0, anchorMs = 0;
+        const tickToMs = (tick) =>
+          msPerTickSmpte !== null
+            ? tick * msPerTickSmpte
+            : anchorMs + ((tick - anchorTick) * usPerQn) / 1000 / division;
+
+        const segs = [];
+        const active = [];
+        let curNote = null, segStart = 0;
+        for (const ev of events) {
+          const ms = tickToMs(ev.tick);
+          if (ev.tempo !== undefined) {
+            anchorMs = ms;
+            anchorTick = ev.tick;
+            usPerQn = ev.tempo;
+            continue;
+          }
+          if (ev.on) {
+            active.push(ev.note);
+          } else {
+            const i = active.indexOf(ev.note);
+            if (i >= 0) active.splice(i, 1);
+          }
+          const top = active.length ? Math.max.apply(null, active) : null;
+          if (top !== curNote) {
+            if (ms > segStart) segs.push({ note: curNote, ms: ms - segStart });
+            curNote = top;
+            segStart = ms;
+          }
+        }
+
+        // Segments -> buzzer steps. Trim a short rest off each note's tail so
+        // repeated notes articulate instead of smearing into one long tone.
+        const steps = [];
+        const pushRest = (ms) => {
+          if (steps.length && steps[steps.length - 1].hz === 0) steps[steps.length - 1].ms += ms;
+          else steps.push({ hz: 0, ms: ms });
+        };
+        for (const seg of segs) {
+          let dur = Math.round(seg.ms);
+          if (!isFinite(dur) || dur <= 0) continue;
+          dur = Math.min(dur, 65535);
+          if (seg.note === null) {
+            if (steps.length) pushRest(dur); // drop leading silence
+            continue;
+          }
+          const midiNote = seg.note + 12 * octave_shift;
+          const hz = Math.max(50, Math.min(12000, Math.round(440 * Math.pow(2, (midiNote - 69) / 12))));
+          const gap = dur > 80 ? Math.min(40, Math.round(dur * 0.1)) : 0;
+          steps.push({ hz: hz, ms: dur - gap });
+          if (gap > 0) pushRest(gap);
+        }
+        while (steps.length && steps[steps.length - 1].hz === 0) steps.pop(); // drop trailing silence
+        return steps;
+      },
+    }));
+
+    // Bluetooth. Translated strings are pulled into a JS object rather than
+    // interpolated into x-text expressions: an apostrophe in a translation
+    // inside an inline expression breaks the Alpine parse at render time.
+    Alpine.data("bluetooth_panel", () => ({
+      // Keys are suffixed _text because the boolean-binding lint reads every
+      // `key: "..."` in a template as a global declaration of that name: a
+      // label called `scanning` would type the `scanning` flag below as a
+      // string, and :disabled="scanning" would then be flagged as able to
+      // leak "" and stick the button disabled.
+      L: {
+        adapter_text: "{{locales['bt_adapter_ready']}}",
+        not_ready_text: "{{locales['bt_not_ready']}}",
+        scanning_text: "{{locales['bt_scanning']}}",
+        unnamed_text: "{{locales['bt_unnamed_device']}}",
+        failed_text: "{{locales['bt_scan_failed']}}",
+      },
+      loading: true,
+      scanning: false,
+      scanned: false,
+      state: {},
+      devices: [],
+      recovery: null,
+      scanError: "",
+
+      init() {
+        this.load();
+      },
+
+      adapterLabel() {
+        const names = (this.state.adapters || []).join(", ");
+        return names ? this.L.adapter_text + " (" + names + ")" : this.L.adapter_text;
+      },
+      notReadyLabel() { return this.L.not_ready_text; },
+      scanningLabel() { return this.L.scanning_text; },
+      unnamedLabel() { return this.L.unnamed_text; },
+
+      load() {
+        this.loading = true;
+        return fetch("/api/v1/bluetooth/status.json")
+          .then(r => r.json())
+          .then(d => { this.state = (d && d.bluetooth) || {}; })
+          .catch(() => { this.state = {}; })
+          .finally(() => { this.loading = false; });
+      },
+
+      scan() {
+        this.scanning = true;
+        this.scanError = "";
+        this.recovery = null;
+        fetch("/api/v1/bluetooth/scan.json", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ seconds: 10 }),
+        })
+          .then(r => r.json())
+          .then(d => {
+            this.devices = d.devices || [];
+            this.recovery = d.recovery || null;
+            if (d.state) this.state = d.state;
+            // "unavailable" carries the diagnosis, which the banner above
+            // already shows; only surface an error box for a real failure.
+            if (d.status === "error") this.scanError = d.reason || this.L.failed_text;
+            this.scanned = d.status === "ok";
+          })
+          .catch(() => { this.scanError = this.L.failed_text; })
+          .finally(() => { this.scanning = false; });
+      },
+    }));
+
+    Alpine.data("soc_log", () => ({
+      records: [],
+      error_text: "",
+      next_seq: null,
+      seq_oldest: 0,
+      seq_next: 0,
+      paused: false,
+      fetching: false,
+      anchors_only: false,
+
+      init() {
+        this.fetch_log();
+        setInterval(() => {
+          if (document.hidden || this.paused || this.fetching) return;
+          this.fetch_log();
+        }, 5000);
+      },
+
+      fetch_log() {
+        this.fetching = true;
+        const url = this.next_seq === null
+          ? "/api/v1/soc_log.json"
+          : "/api/v1/soc_log.json?from_seq=" + this.next_seq;
+        fetch(url)
+          .then((response) => response.json())
+          .then((data) => {
+            this.fetching = false;
+            if (data.status !== "ok") {
+              this.error_text = data.message || "{{locales['dev_soc_log_unavailable']}}";
+              return;
+            }
+            this.error_text = "";
+            this.seq_oldest = data.seq_oldest || 0;
+            this.seq_next = data.seq_next || 0;
+            if (data.records && data.records.length) {
+              this.records = this.records.concat(data.records);
+              // 32 records/ring but the daemon stitches a long history; cap the
+              // DOM so a device left running for weeks can't grow it unbounded
+              if (this.records.length > 2000) {
+                this.records = this.records.slice(-2000);
+              }
+            }
+            this.next_seq = data.next_seq;
+          })
+          .catch(() => {
+            this.fetching = false;
+          });
+      },
+
+      visible_records() {
+        const rows = this.anchors_only
+          ? this.records.filter((r) => r.anchor)
+          : this.records;
+        return rows.slice().reverse();   // newest first
+      },
+
+      // Anchors are logged as a before/after pair sharing an event code; on the
+      // "after" row show how far the anchor moved raw SoC. That delta is the
+      // whole point of the log.
+      delta_of(r) {
+        if (!r.anchor || r.pre) return null;
+        const i = this.records.findIndex((x) => x.seq === r.seq);
+        if (i <= 0) return null;
+        const prev = this.records[i - 1];
+        if (!prev.pre || prev.event !== r.event) return null;
+        return r.soc_raw - prev.soc_raw;
+      },
+
+      // delta_of() is null for every non-anchor and every "before" row, which is
+      // most of them. x-show only toggles visibility -- Alpine still evaluates
+      // x-text and :class on hidden elements -- so these have to be null-safe or
+      // the table throws "null.toFixed" once per row while rendering fine.
+      delta_label(r) {
+        const d = this.delta_of(r);
+        if (d === null) return "";
+        return (d > 0 ? "+" : "") + d.toFixed(1);
+      },
+      delta_class(r) {
+        const d = this.delta_of(r);
+        return d !== null && d < 0 ? "text-red-600" : "text-green-600";
+      },
+
+      // MCU uptime seconds (awake + standby), not wall clock — the MCU has no
+      // calendar the RK can trust across its own power cycles.
+      fmt_t(t) {
+        const d = Math.floor(t / 86400);
+        const h = Math.floor((t % 86400) / 3600);
+        const m = Math.floor((t % 3600) / 60);
+        const s = t % 60;
+        const pad = (n) => String(n).padStart(2, "0");
+        return (d > 0 ? d + "d " : "") + pad(h) + ":" + pad(m) + ":" + pad(s);
+      },
+
+      download_log() {
+        const head = "seq\tuptime_s\tevent\tphase\tsoc_raw\tsoc_disp\tv_mv\ti_ma\tvbus_mv\ttemp_c\tdc\trk\ttrusted\n";
+        const body = this.records.map((r) => [
+          r.seq, r.t, r.event_name, r.pre ? "before" : "after",
+          r.soc_raw, r.soc_disp, r.v_mv, r.i_ma, r.vbus_mv, r.temp_c,
+          r.charger ? 1 : 0, r.rk_on ? 1 : 0, r.trusted ? 1 : 0,
+        ].join("\t")).join("\n");
+        const blob = new Blob([head + body], { type: "text/plain" });
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = "soc-log.tsv";
+        a.click();
+        URL.revokeObjectURL(a.href);
+      },
+    }));
+
+    Alpine.data("modem_log", () => ({
+      log_text: "",
+      error_text: "",
+      next_offset: null,
+      total_offset: 0,
+      tail_offset: 0,
+      paused: false,
+      fetching: false,
+      source: { id: "modem", exec: "", usb_id: "", dev_paths: [], netdevs: [] },
+
+      init() {
+        this.fetch_log();
+        setInterval(() => {
+          if (document.hidden || this.paused || this.fetching) return;
+          this.fetch_log();
+        }, 2000);
+      },
+
+      fetch_log() {
+        this.fetching = true;
+        const url = this.next_offset === null
+          ? "/api/v1/modem/log.json"
+          : "/api/v1/modem/log.json?offset=" + this.next_offset;
+        fetch(url)
+          .then((response) => response.json())
+          .then((data) => {
+            this.fetching = false;
+            if (data.status !== "ok") {
+              this.error_text = data.message || "{{locales['modem_log_unavailable']}}";
+              return;
+            }
+            this.error_text = "";
+            this.source = data.source || this.source;
+            this.total_offset = data.total_offset || 0;
+            this.tail_offset = data.tail_offset || 0;
+            if (this.next_offset !== null && data.offset > this.next_offset) {
+              // the ring dropped data between polls; note the gap
+              this.log_text += "\n--- {{locales['modem_log_gap']}} ---\n";
+            }
+            if (data.log) {
+              this.log_text += data.log;
+              // keep the DOM bounded: show at most ~1MB in the pane
+              if (this.log_text.length > 1048576) {
+                this.log_text = this.log_text.slice(-1048576);
+              }
+              this.$nextTick(() => {
+                const pane = this.$refs.pane;
+                if (pane) pane.scrollTop = pane.scrollHeight;
+              });
+            }
+            this.next_offset = data.next_offset;
+          })
+          .catch(() => {
+            this.fetching = false;
+          });
+      },
+
+      buffer_info() {
+        const size = this.total_offset - this.tail_offset;
+        if (size <= 0) return "";
+        if (size > 1048576) return (size / 1048576).toFixed(1) + " MB";
+        if (size > 1024) return (size / 1024).toFixed(0) + " KB";
+        return size + " B";
+      },
+
+      clear_view() {
+        this.log_text = "";
+      },
+
+      download_log() {
+        const blob = new Blob([this.log_text], { type: "text/plain" });
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = "modem-log.txt";
+        a.click();
+        URL.revokeObjectURL(a.href);
+      },
+    }));
+  });
+</script>
+{% endblock %}

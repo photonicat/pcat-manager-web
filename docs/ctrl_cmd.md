@@ -156,7 +156,50 @@ print(data)
 }
 ```
 
-### 5. 车载模式命令
+### 5. LED/Beeper schedule (MCU-owned, fw >= RA2E1260808000)
+
+On MCU firmware `RA2E1260808000` or newer the daily LED/beeper schedule is
+evaluated by the MCU against its RTC. The host pushes **UTC** times and must
+keep the RTC in sync. Older firmware ignores these commands; the web UI falls
+back to the host-side minute loop (`pmu-io-set`).
+
+#### 5.1 Sync UTC to MCU RTC
+- Command: `pmu-date-time-sync`
+- Request: `{"command":"pmu-date-time-sync"}`
+- Response: `{"command":"pmu-date-time-sync","code":0}`
+
+#### 5.2 Set schedule
+- Command: `pmu-io-schedule-set`
+- Request:
+```json
+{
+  "command": "pmu-io-schedule-set",
+  "led": {"mode":"timed","start_hour":1,"start_minute":0,"end_hour":14,"end_minute":0},
+  "beeper": {"mode":"on","start_hour":0,"start_minute":0,"end_hour":0,"end_minute":0}
+}
+```
+- `mode`: `"off"` | `"on"` | `"timed"`; hours/minutes are **UTC**
+- Response includes `"supported": 1` once the MCU is known to implement the engine
+
+#### 5.3 Get schedule + current status
+- Command: `pmu-io-schedule-get`
+- Response:
+```json
+{
+  "command": "pmu-io-schedule-get",
+  "code": 0,
+  "supported": 1,
+  "valid": 1,
+  "led": {"mode":"timed","start_hour":1,"start_minute":0,"end_hour":14,"end_minute":0},
+  "beeper": {"mode":"on",...},
+  "current_led": 1,
+  "current_beeper": 1,
+  "time_valid": 1,
+  "flags": 3
+}
+```
+
+### 6. 车载模式命令
 
 #### 5.1 获取车载模式状态
 - 命令: `charger-on-auto-start-get`

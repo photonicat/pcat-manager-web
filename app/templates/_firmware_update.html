@@ -20,7 +20,8 @@
       </div>
       <div class="py-3 px-4">
         <!-- Dev Server Section (conditionally shown if reachable) -->
-        <div x-show="dev_server_reachable" class="mb-4">
+        <!-- x-cloak: starts false, so hide until Alpine boots to avoid a flash for normal users -->
+        <div x-cloak x-show="dev_server_reachable" class="mb-4">
           <div class="flex items-center justify-between mb-2">
             <div class="flex items-center">
               <div class="w-3 h-3 bg-orange-500 rounded-full mr-2 animate-pulse"></div>
@@ -31,7 +32,129 @@
             </div>
             <div x-show="dev_firmware_newer" class="text-sm font-medium text-orange-600">{{locales["dev_firmware_available"]}}</div>
           </div>
-          
+
+          <!-- Hardware-test matrix for the build this device is running.
+               Dev-server only: it lives inside the dev block, so a production
+               unit never sees it. Green/red per check, matched on the exact
+               openwrt_version string. -->
+          <div x-cloak x-show="!hil_loading && hil_loaded && hil.tested" class="mb-3 rounded border border-orange-200 bg-orange-50/50 p-3">
+            <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
+              <div class="flex items-center gap-2 flex-wrap">
+                <span class="text-sm font-bold text-orange-800">{{locales["hil_matrix_title"]}}</span>
+                <!-- Which build these results are for. The panel follows the
+                     dropdown, so this is no longer always the running one. -->
+                <span class="text-xs text-gray-600 font-mono" x-text="hil_version_label()"></span>
+                <span x-show="hil_is_installed"
+                      class="text-[10px] px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-600">{{locales["hil_installed_tag"]}}</span>
+                <span class="text-xs text-gray-400 font-mono" x-text="hil.build_label"></span>
+              </div>
+              <div class="flex items-center gap-2">
+                <span class="text-xs px-2 py-0.5 rounded-full font-medium"
+                      :class="hil.verdict === 'pass' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'"
+                      x-text="hil.verdict_label"></span>
+                <span class="text-xs text-gray-500" x-text="hil_runs_label()"></span>
+              </div>
+            </div>
+
+            <!-- Counts first: the headline a tester reads before any detail. -->
+            <div class="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-gray-600">
+              <span x-show="hil.summary.pass"><span class="inline-block w-2 h-2 rounded-full bg-green-500 mr-1"></span><span x-text="hil_summary_label('pass')"></span></span>
+              <span x-show="hil.summary.fail"><span class="inline-block w-2 h-2 rounded-full bg-red-500 mr-1"></span><span x-text="hil_summary_label('fail')"></span></span>
+              <span x-show="hil.summary.error"><span class="inline-block w-2 h-2 rounded-full bg-red-500 mr-1"></span><span x-text="hil_summary_label('error')"></span></span>
+              <span x-show="hil.summary.untested"><span class="inline-block w-2 h-2 rounded-full bg-amber-400 mr-1"></span><span x-text="hil_summary_label('untested')"></span></span>
+              <span x-show="hil.summary.skip"><span class="inline-block w-2 h-2 rounded-full bg-gray-300 mr-1"></span><span x-text="hil_summary_label('skip')"></span></span>
+              <span x-show="hil.last_tested" class="text-gray-400" x-text="hil_last_tested_label()"></span>
+            </div>
+
+            <!-- One row per check, grouped by area. Capped height so a 30-check
+                 matrix does not push the upgrade buttons off the screen. -->
+            <div class="max-h-72 overflow-y-auto rounded border border-gray-200 bg-white">
+              <table class="w-full text-left text-xs">
+                <thead class="sticky top-0 bg-gray-50 text-gray-500">
+                  <tr>
+                    <th class="px-2 py-1 font-medium">{{locales["hil_col_area"]}}</th>
+                    <th class="px-2 py-1 font-medium">{{locales["hil_col_check"]}}</th>
+                    <th class="px-2 py-1 font-medium">{{locales["hil_col_result"]}}</th>
+                    <th class="px-2 py-1 font-medium text-right">{{locales["hil_col_runs"]}}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <template x-for="c in hil_rows()" :key="c.name">
+                    <tr class="border-t border-gray-100"
+                        :class="c.first_in_group ? 'border-gray-200' : ''">
+                      <td class="px-2 py-1 align-top text-gray-500 whitespace-nowrap"
+                          x-text="c.first_in_group ? c.category_label : ''"></td>
+                      <td class="px-2 py-1 align-top text-gray-800" x-text="c.label"></td>
+                      <td class="px-2 py-1 align-top whitespace-nowrap">
+                        <span class="inline-block w-2.5 h-2.5 rounded-full mr-1 align-middle"
+                              :class="{
+                                'bg-green-500': c.led === 'green',
+                                'bg-red-500': c.led === 'red',
+                                'bg-amber-400': c.led === 'amber',
+                                'bg-gray-300': c.led === 'grey',
+                                'bg-gray-200': c.led === 'off'
+                              }"></span>
+                        <span :class="c.led === 'red' ? 'text-red-700 font-medium' : 'text-gray-600'"
+                              x-text="c.status_label"></span>
+                      </td>
+                      <td class="px-2 py-1 align-top text-right text-gray-400 font-mono"
+                          x-text="hil_hits_label(c)"></td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+
+            <div class="mt-2 flex flex-wrap items-center gap-3 text-[11px] text-gray-500">
+              <span><span class="inline-block w-2 h-2 rounded-full bg-green-500 mr-1"></span>{{locales["hil_led_pass"]}}</span>
+              <span><span class="inline-block w-2 h-2 rounded-full bg-red-500 mr-1"></span>{{locales["hil_led_fail"]}}</span>
+              <span><span class="inline-block w-2 h-2 rounded-full bg-amber-400 mr-1"></span>{{locales["hil_led_untested"]}}</span>
+              <span><span class="inline-block w-2 h-2 rounded-full bg-gray-300 mr-1"></span>{{locales["hil_led_na"]}}</span>
+              <span class="text-gray-400">{{locales["hil_runs_hint"]}}</span>
+            </div>
+          </div>
+
+          <!-- Fetching the selected build's results. -->
+          <div x-cloak x-show="hil_loading" class="mb-3 flex items-center rounded border border-gray-200 bg-gray-50 p-2">
+            <img src="/static/loading.gif" class="w-3 h-3 mr-2" />
+            <span class="text-xs text-gray-500" x-text="hil_loading_label()"></span>
+          </div>
+
+          <!-- Selected build has never been through the test bench. Said
+               plainly and tied to the version, because the alternative -- the
+               previous build's green results sitting under a new build's
+               number -- reads as approval for something never tested. -->
+          <div x-cloak x-show="!hil_loading && hil_loaded && !hil.tested"
+               class="mb-3 rounded border border-amber-200 bg-amber-50 p-3">
+            <div class="flex items-center gap-2">
+              <span class="inline-block w-2.5 h-2.5 rounded-full bg-amber-400 shrink-0"></span>
+              <span class="text-sm font-medium text-amber-800">{{locales["hil_pending_title"]}}</span>
+              <span class="text-xs text-gray-600 font-mono" x-text="hil_version_label()"></span>
+            </div>
+            <div class="mt-1 text-xs text-gray-600">{{locales["hil_pending_hint"]}}</div>
+          </div>
+
+          <!-- Dev version picker: latest + older builds so testers can downgrade -->
+          <div x-show="dev_versions_list.length > 0" class="mb-3">
+            <label class="block text-sm text-gray-600 mb-1">{{locales["select_version"]}}</label>
+            <select x-model="dev_selected_index" @change="on_dev_version_selected()"
+                    class="w-full rounded border border-orange-300 bg-white px-3 py-2 text-sm text-gray-800 focus:border-orange-500 focus:outline-none">
+              <template x-for="(v, i) in dev_versions_list" :key="v.filename">
+                <option :value="i" x-text="version_option_label(v, i)"></option>
+              </template>
+            </select>
+            <!-- Changelog of the selected dev build -->
+            <div class="mt-2 rounded border border-orange-200 bg-white p-3">
+              <div class="text-sm font-medium text-orange-800 mb-1">{{locales["changelog_title"]}}</div>
+              <div x-show="dev_changelog_loading" class="flex items-center text-xs text-gray-500">
+                <img src="/static/loading.gif" class="w-3 h-3 mr-1" />
+                {{locales["changelog_loading"]}}
+              </div>
+              <pre x-show="!dev_changelog_loading && dev_changelog" class="max-h-40 overflow-y-auto whitespace-pre-wrap break-words font-mono text-xs text-gray-700" x-text="dev_changelog"></pre>
+              <div x-show="!dev_changelog_loading && !dev_changelog" class="text-xs text-gray-400">{{locales["changelog_none"]}}</div>
+            </div>
+          </div>
+
           <!-- Dev Server Update Available -->
           <div x-show="dev_firmware_newer" class="mb-3 rounded bg-gradient-to-r from-orange-50 to-yellow-50 border border-orange-200 p-3">
             <div class="flex items-start">
@@ -76,8 +199,8 @@
                   </a>
                   <button @click="start_dev_firmware_upgrade()"
                           x-show="!firmware_upgrading"
-                          :disabled="dev_firmware_upgrading"
-                          :class="dev_firmware_upgrading ? 'bg-gray-400 cursor-not-allowed' : 'bg-orange-500 hover:bg-orange-600'"
+                          :disabled="dev_firmware_upgrading || mcu_busy()"
+                          :class="dev_firmware_upgrading || mcu_busy() ? 'bg-gray-400 cursor-not-allowed' : 'bg-orange-500 hover:bg-orange-600'"
                           class="flex-1 inline-flex items-center justify-center px-4 py-3 text-white rounded-lg transition-colors font-medium">
                     <svg x-show="dev_firmware_upgrading" class="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                       <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
@@ -147,8 +270,8 @@
                   </a>
                   <button @click="start_dev_firmware_upgrade()"
                           x-show="!firmware_upgrading"
-                          :disabled="dev_firmware_upgrading"
-                          :class="dev_firmware_upgrading ? 'bg-gray-400 cursor-not-allowed' : 'bg-gray-500 hover:bg-gray-600'"
+                          :disabled="dev_firmware_upgrading || mcu_busy()"
+                          :class="dev_firmware_upgrading || mcu_busy() ? 'bg-gray-400 cursor-not-allowed' : 'bg-gray-500 hover:bg-gray-600'"
                           class="flex-1 inline-flex items-center justify-center px-4 py-3 text-white rounded-lg transition-colors font-medium">
                     <svg x-show="dev_firmware_upgrading" class="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                       <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
@@ -218,8 +341,8 @@
                   </a>
                   <button @click="start_dev_firmware_upgrade()"
                           x-show="!firmware_upgrading"
-                          :disabled="dev_firmware_upgrading"
-                          :class="dev_firmware_upgrading ? 'bg-gray-400 cursor-not-allowed' : 'bg-blue-500 hover:bg-blue-600'"
+                          :disabled="dev_firmware_upgrading || mcu_busy()"
+                          :class="dev_firmware_upgrading || mcu_busy() ? 'bg-gray-400 cursor-not-allowed' : 'bg-blue-500 hover:bg-blue-600'"
                           class="flex-1 inline-flex items-center justify-center px-4 py-3 text-white rounded-lg transition-colors font-medium">
                     <svg x-show="dev_firmware_upgrading" class="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                       <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
@@ -254,7 +377,18 @@
             </div>
           </div>
         </div>
-        
+
+        <!-- Production version picker: latest + older builds for downgrades -->
+        <div x-show="prod_versions_list.length > 0" class="mb-3">
+          <label class="block text-sm text-gray-600 mb-1">{{locales["select_version"]}}</label>
+          <select x-model="prod_selected_index" @change="on_prod_version_selected()"
+                  class="w-full rounded border border-blue-300 bg-white px-3 py-2 text-sm text-gray-800 focus:border-blue-500 focus:outline-none">
+            <template x-for="(v, i) in prod_versions_list" :key="v.filename">
+              <option :value="i" x-text="version_option_label(v, i)"></option>
+            </template>
+          </select>
+        </div>
+
         <!-- Firmware Update Available -->
         <div x-show="firmware_update_available" class="mb-3 rounded bg-gradient-to-r from-green-50 to-blue-50 border border-green-200 p-3">
           <div class="flex items-start">
@@ -307,8 +441,8 @@
                 </a>
                 <button @click="start_prod_firmware_upgrade()"
                         x-show="!firmware_upgrading"
-                        :disabled="production_firmware_upgrading"
-                        :class="production_firmware_upgrading ? 'bg-gray-400 cursor-not-allowed' : 'bg-pcatblue hover:bg-blue-700'"
+                        :disabled="production_firmware_upgrading || mcu_busy()"
+                        :class="production_firmware_upgrading || mcu_busy() ? 'bg-gray-400 cursor-not-allowed' : 'bg-pcatblue hover:bg-blue-700'"
                         class="flex-1 inline-flex items-center justify-center px-4 py-3 text-white rounded-lg transition-colors font-medium">
                   <svg x-show="production_firmware_upgrading" class="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                     <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
@@ -364,6 +498,31 @@
               </div>
             </div>
           </div>
+          <!-- Downgrade/reflash actions when a version other than the installed one is selected -->
+          <div x-show="prod_selected_differs()" class="mt-3 flex flex-col sm:flex-row gap-3">
+            <a x-bind:href="firmware_info.download_url"
+               target="_blank"
+               class="flex-1 inline-flex items-center justify-center px-4 py-3 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition-colors font-medium">
+              <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+              </svg>
+              {{locales["firmware_download_button"]}}
+            </a>
+            <button @click="start_prod_firmware_upgrade()"
+                    x-show="!firmware_upgrading"
+                    :disabled="production_firmware_upgrading || mcu_busy()"
+                    :class="production_firmware_upgrading || mcu_busy() ? 'bg-gray-400 cursor-not-allowed' : 'bg-pcatblue hover:bg-blue-700'"
+                    class="flex-1 inline-flex items-center justify-center px-4 py-3 text-white rounded-lg transition-colors font-medium">
+              <svg x-show="production_firmware_upgrading" class="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+              </svg>
+              <svg x-show="!production_firmware_upgrading" class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path>
+              </svg>
+              <span x-text="getProdFirmwareButtonText()"></span>
+            </button>
+          </div>
         </div>
 
         <!-- Checkpoint Progress -->
@@ -404,7 +563,13 @@
             </div>
             <div class="flex-grow">
               <h6 class="font-bold text-lg text-blue-800 mb-3">{{locales["firmware_upgrading"]}}</h6>
-              
+
+              <!-- Do-not-power-off warning (customers powering off mid-update is the #1 cause of failed upgrades) -->
+              <div x-show="upgrade_status.stage !== 'error'" class="mb-3 flex items-start gap-2 bg-amber-50 border border-amber-300 p-3 rounded">
+                <span class="text-lg leading-none">⚠️</span>
+                <p class="text-sm font-medium text-amber-800">{{locales["firmware_upgrade_no_poweroff"]}}</p>
+              </div>
+
               <!-- Stage indicators -->
               <div class="grid grid-cols-5 gap-2 mb-4">
                 <div class="text-center">
@@ -523,7 +688,7 @@
                   <div><strong>Stage:</strong> <span x-text="upgrade_status.stage || 'none'"></span></div>
                   <div><strong>Progress:</strong> <span x-text="upgrade_status.progress || 0"></span>%</div>
                   <div><strong>Active:</strong> <span x-text="upgrade_status.active ? 'Yes' : 'No'"></span></div>
-                  <div><strong>Keep Config:</strong> <span x-text="upgrade_status.keep_config ? 'Yes' : 'No'"></span></div>
+                  <div><strong>Flags:</strong> <span x-text="(upgrade_status.sysupgrade_flags || []).join(' ') || 'none'"></span></div>
                   <div x-show="upgrade_status.firmware_url"><strong>URL:</strong> <span x-text="upgrade_status.firmware_url" class="break-all"></span></div>
                   <div x-show="upgrade_status.start_time"><strong>Started:</strong> <span x-text="new Date(upgrade_status.start_time * 1000).toLocaleString()"></span></div>
                   <div x-show="upgrade_status.error" class="text-red-600"><strong>Error:</strong> <span x-text="upgrade_status.error"></span></div>

@@ -66,6 +66,11 @@ from pysms_tool import SMSTool
 INTERVAL_SMS_HOOK = 30
 SMS_DEBUG_BOOL = True
 
+# AT+CLCC <mode> values whose current bearer is voice (27.007): 0 voice, plus
+# the combined modes that start on voice. 1 (data) and 2 (fax) are not calls
+# this UI has any business showing -- see get_call_status().
+VOICE_CALL_MODES = (0, 3, 4, 5)
+
 
 SMS_INIT_SQL = '''
 CREATE TABLE IF NOT EXISTS sms(
@@ -205,18 +210,18 @@ CREATE INDEX IF NOT EXISTS idx_sms_hook_history_success ON sms_hook_history(succ
         Check db for hook_processed = 0, execute cmd, update hook_processed = 1 unless dry_run=True.
         Returns True if any rows were processed, False otherwise.
         """
-        print("=== HOOK PROCESSING STARTED ===")
-        print(f"dry_run={dry_run}, database={self.modem_db_path}")
-        
         cmd_base = "/etc/pcat_hook_cmd.sh"
-        
+
+        # Check preconditions quietly first: this runs every 30s from the hook
+        # thread and used to print a banner each pass even when disabled.
         if not pcat_config.get_sms_hook_enabled():
-            print("sms hook is disabled")
             return False
 
         if not os.path.exists(cmd_base):
-            print("hook_shell cmd not found: ", cmd_base)
+            pcat_logger.logger.debug(f"sms hook script not found: {cmd_base}")
             return False
+
+        pcat_logger.logger.debug(f"SMS hook processing started: dry_run={dry_run}, database={self.modem_db_path}")
 
         # Read current hook script content for logging
         hook_script_content = ""
@@ -230,9 +235,9 @@ CREATE INDEX IF NOT EXISTS idx_sms_hook_history_success ON sms_hook_history(succ
             # Import get_rows locally to handle any import issues
             from database import get_rows
             rows = get_rows(self.modem_db_path, "SELECT * FROM sms WHERE hook_processed = 0;")
-            print(f"Found {len(rows) if rows else 0} unprocessed SMS messages")
             if not rows:
                 return False
+            pcat_logger.logger.info(f"Found {len(rows)} unprocessed SMS messages for hook")
 
             processed = False
             for i, row in enumerate(rows):
@@ -930,8 +935,11 @@ CREATE INDEX IF NOT EXISTS idx_sms_hook_history_success ON sms_hook_history(succ
                 
                 if success:
                     print(f"Voice call initiated to {phone_number}")
-                    # Log the call attempt to history
-                    self.log_call_history("outgoing", phone_number, "initiated")
+                    # The history row is written by pc_call_log when the call
+                    # ends and its duration is known; just name the callee so
+                    # it does not have to wait for AT+CLCC to report it.
+                    import pc_call_log
+                    pc_call_log.call_session_tracker.note_number(phone_number)
                     return True
                 else:
                     print(f"Failed to initiate voice call to {phone_number}")
@@ -960,8 +968,6 @@ CREATE INDEX IF NOT EXISTS idx_sms_hook_history_success ON sms_hook_history(succ
                 
                 if success:
                     print("Voice call answered successfully")
-                    # Log the answered call to history
-                    self.log_call_history("incoming", "Unknown", "answered")
                     return True
                 else:
                     print("Failed to answer voice call")
@@ -990,8 +996,8 @@ CREATE INDEX IF NOT EXISTS idx_sms_hook_history_success ON sms_hook_history(succ
                 
                 if success:
                     print("Voice call ended successfully")
-                    # Log the call end to history
-                    self.log_call_history("ended", "Unknown", "completed")
+                    import pc_call_log
+                    pc_call_log.call_session_tracker.finish()
                     return True
                 else:
                     print("Failed to hang up voice call")
@@ -1033,16 +1039,30 @@ CREATE INDEX IF NOT EXISTS idx_sms_hook_history_success ON sms_hook_history(succ
                                 mode = int(parts[3])       # 0=voice, 1=data, 2=fax
                                 number = parts[5].strip('"')
                                 
+                                # Voice calls only. AT+CLCC lists every bearer
+                                # the module has up, not just phone calls: on
+                                # EM05-CN the LTE data context and the IMS
+                                # context both show as
+                                #   +CLCC: n,1,0,1,0,"",128
+                                # (mode 1 = data, status 0 = active), which the
+                                # phone page read as two calls in progress and
+                                # sat there showing an in-call timer with
+                                # nothing dialled. Modes per 27.007: 0 voice,
+                                # 1 data, 2 fax, 3-5 the voice-first combined
+                                # modes, 6+ data/fax-first.
+                                if mode not in VOICE_CALL_MODES:
+                                    continue
+
                                 # Map status codes to readable text
                                 status_map = {
                                     0: "active",
-                                    1: "held", 
+                                    1: "held",
                                     2: "dialing",
                                     3: "alerting",
                                     4: "incoming",
                                     5: "waiting"
                                 }
-                                
+
                                 calls.append({
                                     "id": idx,
                                     "number": number,
@@ -1120,21 +1140,21 @@ CREATE INDEX IF NOT EXISTS idx_sms_hook_history_success ON sms_hook_history(succ
             LIMIT 100
             '''
             
-            result = self.exec_sql(sql)
-            if result and result[0]:
-                call_history = []
-                for row in result[1]:
-                    call_history.append({
-                        "id": str(row[0]),
-                        "number": row[1],
-                        "type": row[2],
-                        "duration": row[3],
-                        "timestamp": row[4]
-                    })
-                return call_history
-            else:
-                return []
-            
+            # exec_sql() takes no params and returns None; reads must go through
+            # get_rows_param (which returns sqlite3.Row objects).
+            from database import get_rows_param
+            rows = get_rows_param(self.modem_db_path, sql)
+            call_history = []
+            for row in rows:
+                call_history.append({
+                    "id": str(row[0]),
+                    "number": row[1],
+                    "type": row[2],
+                    "duration": row[3],
+                    "timestamp": row[4]
+                })
+            return call_history
+
         except Exception as e:
             pcat_logger.logger.error(f"Error getting call history: {e}")
             return []
@@ -1153,14 +1173,13 @@ CREATE INDEX IF NOT EXISTS idx_sms_hook_history_success ON sms_hook_history(succ
             VALUES (?, ?, ?, datetime('now', 'localtime'))
             '''
             
-            result = self.exec_sql(sql, (number, call_type, duration))
-            if result and result[0]:
-                print(f"Logged call: {call_type} to/from {number} with status {status}")
-                return True
-            else:
-                print(f"Failed to log call: {call_type} to/from {number}")
-                return False
-                
+            # Was self.exec_sql(sql, params) — exec_sql takes no params arg and
+            # returns None, so this always raised TypeError and calls were never
+            # logged. Use the parameterized writer.
+            self.exec_sql_param(sql, (number, call_type, duration))
+            print(f"Logged call: {call_type} to/from {number} with status {status}")
+            return True
+
         except Exception as e:
             pcat_logger.logger.error(f"Error logging call history: {e}")
             print(f"Error logging call history: {e}")
@@ -1172,15 +1191,10 @@ CREATE INDEX IF NOT EXISTS idx_sms_hook_history_success ON sms_hook_history(succ
             self._ensure_call_history_table()
             
             sql = 'DELETE FROM call_history'
-            result = self.exec_sql(sql)
-            
-            if result and result[0]:
-                print("Call history cleared from database")
-                return True
-            else:
-                print("Failed to clear call history")
-                return False
-                
+            self.exec_sql(sql)
+            print("Call history cleared from database")
+            return True
+
         except Exception as e:
             pcat_logger.logger.error(f"Error clearing call history: {e}")
             print(f"Error clearing call history: {e}")
@@ -1190,29 +1204,110 @@ CREATE INDEX IF NOT EXISTS idx_sms_hook_history_success ON sms_hook_history(succ
         """Delete specific call record from SQLite database."""
         try:
             self._ensure_call_history_table()
-            
+
             sql = 'DELETE FROM call_history WHERE id = ?'
-            result = self.exec_sql(sql, (call_id,))
-            
-            if result and result[0]:
-                print(f"Call record {call_id} deleted from database")
-                return True
-            else:
-                print(f"Failed to delete call record {call_id}")
-                return False
-                
+            self.exec_sql_param(sql, (call_id,))
+            print(f"Call record {call_id} deleted from database")
+            return True
+
         except Exception as e:
             pcat_logger.logger.error(f"Error deleting call record: {e}")
             print(f"Error deleting call record: {e}")
             return False
 
+    def _ensure_contacts_table(self):
+        """Create phone_contacts table if it doesn't exist."""
+        try:
+            sql_create_table = '''
+            CREATE TABLE IF NOT EXISTS phone_contacts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                number TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+            '''
+            self.exec_sql(sql_create_table)
+        except Exception as e:
+            pcat_logger.logger.error(f"Error creating phone_contacts table: {e}")
+
+    def get_contacts(self):
+        """Get the phone address book from SQLite database, sorted by name."""
+        try:
+            self._ensure_contacts_table()
+
+            sql = '''
+            SELECT id, name, number
+            FROM phone_contacts
+            ORDER BY name COLLATE NOCASE ASC
+            LIMIT 500
+            '''
+            from database import get_rows_param
+            rows = get_rows_param(self.modem_db_path, sql)
+            contacts = []
+            for row in rows:
+                contacts.append({
+                    "id": str(row[0]),
+                    "name": row[1],
+                    "number": row[2]
+                })
+            return contacts
+
+        except Exception as e:
+            pcat_logger.logger.error(f"Error getting contacts: {e}")
+            return []
+
+    def add_contact(self, name, number):
+        """Add a contact to the phone address book."""
+        try:
+            self._ensure_contacts_table()
+
+            sql = 'INSERT INTO phone_contacts (name, number) VALUES (?, ?)'
+            self.exec_sql_param(sql, (name, number))
+            print(f"Contact added: {name} {number}")
+            return True
+
+        except Exception as e:
+            pcat_logger.logger.error(f"Error adding contact: {e}")
+            return False
+
+    def update_contact(self, contact_id, name, number):
+        """Update an existing contact in the phone address book."""
+        try:
+            self._ensure_contacts_table()
+
+            sql = 'UPDATE phone_contacts SET name = ?, number = ? WHERE id = ?'
+            self.exec_sql_param(sql, (name, number, contact_id))
+            print(f"Contact {contact_id} updated: {name} {number}")
+            return True
+
+        except Exception as e:
+            pcat_logger.logger.error(f"Error updating contact: {e}")
+            return False
+
+    def delete_contact(self, contact_id):
+        """Delete a contact from the phone address book."""
+        try:
+            self._ensure_contacts_table()
+
+            sql = 'DELETE FROM phone_contacts WHERE id = ?'
+            self.exec_sql_param(sql, (contact_id,))
+            print(f"Contact {contact_id} deleted")
+            return True
+
+        except Exception as e:
+            pcat_logger.logger.error(f"Error deleting contact: {e}")
+            return False
+
     def get_incoming_call_status(self):
         """Check for incoming call status and RING notifications."""
         try:
-            # Get serial connection
+            # Get serial connection. PcModemClient has no get_serial(); the
+            # port is reached through the same wait-for-connection helper every
+            # other method here uses, so a modem that is still coming up is
+            # waited out instead of raising.
             serial_obj = None
             with self.modem_client.serial_lock:
-                serial_obj = self.modem_client.get_serial()
+                serial_obj = self._wait_for_serial_connection(timeout_seconds=3.0)
                 if not serial_obj:
                     return {
                         "active": False,
@@ -1236,10 +1331,15 @@ CREATE INDEX IF NOT EXISTS idx_sms_hook_history_success ON sms_hook_history(succ
                             if len(parts) >= 6:
                                 direction = int(parts[1])  # 0=MO, 1=MT
                                 status = int(parts[2])     # 4=incoming, 0=active, etc.
+                                mode = int(parts[3])       # 0=voice, 1=data, 2=fax
                                 number = parts[5].strip('"')
                                 
-                                # Check if this is an incoming call (MT direction, incoming status)
-                                if direction == 1 and status == 4:
+                                # Incoming voice call: MT direction, ringing
+                                # status, and a voice bearer -- see the note on
+                                # VOICE_CALL_MODES, a data context can sit in
+                                # this list too.
+                                if direction == 1 and status == 4 and \
+                                        mode in VOICE_CALL_MODES:
                                     return {
                                         "active": True,
                                         "number": number,

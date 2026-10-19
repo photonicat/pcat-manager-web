@@ -4,6 +4,7 @@ import threading
 # import pyprctl # patch:set real thread name
 import serial
 import select
+import logging
 import time
 from datetime import datetime
 import queue
@@ -19,11 +20,35 @@ from pcat_util import hardware_util
 from database import init_db, connect_db, get_rows
 from pcat_util import pcat_logger
 
-# Permanent cache for EM05 detection - never expires once set
-_em05_cache = {'result': None, 'queried': False, 'lock': threading.Lock()}
+# Permanent model cache: handle_ati() fills 'model' once, when the modem
+# answers ATI. Every is_* predicate derives from this, so there is no separate
+# per-model boolean cache to poison with a boot-race "not known yet" answer.
 _model_cache = {'model': None, 'queried': False, 'lock': threading.Lock()}
 import pcat_config
 import app
+
+# Unsolicited result codes (URCs) the modem emits on its own -- most
+# importantly RING for an incoming call. They surface on the AT port whether
+# or not a command is in flight, so both readers (the command loop and the
+# idle drain below) push matching lines through this dispatch. Listeners must
+# be fast and non-blocking: they run on the serial threads.
+# "+CRING:" as well as "RING": AT+CRC selects which of the two the module
+# emits for an incoming call, and it is 1 (extended, "+CRING: VOICE") out of
+# the box on RM500U-CNV -- matching only "RING" misses every call there.
+_URC_PREFIXES = ("RING", "+CRING:", "+CLIP:", "NO CARRIER", "BUSY", "NO ANSWER")
+_urc_listeners = []
+
+
+def register_urc_listener(callback):
+    _urc_listeners.append(callback)
+
+
+def _notify_urc(line):
+    for cb in _urc_listeners:
+        try:
+            cb(line)
+        except Exception as e:
+            pcat_logger.logger.error(f"URC listener failed on '{line}': {e}")
 
 MAX_QUEUE = 20
 MAX_MODEM_RETRY_COUNT = 1000
@@ -60,6 +85,22 @@ class PcModemClient (threading.Thread):
         self.nr5g_bands_user_desired = pcat_config.get_user_config_key("nr5g_bands_desired", "all")
         self.roaming_pref = pcat_config.get_user_config_key("roaming_pref", "any")
 
+        # Demand gating for the heavy routine AT queries. Only a light set
+        # (signal, operator, temperature) feeds the dashboard / mini-display;
+        # the detail queries (serving cell, CA info, extended signal, USB
+        # mode/speed, band preferences) are only shown on the /modem page.
+        # The web endpoints call note_ui_activity(); while the page was viewed
+        # within UI_DEMAND_WINDOW the routine includes the heavy set. Each AT
+        # command wakes the modem's application processor, so idle devices
+        # save ~8 of ~11 commands per minute.
+        self.UI_DEMAND_WINDOW = 180  # seconds
+        self.last_ui_activity = 0.0
+        self._pref_refresh_pending = False
+
+        # Wakes the run loop when a command is queued, so an idle queue no
+        # longer needs 1Hz wakeup polling.
+        self.cmd_event = threading.Event()
+
         self.api_lookup_lock = threading.Lock()
         self.serial_lock = threading.Lock()
 
@@ -79,6 +120,49 @@ class PcModemClient (threading.Thread):
         with _model_cache['lock']:
             if _model_cache['model'] is not None:
                 self.basic["model"] = _model_cache['model']
+
+        # URC idle drain: without this, a RING that arrives between queued
+        # commands sits in the kernel buffer until the next command stumbles
+        # over it (seconds). See _urc_drain_loop.
+        self._urc_drain_thread = threading.Thread(
+            target=self._urc_drain_loop, daemon=True)
+        self._urc_drain_thread.start()
+
+    def _urc_drain_loop(self):
+        """Surface unsolicited modem lines (RING / NO CARRIER / ...) while
+        the AT port is idle, so incoming-call events reach listeners within
+        ~100ms instead of whenever the next queued command happens to read
+        the port. Reads ONLY bytes the kernel has already buffered
+        (in_waiting), so it never blocks the port; and it try-acquires the
+        serial lock, so it never contends with an in-flight command -- a URC
+        arriving mid-command is dispatched by the command loop instead.
+        Draining stale bytes between commands is also harmless to command
+        sync: those bytes belong to no command."""
+        carry = b""
+        while True:
+            time.sleep(0.1)
+            if not _urc_listeners:
+                continue
+            if not self.serial_lock.acquire(blocking=False):
+                continue
+            try:
+                s = self.serial_obj
+                if s is None:
+                    carry = b""
+                    continue
+                n = s.in_waiting
+                if not n:
+                    continue
+                data = carry + s.read(n)
+                *lines, carry = data.split(b"\n")
+                for raw in lines:
+                    line = raw.decode("utf-8", "ignore").strip()
+                    if line.startswith(_URC_PREFIXES):
+                        _notify_urc(line)
+            except Exception:
+                carry = b""
+            finally:
+                self.serial_lock.release()
 
     def cleanup_serial_connection(self):
         """
@@ -130,7 +214,7 @@ class PcModemClient (threading.Thread):
         try:
             # 1) avoid duplicates
             if cmd in self.cmd_queue:
-                print(f"Warning: {cmd} is already in the queue")
+                pcat_logger.logger.debug(f"{cmd} is already in the queue")
                 return
 
             # 2) if we're already at capacity, drop the oldest
@@ -139,8 +223,23 @@ class PcModemClient (threading.Thread):
 
             # 3) add the new command
             self.cmd_queue.append(cmd)
+            self.cmd_event.set()
         finally:
             self.mutex.release()
+
+    def note_ui_activity(self):
+        """Mark the modem UI as recently viewed (called by the /modem web
+        endpoints). Enables the heavy routine query set for a while; on the
+        idle->active transition kick a refresh right away so the page does
+        not show minutes-old detail data until the next 60s routine pass."""
+        was_idle = not self._ui_demand_active()
+        self.last_ui_activity = time.time()
+        if was_idle:
+            self._pref_refresh_pending = True
+            self.start_query("")
+
+    def _ui_demand_active(self):
+        return (time.time() - self.last_ui_activity) < self.UI_DEMAND_WINDOW
 
     def start_query(self, refresh_type):
         global global_query_counter, global_routine_query_counter
@@ -164,7 +263,7 @@ class PcModemClient (threading.Thread):
             self.cmd_queue_append("AT+CGSN")
         else:
             global_routine_query_counter += 1
-            print("Routine Query sequence: ", global_routine_query_counter)
+            pcat_logger.logger.debug("Routine Query sequence: %s", global_routine_query_counter)
                        
             if self.basic["sim_number"] == "":
                 self.cmd_queue_append("AT+CNUM") # SIM number
@@ -183,68 +282,104 @@ class PcModemClient (threading.Thread):
                 self.cmd_queue_append("AT+CGSN") # IMEI
 
 
+            # Heavy detail queries run only when the /modem page was recently
+            # viewed (note_ui_activity) or during the first boot passes, which
+            # populate the one-time fields and apply stored preferences. The
+            # light set keeps everything the dashboard / mini-display shows
+            # fresh at every pass: signal (CSQ), operator/tech (COPS/QNWINFO),
+            # ISP (QSPN) and modem temperature.
+            ui_demand = (self._ui_demand_active()
+                         or global_routine_query_counter <= 2)
+
             if self.is_fm350():
                 # FM350-GL (MediaTek) specific routine queries
                 # Query COPS in numeric format (MCC+MNC) for ISP lookup
                 # Note: can't send multiple AT+COPS? due to queue dedup
                 self.cmd_queue_append("AT+COPS=3,2") # Set to numeric format
-                self.cmd_queue_append("AT+COPS?") # Query operator (MCC+MNC + AcT)
-                self.cmd_queue_append("AT+CESQ") # Extended signal quality (RSRP, RSRQ, SINR)
+                self.cmd_queue_append("AT+COPS?") # Query operator (MCC+MNC + AcT -> cell_tech/ISP)
                 self.cmd_queue_append("AT+CSQ") # Basic signal strength
-                self.cmd_queue_append("AT+GTCCINFO?") # Current cell information (serving cell)
-                self.cmd_queue_append("AT+GTCAINFO?") # Carrier aggregation info
                 self.cmd_queue_append('AT+GTSENRDTEMP=1') # Temperature
+                if ui_demand:
+                    self.cmd_queue_append("AT+CESQ") # Extended signal quality (RSRP, RSRQ, SINR)
+                    self.cmd_queue_append("AT+GTCCINFO?") # Current cell information (serving cell)
+                    self.cmd_queue_append("AT+GTCAINFO?") # Carrier aggregation info
             else:
                 # Qualcomm/EM05 modem queries
-                self.cmd_queue_append("AT+QNWINFO") # Network info
+                self.cmd_queue_append("AT+QNWINFO") # Network info (cell_tech/band)
                 if not self.is_em05():
                     self.cmd_queue_append("AT+QSPN") # ISP
-                    self.cmd_queue_append("AT+QCAINFO") # Carrier aggregation
-                self.cmd_queue_append('AT+QCFG="usbnet"') # usbnet mode
-                if not self.is_500u() and not self.is_em05():
-                    self.cmd_queue_append("AT+QRSRP") # 5G power
-                    self.cmd_queue_append("AT+QRSRQ") # 5G quality
-                    self.cmd_queue_append("AT+QSINR") # 5G signal strength
                 self.cmd_queue_append("AT+CSQ") # Basic signal strength
-                self.cmd_queue_append('AT+QENG="servingcell"') # Serving cell info
-                if not self.is_500u():
-                    self.cmd_queue_append('AT+QCFG="usbspeed"') # USB speed
                 self.cmd_queue_append('AT+QTEMP') # Temperature
+                if ui_demand:
+                    if not self.is_em05():
+                        self.cmd_queue_append("AT+QCAINFO") # Carrier aggregation
+                    self.cmd_queue_append('AT+QCFG="usbnet"') # usbnet mode
+                    if not self.is_500u() and not self.is_em05():
+                        self.cmd_queue_append("AT+QRSRP") # 5G power
+                        self.cmd_queue_append("AT+QRSRQ") # 5G quality
+                        self.cmd_queue_append("AT+QSINR") # 5G signal strength
+                    self.cmd_queue_append('AT+QENG="servingcell"') # Serving cell info
+                    if not self.is_500u():
+                        self.cmd_queue_append('AT+QCFG="usbspeed"') # USB speed
 
-            if global_routine_query_counter % 10 == 1:
+            # FM350 one-time boot config: band-list defaults, stored roaming
+            # preference, and AT+COPS=0 (auto operator selection so a roaming
+            # SIM can register after a power cycle). Deliberately OUTSIDE the
+            # UI-demand gating below: it must also happen on headless/idle
+            # devices, and it retries every pass until the modem model becomes
+            # known (ATI usually answers only after the first pass has run).
+            if self.is_fm350():
+                # Set default available bands for FM350-GL (based on modem AT+GTACT? response)
+                # FM350-GL supports: LTE B1-B5/B7/B8/B12-B14/B17-B20/B25/B26/B28-B30/B34/B38-B43/B46/B48/B66/B71
+                #                    NR N1-N3/N5/N7/N8/N20/N25/N28/N30/N38/N40/N41/N48/N66/N71/N77-N79
+                if "policy_lte_bands" not in self.basic or not self.basic["policy_lte_bands"]:
+                    self.basic["policy_lte_bands"] = "1:2:3:4:5:7:8:12:13:14:17:18:19:20:25:26:28:29:30:32:34:38:39:40:41:42:43:46:48:66:71"
+                    print(f"FM350: Set default policy_lte_bands => {self.basic['policy_lte_bands']}")
+                if "policy_nr5g_bands" not in self.basic or not self.basic["policy_nr5g_bands"]:
+                    self.basic["policy_nr5g_bands"] = "1:2:3:5:7:8:20:25:28:30:38:40:41:48:66:71:77:78:79"
+                    print(f"FM350: Set default policy_nr5g_bands => {self.basic['policy_nr5g_bands']}")
+                # The defaults above are a snapshot of one firmware; ask the
+                # module itself once (AT+GTACT=? lists every band it supports)
+                # so the page offers exactly what this module can do.
+                if not self.basic.get("fm350_band_caps_queried"):
+                    self.basic["fm350_band_caps_queried"] = True
+                    self.cmd_queue_append('AT+GTACT=?')
+
+                # FM350 doesn't support AT+QNWPREFCFG="roam_pref", so load from config
+                if "roam_pref" not in self.basic or not self.basic["roam_pref"]:
+                    stored_roam_pref = pcat_config.get_user_config_key("roaming_pref", "any")
+                    if stored_roam_pref == "all":
+                        stored_roam_pref = "any"
+                    self.basic["roam_pref"] = stored_roam_pref
+                    print(f"FM350: Loaded roaming preference from config: {stored_roam_pref}")
+
+                # Ensure automatic operator selection (allows roaming) on FM350.
+                # FM350-GL has no proprietary roam toggle; COPS=0 is the standard
+                # 3GPP way to permit roaming via auto network registration.
+                if not self.basic.get("fm350_cops_auto_set"):
+                    self.cmd_queue_append('AT+COPS=0')
+                    self.basic["fm350_cops_auto_set"] = True
+
+            # Band/roaming preference queries: every 10th pass while the modem
+            # UI is in use, plus once immediately when the page is (re)opened.
+            run_pref_block = ui_demand and (
+                global_routine_query_counter % 10 == 1 or self._pref_refresh_pending)
+            if run_pref_block:
+                # Keep the one-shot refresh armed until the modem model is
+                # known: before ATI has answered none of the model-specific
+                # queries below are issued, and consuming the flag then left
+                # the band checkboxes all unticked until the next tenth pass.
+                if self._model_str():
+                    self._pref_refresh_pending = False
                 if self.is_fm350():
                     # FM350-GL (MediaTek) specific queries
                     self.cmd_queue_append('AT+GTACT?') # network mode preference (4G/5G)
-
-                    # Set default available bands for FM350-GL (based on modem AT+GTACT? response)
-                    # FM350-GL supports: LTE B1-B5/B7/B8/B12-B14/B17-B20/B25/B26/B28-B30/B34/B38-B43/B46/B48/B66/B71
-                    #                    NR N1-N3/N5/N7/N8/N20/N25/N28/N30/N38/N40/N41/N48/N66/N71/N77-N79
-                    if "policy_lte_bands" not in self.basic or not self.basic["policy_lte_bands"]:
-                        self.basic["policy_lte_bands"] = "1:2:3:4:5:7:8:12:13:14:17:18:19:20:25:26:28:29:30:34:38:39:40:41:42:43:46:48:66:71"
-                        print(f"FM350: Set default policy_lte_bands => {self.basic['policy_lte_bands']}")
-                    if "policy_nr5g_bands" not in self.basic or not self.basic["policy_nr5g_bands"]:
-                        self.basic["policy_nr5g_bands"] = "1:2:3:5:7:8:20:25:28:30:38:40:41:48:66:71:77:78:79"
-                        print(f"FM350: Set default policy_nr5g_bands => {self.basic['policy_nr5g_bands']}")
-
-                    # FM350 doesn't support AT+QNWPREFCFG="roam_pref", so load from config
-                    if "roam_pref" not in self.basic or not self.basic["roam_pref"]:
-                        stored_roam_pref = pcat_config.get_user_config_key("roaming_pref", "any")
-                        if stored_roam_pref == "all":
-                            stored_roam_pref = "any"
-                        self.basic["roam_pref"] = stored_roam_pref
-                        print(f"FM350: Loaded roaming preference from config: {stored_roam_pref}")
-
-                    # Ensure automatic operator selection (allows roaming) on FM350.
-                    # FM350-GL has no proprietary roam toggle; COPS=0 is the standard
-                    # 3GPP way to permit roaming via auto network registration.
-                    if not self.basic.get("fm350_cops_auto_set"):
-                        self.cmd_queue_append('AT+COPS=0')
-                        self.basic["fm350_cops_auto_set"] = True
                 elif self.is_520() or self.is_500q():
                     self.cmd_queue_append('AT+QNWPREFCFG="policy_band"') # policy band, carrier/module capable
                     # Add small delay to ensure modem processes policy_band before capability query
                     time.sleep(0.1)
-                    self.cmd_queue.append('AT+QNWPREFCFG="ue_capability_band"') # UE capability band, user's desired bands
+                    self.cmd_queue.append('AT+QNWPREFCFG="ue_capability_band"') # UE capability band, user's desired bands (direct append: skip dedup)
+                    self.cmd_event.set()
                 elif self.is_500u():
                     self.cmd_queue_append('AT+QNWPREFCFG="nr5g_band"')
                     self.cmd_queue_append('AT+QNWPREFCFG="lte_band"')
@@ -269,16 +404,26 @@ class PcModemClient (threading.Thread):
         pcat_logger.logger.info("SIM module thread started.")
         while True:
             if not app.is_wwan_powered():
-                # WWAN is rfkill blocked, clear queue and wait
+                # WWAN is rfkill blocked, clear queue and wait (a queued
+                # command also wakes this to re-check)
                 if len(self.cmd_queue) > 0:
                     self.cmd_queue.clear()
                 self.querying = False
-                time.sleep(3)
+                self.cmd_event.clear()
+                self.cmd_event.wait(3)
                 continue
 
             if len(self.cmd_queue) == 0:
                 self.querying = False
-                time.sleep(1)  # Wait for 1 second before checking the queue again
+                # Sleep until a command is queued (cmd_event is set on append)
+                # instead of polling at 1Hz forever. Clear-then-recheck closes
+                # the race where a command lands between the emptiness check
+                # and the clear; the timeout is a safety net in case a future
+                # call site appends without setting the event.
+                self.cmd_event.clear()
+                if len(self.cmd_queue) > 0:
+                    continue
+                self.cmd_event.wait(30)
                 continue
             else:
                 #TODO fix when no modem is installed. (home/mobile version)
@@ -320,7 +465,9 @@ class PcModemClient (threading.Thread):
                             # Ensure proper line ending and send command
                             self.serial_obj.write(cmd_str.encode())
                             self.serial_obj.flush()  # Force send immediately
-                            print("[MODEM SEND]:" + cmd_str)
+                            # debug: runs for every AT command; at INFO this is
+                            # constant log churn (~20+ lines/min in steady state)
+                            pcat_logger.logger.debug("[MODEM SEND]:%s", cmd_str)
                             
                             
                             response_lines = []
@@ -354,7 +501,13 @@ class PcModemClient (threading.Thread):
                                 # Skip completely empty lines
                                 if not line_str:
                                     continue
-                                
+
+                                # URCs (RING etc.) can land mid-command; hand
+                                # them to listeners without disturbing the
+                                # command flow below.
+                                if line_str.startswith(_URC_PREFIXES):
+                                    _notify_urc(line_str)
+
                                 response_lines.append(line_str)
                                 
                                 # Check if this is the command echo
@@ -393,8 +546,9 @@ class PcModemClient (threading.Thread):
                     self.querying = False
                     continue
                 
-                s = recv_data.decode("utf-8", "replace").replace("\r", "\\r").replace("\n", "\\n")
-                print(f"[MODEM RECV]: {s}", flush=True)
+                if pcat_logger.logger.isEnabledFor(logging.DEBUG):
+                    s = recv_data.decode("utf-8", "replace").replace("\r", "\\r").replace("\n", "\\n")
+                    pcat_logger.logger.debug("[MODEM RECV]: %s", s)
                 
                 if recv_data.startswith(b'AT+QNWINFO\r\r\n') or recv_data.startswith(b'AT+QNWINFO\r\n'): #5G network info, #500U not working
                     self.handle_qnwinfo(recv_data)
@@ -432,6 +586,8 @@ class PcModemClient (threading.Thread):
                     self.handle_gtsenrdtemp(recv_data)
                 elif recv_data.startswith(b'AT+QNWPREFCFG') or recv_data.startswith(b'AT+QNWPREFCFG\r\n'): # 4G/5G band
                     self.handle_bands_and_roam_pref(recv_data)
+                elif recv_data.startswith(b'AT+GTACT=?'): # FM350 supported RATs/bands
+                    self.handle_gtact_caps(recv_data)
                 elif recv_data.startswith(b'AT+GTACT') or recv_data.startswith(b'AT+GTACT\r\n'): # FM350 network mode
                     self.handle_gtact(recv_data)
                 elif recv_data.startswith(b'AT+GTCCINFO?') or recv_data.startswith(b'AT+GTCCINFO?\r\n'): # FM350 cell info
@@ -497,6 +653,7 @@ class PcModemClient (threading.Thread):
             self.cmd_queue.append('AT+QCFG="ResetFactory"') #maybe only for rm520
         elif self.is_500u():
             self.cmd_queue.append('AT&F') #only for 500u
+        self.cmd_event.set()
         self.mutex.release()
 
     def get_sim_number(self, sim_ccid: str, sim_cimi: str) -> str | None:
@@ -545,10 +702,10 @@ class PcModemClient (threading.Thread):
             })
             data["sim_numbers"] = sim_entries
 
-            # Write back to disk
+            # Write back to disk atomically (power-cut safe; see pcat_config).
             try:
-                with open(db_path, "w") as f:
-                    json.dump(data, f, indent=2)
+                pcat_config._atomic_write(
+                    db_path, lambda f: json.dump(data, f, indent=2))
             except OSError as e:
                 print(f"Error saving SIM info to {db_path}: {e}")
 
@@ -668,6 +825,155 @@ class PcModemClient (threading.Thread):
         self.cmd_mark_failure("AT+GTSENRDTEMP=1")
         print("Warning: No GTSENRDTEMP data parsed.")
 
+    # Shared with the FM350 dialer (pcat-manager's fm350-mm). The dialer reads
+    # this file at every dial and re-checks it each watch cycle (~10 s), so a
+    # RAT change made here applies on the fly without a reboot or restart. The
+    # dialer owns AT+GTACT during a dial, so without this handoff its re-dials
+    # would silently override whatever RAT the user picked in the UI.
+    MODEM_PREF_PATH = "/etc/pcat-modem-pref.json"
+
+    def _write_modem_pref_file(self, tech_pref=None, lte_bands=None, nr5g_bands=None):
+        """Persist the user's RAT choice and band locks where the FM350 dialer
+        can read them. Keys not given keep their current value, so a RAT save
+        does not drop the band locks and vice versa.
+
+        Band locks are colon-separated band numbers ("1:3:41"); an empty
+        string means "no lock" to the dialer. The dialer is the only writer of
+        the modem's AT+GTACT register: it picks the change up within one watch
+        poll and re-dials with it, which is unavoidable anyway since a band
+        write makes the modem re-register.
+
+        Only meaningful for the FM350 (the only modem the C dialer drives), but
+        writing it unconditionally is harmless: other modems' dialers ignore the
+        file. Atomic + power-cut safe, matching the rest of /etc here."""
+        data = {}
+        try:
+            with open(self.MODEM_PREF_PATH, "r") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                data = loaded
+        except (OSError, json.JSONDecodeError):
+            pass
+        if tech_pref is not None:
+            data["modem_tech_pref"] = tech_pref
+        if lte_bands is not None:
+            data["lte_bands"] = lte_bands
+        if nr5g_bands is not None:
+            data["nr5g_bands"] = nr5g_bands
+        if "modem_tech_pref" not in data:
+            data["modem_tech_pref"] = "AUTO"
+        try:
+            pcat_config._atomic_write(
+                self.MODEM_PREF_PATH,
+                lambda f: json.dump(data, f))
+        except OSError as e:
+            print(f"Error writing {self.MODEM_PREF_PATH}: {e}")
+
+    def get_saved_tech_pref(self):
+        """Return the user's saved RAT intent (AUTO/LTE/NR5G) from the shared
+        file, or the live GTACT?-derived value if no intent has been saved.
+
+        The UI shows this so the radio reflects what the user chose, not the
+        modem's momentary RAT: the dialer transiently switches RATs to keep data
+        flowing (e.g. AUTO drops to LTE on a 5G data reject), and surfacing that
+        live state would make the AUTO radio flip to "4G only" on its own."""
+        try:
+            with open(self.MODEM_PREF_PATH, "r") as f:
+                pref = json.load(f).get("modem_tech_pref", "")
+            if pref in ("AUTO", "LTE", "NR5G"):
+                return pref
+        except (OSError, json.JSONDecodeError):
+            pass
+
+        return self.basic.get("modem_tech_pref", "")
+
+    # Last modem model this device saw, in the user config. Used to spot a
+    # swapped or first-seen modem (see _auto_reset_tech_pref_for_new_modem).
+    LAST_MODEL_KEY = "last_modem_model"
+
+    def _clear_modem_pref_file(self):
+        """Drop a RAT intent left behind by a previously installed modem."""
+        try:
+            os.remove(self.MODEM_PREF_PATH)
+            print(f"Removed stale {self.MODEM_PREF_PATH}")
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            print(f"Error removing {self.MODEM_PREF_PATH}: {e}")
+
+    def _recorded_tech_pref_intent(self):
+        """The RAT the user last picked in the UI, or "" if we have no record.
+
+        Unlike get_saved_tech_pref() this deliberately does NOT fall back to the
+        modem's live readback: the point here is to tell a deliberate choice
+        apart from whatever RAT the module happens to be locked to."""
+        pref = pcat_config.get_user_config_key("modem_tech_pref", "")
+        if pref in ("AUTO", "LTE", "NR5G"):
+            return pref
+
+        # Builds before this one only recorded the intent in the dialer's file.
+        try:
+            with open(self.MODEM_PREF_PATH, "r") as f:
+                pref = json.load(f).get("modem_tech_pref", "")
+            if pref in ("AUTO", "LTE", "NR5G"):
+                return pref
+        except (OSError, json.JSONDecodeError):
+            pass
+
+        return ""
+
+    def _auto_reset_tech_pref_for_new_modem(self, model: str):
+        """Force the RAT preference back to AUTO when the modem is new to this
+        device, so a 5G module never comes up silently stuck on 4G.
+
+        Two cases, both seen in the field:
+          * modem swapped - the recorded choice describes hardware that is no
+            longer here, so a 5G module dropped into a box that used to run an
+            LTE-only one would inherit "4G only".
+          * modem seen for the first time (fresh flash, or a box whose /etc was
+            wiped by sysupgrade) - the module's own NV can still hold an
+            LTE-only lock from the factory or a previous owner, and nothing
+            here would ever clear it, because the RAT AT command is only sent
+            when a user saves the modem settings page.
+
+        Runs once per modem: the model is recorded before the reset, so a modem
+        that keeps answering ATI does not re-reset on every reboot."""
+        model = (model or "").strip()
+        # Guard against a garbled ATI parse - acting on junk would wipe the
+        # user's choice on every boot.
+        if not model or len(model) > 48 or "ERROR" in model.upper():
+            print(f"_auto_reset_tech_pref_for_new_modem: ignoring model '{model}'")
+            return
+
+        known = pcat_config.get_user_config_key(self.LAST_MODEL_KEY, "")
+        if known == model:
+            return
+
+        recorded = self._recorded_tech_pref_intent()
+        pcat_config.set_user_config_key(self.LAST_MODEL_KEY, model)
+
+        if known:
+            reason = f"modem changed: {known} -> {model}"
+        elif recorded and recorded != "AUTO":
+            # First sight of this modem, but the user did pick a RAT on this box
+            # before - honor that instead of overriding a deliberate lock.
+            pcat_logger.logger.info(
+                "Modem %s first seen, keeping saved RAT preference %s", model, recorded)
+            return
+        else:
+            reason = f"modem {model} first seen on this device"
+
+        pcat_logger.logger.info("Resetting modem RAT preference to AUTO (%s)", reason)
+        print(f"_auto_reset_tech_pref_for_new_modem: forcing AUTO ({reason})")
+        # No-op on the EM05, which is LTE-only and has no RAT preference.
+        self.set_tech_pref("AUTO", force_update=True)
+        if not self.is_fm350():
+            # set_tech_pref only refreshes the dialer file for the FM350. A file
+            # left by a previously installed FM350 would otherwise keep
+            # get_saved_tech_pref() - and so the UI - reporting the old modem's
+            # RAT for a modem that never writes it.
+            self._clear_modem_pref_file()
+
     def set_tech_pref(self, tech_pref: str, force_update: bool = False):
         """
         Set the mode preference.
@@ -683,20 +989,30 @@ class PcModemClient (threading.Thread):
             print(f"set_tech_pref: Valid tech_pref, checking if update needed")
             current_tech_pref = self.basic.get("modem_tech_pref", "not_set")
             print(f"set_tech_pref: Current modem_tech_pref={current_tech_pref}")
-            if tech_pref != self.basic["modem_tech_pref"] or force_update:
+            # .get(): the reset for a new modem runs from handle_ati, before any
+            # mode_pref/GTACT? readback has populated this key.
+            if tech_pref != self.basic.get("modem_tech_pref", "") or force_update:
                 if self.is_fm350():
-                    # FM350-GL (MediaTek) uses AT+GTACT command
-                    # Per spec: 2=LTE only, 14=NR-RAN only, 20=NR-RAN/WCDMA/LTE (full auto)
-                    gtact_value = {"AUTO": "20", "LTE": "2", "NR5G": "14"}[tech_pref]
-                    print(f"set_tech_pref: FM350 detected, adding AT command: AT+GTACT={gtact_value}")
-                    self.cmd_queue_append(f'AT+GTACT={gtact_value}')
-                    self.cmd_queue_append('AT+GTACT?') # check modem settings
+                    # FM350-GL: the dialer (fm350-mm) is the only writer of
+                    # the modem's AT+GTACT register. It re-reads the shared
+                    # preference file within one watch poll (~10 s) and
+                    # re-dials with the new RAT. Writing the register from
+                    # here as well only raced it, and could silently undo a
+                    # RAT fallback the dialer relied on to keep data up.
+                    print(f"set_tech_pref: FM350 detected, handing {tech_pref} to the dialer via {self.MODEM_PREF_PATH}")
                 else:
                     # Qualcomm modems use AT+QNWPREFCFG
                     print(f"set_tech_pref: Adding AT command to queue: AT+QNWPREFCFG=\"mode_pref\",{tech_pref}")
                     self.cmd_queue_append(f'AT+QNWPREFCFG="mode_pref",{tech_pref}')
                     self.cmd_queue_append('AT+QNWPREFCFG="mode_pref"') # check modem settings
                 self.basic["modem_tech_pref"] = tech_pref
+                # Remember the intent for every modem type, so a later flash can
+                # tell a deliberate "4G only" from a module that merely shipped
+                # locked to LTE (see _auto_reset_tech_pref_for_new_modem).
+                pcat_config.set_user_config_key("modem_tech_pref", tech_pref)
+                # Hand the choice to the FM350 dialer so its re-dials honor it.
+                if self.is_fm350():
+                    self._write_modem_pref_file(tech_pref)
             else:
                 print(f"set_tech_pref: Tech pref is the same ({tech_pref}), force_update={force_update}, skip")
         else:
@@ -832,37 +1148,37 @@ class PcModemClient (threading.Thread):
             self.cmd_queue_append(cmd)
             self.cmd_queue_append('AT+QNWPREFCFG="nr5g_band"') # check modem settings
         elif self.is_fm350():
-            # FM350-GL: filter NR bands against policy, then send combined AT+GTACT
+            # FM350-GL: filter the NR bands against the policy list, then hand
+            # both lists (LTE was filtered and stored by set_lte_bands, called
+            # just before) to the dialer through the shared preference file.
+            # The dialer writes them into AT+GTACT together with the RAT and
+            # re-dials; writing the register from here raced it, and the
+            # register readback it queued was de-duplicated ahead of the
+            # write, so the page showed the old bands and looked like the
+            # save had failed.
             policy_nr = self.basic.get("policy_nr5g_bands", "")
             allowed_nr = set(int(b) for b in policy_nr.split(":") if b.isdigit()) if policy_nr else set()
             nr5g_band_list = [int(b) for b in desired_nr5g_bands.split(":") if b.isdigit()]
             if allowed_nr:
                 nr5g_band_list = [b for b in nr5g_band_list if b in allowed_nr]
-            fm350_nr5g_bands = [int(f"50{b}") for b in nr5g_band_list]
+            filtered_nr = ":".join(str(b) for b in sorted(nr5g_band_list))
+            filtered_lte = self.basic.get("setting_lte_bands", "")
 
-            # Get LTE bands (already filtered and stored by set_lte_bands)
-            current_lte = self.basic.get("setting_lte_bands", "")
-            lte_band_list = [int(b) for b in current_lte.split(":") if b.isdigit()] if current_lte else []
-            fm350_lte_bands = [100 + b for b in lte_band_list]
+            # Every band unticked is not a lock the modem could honour (the
+            # dialer treats an empty list as "no lock"); keep the page's view
+            # consistent with that instead of showing an empty selection.
+            if not filtered_lte:
+                filtered_lte = self.basic.get("policy_lte_bands", "")
+                self.basic["setting_lte_bands"] = filtered_lte
+            if not filtered_nr:
+                filtered_nr = self.basic.get("policy_nr5g_bands", "")
 
-            # Get current tech_pref to preserve RAT setting
-            current_tech = self.basic.get("tech_pref", "AUTO")
-            gtact_rat = {"AUTO": "20", "LTE": "2", "NR5G": "14"}.get(current_tech, "20")
-
-            # Get PreferredAct and UMTS bands from last GTACT query
-            preferred_acts = self.basic.get("gtact_preferred_acts", [6, 3])
-            umts_bands = self.basic.get("gtact_umts_bands", [1, 2, 4, 5, 8])
-
-            # Build AT+GTACT command: AT+GTACT=<rat>,<PreferredAct1>,<PreferredAct2>,<bands...>
-            # PreferredAct: 2=WCDMA, 3=LTE, 6=NR-RAN
-            pref_params = ",".join(str(p) for p in preferred_acts) if preferred_acts else "6,3"
-            all_bands = umts_bands + fm350_lte_bands + fm350_nr5g_bands
-            band_params = ",".join(str(b) for b in all_bands)
-            cmd = f'AT+GTACT={gtact_rat},{pref_params},{band_params}'
-            print(f"set_nr5g_bands: FM350 detected, setting bands: {cmd}")
-            self.cmd_queue_append(cmd)
-            self.cmd_queue_append('AT+GTACT?')
-            self.basic["setting_nr5g_bands"] = ":".join(str(b) for b in sorted(nr5g_band_list))
+            print(f"set_nr5g_bands: FM350 detected, handing band locks to the dialer: LTE [{filtered_lte}] NR [{filtered_nr}]")
+            self._write_modem_pref_file(lte_bands=filtered_lte, nr5g_bands=filtered_nr)
+            self.basic["setting_nr5g_bands"] = filtered_nr
+            # Hold off the AT+GTACT? readback from overwriting the page for a
+            # while: the dialer needs a poll plus a re-dial to apply this.
+            self._bands_user_set_at = time.time()
 
     def _normalize_bands(self, bands_str: str) -> str:
         nums = [int(tok) for tok in bands_str.split(":") if tok.isdigit()]
@@ -1467,6 +1783,38 @@ class PcModemClient (threading.Thread):
 
         return
 
+    # After a band save the page keeps showing the user's selection for this
+    # long even if AT+GTACT? still reads back the old list: the dialer applies
+    # the save on its next watch poll and re-dial (tens of seconds).
+    BANDS_READBACK_HOLDOFF_S = 90
+
+    def handle_gtact_caps(self, response: bytes):
+        """
+        Parse the AT+GTACT=? capability reply of the FM350-GL:
+        +GTACT: (1,2,4,10,14,16,17,20),(2,3,6),(2,3,6),(),(1,2,4,5,8),(101,...,171),(),(),(501,...,5079)
+        The group of 1xx values is the supported LTE band list (100 + band),
+        the group of 5xx values the NR list ("50" + band). Whichever groups
+        are present replace the built-in defaults.
+        """
+        decoded = response.decode("utf-8", errors="ignore")
+        for line in decoded.split("\r\n"):
+            if not line.startswith("+GTACT:"):
+                continue
+            lte, nr = [], []
+            for group in re.findall(r"\(([^)]*)\)", line):
+                nums = [int(t) for t in group.split(",") if t.strip().isdigit()]
+                if nums and all(101 <= n <= 199 for n in nums):
+                    lte = sorted(n - 100 for n in nums)
+                elif nums and all(n >= 501 and str(n).startswith("50") for n in nums):
+                    nr = sorted(int(str(n)[2:]) for n in nums)
+            if lte:
+                self.basic["policy_lte_bands"] = ":".join(str(b) for b in lte)
+                print(f"FM350 supported LTE bands => {self.basic['policy_lte_bands']}")
+            if nr:
+                self.basic["policy_nr5g_bands"] = ":".join(str(b) for b in nr)
+                print(f"FM350 supported NR bands => {self.basic['policy_nr5g_bands']}")
+            break
+
     def handle_gtact(self, response: bytes):
         """
         Handle AT+GTACT? response for FM350-GL (MediaTek) modem.
@@ -1541,6 +1889,10 @@ class PcModemClient (threading.Thread):
                         self.basic["gtact_preferred_acts"] = preferred_acts
                         self.basic["gtact_umts_bands"] = umts_bands
                         print(f"gtact_preferred_acts => {preferred_acts}, umts_bands => {umts_bands}")
+
+                        if time.time() - getattr(self, "_bands_user_set_at", 0) < self.BANDS_READBACK_HOLDOFF_S:
+                            print("GTACT readback: user band save pending at the dialer, keeping the page's selection")
+                            break
 
                         if lte_bands:
                             self.basic["setting_lte_bands"] = ":".join(str(b) for b in sorted(lte_bands))
@@ -2432,12 +2784,38 @@ class PcModemClient (threading.Thread):
             # Strip "Model: " prefix if present
             if model.startswith("Model: "):
                 model = model[7:]
+            model = model.strip()
+
+            # The modem's AT interface can take up to ~3 minutes to come up after
+            # boot. Until then ATI may echo back an ERROR, a URC (+CME ERROR,
+            # +CFUN...), or a blank line -- and a URC interleaved into the reply
+            # can even shift a non-model line (a manufacturer name, a "Revision:"
+            # line) into the model position. Caching any of those as the model
+            # (with queried=True) would freeze a bogus model for the whole
+            # process and stop the routine from ever re-asking -- the same
+            # permanent-wrong trap the is_* predicates just lost.
+            #
+            # A real modem model token (EM05-E, RM520N-GL, RG500Q-EA, FM350-GL,
+            # EG500U-...) always carries a digit and never a ':' or a leading
+            # '+'; manufacturer names ("Quectel", "MEDIATEK") carry no digit, and
+            # URC/Revision lines carry ':' or '+'. Reject anything that fails that
+            # shape as "not ready" so ATI is re-queried on the next routine pass
+            # until the modem answers for real. Deliberately not an allow-list of
+            # known models, so a new modem still registers.
+            if (not model or len(model) > 48 or "ERROR" in model.upper()
+                    or model.startswith("+") or ":" in model
+                    or not any(c.isdigit() for c in model)):
+                self.cmd_mark_failure("ATI")
+                print(f"ATI: modem not ready / unrecognized model line ('{model}'); will retry")
+                return
+
             firmware_version = result_arr[3].split(b" ")[1].decode("utf-8")
 
             self.basic["model"] = model
             self.basic["firmware_version"] = firmware_version
 
-            # Cache model permanently - this will only happen once
+            # Cache the model only now that it is real; the routine stops
+            # re-querying ATI from here on (queried=True).
             with _model_cache['lock']:
                 _model_cache['model'] = model
                 _model_cache['queried'] = True
@@ -2448,7 +2826,28 @@ class PcModemClient (threading.Thread):
         except Exception as e:
             self.cmd_mark_failure("ATI")
             print(f"Error parsing ATI response: {e}")
-                
+            return
+
+        # If the connect-time voice arming ran before the model was known, it
+        # skipped the per-model AT+QPCMV mode (1,2 on RM500Q, 1,0 elsewhere).
+        # Re-arm now that the model has landed; without this a cold boot
+        # leaves the in-call audio path dead -- both directions are digital
+        # silence -- until the next serial reconnect.
+        if not getattr(self, "_voice_arm_model", None):
+            try:
+                self._arm_voice_urcs()
+            except Exception as e:
+                print(f"Error re-arming voice URCs after ATI: {e}")
+
+        # A modem that is new to this device must not inherit the previous one's
+        # RAT lock, nor keep a factory LTE-only lock of its own. Outside the
+        # parse try: a failure here is not an ATI parse failure and must not
+        # make the routine re-query ATI.
+        try:
+            self._auto_reset_tech_pref_for_new_modem(model)
+        except Exception as e:
+            print(f"Error resetting RAT preference for new modem: {e}")
+
     def handle_cnum(self, response):
         lines = response.split(b"\r\n")
         found = False
@@ -2735,7 +3134,251 @@ class PcModemClient (threading.Thread):
         with self.mutex:
             self.modem_valid = True
         pcat_logger.logger.info("Connected to modem tty device.\n")
+        self._arm_voice_urcs()
         return True
+
+    def at_command(self, cmd, timeout=5.0):
+        """Run one AT command on the modem port and return its reply.
+
+        The public, lock-taking entry point other subsystems use so the app
+        keeps ONE serial port for all AT traffic. Opening a second AT port
+        (the GNSS client used to hold ttyUSB2 of its own) meant two hardcoded
+        tty indices to break on a USB re-enumeration, and two writers whose
+        exclusive opens raced — "Could not exclusively lock port ...
+        Resource temporarily unavailable" landed in the UI as a setting that
+        would not save.
+
+        Returns the reply text, or None when the port is not usable (modem
+        not connected yet, or busy longer than `timeout`).
+        """
+        if not self.serial_lock.acquire(timeout=max(timeout, 1.0)):
+            return None
+        try:
+            return self._at_sync(cmd, timeout=timeout)
+        finally:
+            self.serial_lock.release()
+
+    def at_command_with_payload(self, cmd, payload, timeout=30.0):
+        """AT command that streams raw bytes after the modem's CONNECT prompt
+        — the AT+QFUPL file-upload shape (used for gpsOneXTRA assist data).
+
+        Same single-port discipline as at_command(): the whole exchange
+        (command, CONNECT, payload, final reply) happens under serial_lock so
+        no other AT traffic can interleave with the binary phase, which would
+        corrupt the upload AND the other conversation. Returns the final
+        reply text, the pre-CONNECT error reply if the modem refused, or
+        None when the port is unusable/locked.
+        """
+        if not self.serial_lock.acquire(timeout=max(timeout, 1.0)):
+            return None
+        try:
+            s = self.serial_obj
+            if s is None:
+                return None
+            try:
+                s.reset_input_buffer()
+                s.write((cmd + "\r").encode())
+                s.flush()
+            except Exception as e:
+                pcat_logger.logger.error("modem: %s: write failed: %s", cmd, e)
+                return None
+            t0 = time.time()
+            connected = False
+            while time.time() - t0 < timeout:
+                line = s.readline()
+                if not line:
+                    continue
+                txt = line.decode("utf-8", "ignore").strip()
+                if not txt or txt == cmd:
+                    continue
+                if txt.startswith("CONNECT"):
+                    connected = True
+                    break
+                if txt in ("OK", "ERROR") or txt.startswith(("+CME ERROR:",
+                                                             "+CMS ERROR:")):
+                    return txt          # refused before the binary phase
+            if not connected:
+                return None
+            try:
+                s.write(payload)
+                s.flush()
+            except Exception as e:
+                pcat_logger.logger.error("modem: %s: payload write failed: %s",
+                                         cmd, e)
+                return None
+            out = []
+            while time.time() - t0 < timeout:
+                line = s.readline()
+                if not line:
+                    continue
+                txt = line.decode("utf-8", "ignore").strip()
+                if not txt:
+                    continue
+                out.append(txt)
+                if txt in ("OK", "ERROR") or txt.startswith(("+CME ERROR:",
+                                                             "+CMS ERROR:")):
+                    break
+            return "\n".join(out)
+        finally:
+            self.serial_lock.release()
+
+    def _at_sync(self, cmd, timeout=5.0):
+        """Send one AT command and return its reply, for the few places that
+        must read a value back rather than fire and forget through cmd_queue.
+        Caller holds serial_lock. Returns None if the port is not usable."""
+        s = self.serial_obj
+        if s is None:
+            return None
+        try:
+            s.reset_input_buffer()
+            s.write((cmd + "\r").encode())
+            s.flush()
+        except Exception as e:
+            pcat_logger.logger.error("modem: %s: write failed: %s", cmd, e)
+            return None
+        out = []
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            try:
+                line = s.readline()
+            except Exception as e:
+                pcat_logger.logger.error("modem: %s: read failed: %s", cmd, e)
+                break
+            if not line:
+                continue
+            txt = line.decode("utf-8", "ignore").strip()
+            if not txt or txt == cmd:
+                continue
+            if txt.startswith(_URC_PREFIXES):
+                _notify_urc(txt)     # a RING here is still a RING
+                continue
+            out.append(txt)
+            if txt in ("OK", "ERROR") or txt.startswith(("+CME ERROR:",
+                                                         "+CMS ERROR:")):
+                break
+        return "\n".join(out)
+
+    def _arm_voice_urcs(self):
+        """Make incoming-call URCs reach this process. Re-run on every
+        (re)connect, because a modem reset drops the session-scoped settings.
+
+        Without this the phone page only notices a call while it is open and
+        polling AT+CLCC -- nothing rings when the browser is closed:
+
+          urcport: the module ships routing URCs to "usbat" (ttyUSB2, held by
+              quectel-cm, which discards them) while this client reads the
+              modem port (ttyUSB3), so RING never arrives here. "all" fans
+              them out to every port, so the dialer keeps the URCs it needs
+              instead of us taking them away by claiming the port ourselves.
+          CLIP: caller-ID presentation is off by default, so the ring would
+              have no number attached to show or log.
+
+        Both are cheap one-shots, not polling -- the AT port stays idle
+        afterwards and the modem's application processor is left asleep.
+
+        Runs in two phases when the model is not known yet (a cold boot: this
+        fires on serial connect, before ATI has answered): the model-agnostic
+        commands go out now, and handle_ati() calls this again once the model
+        lands so the per-model AT+QPCMV mode can be chosen correctly.
+        """
+        # What the model was when we armed. handle_ati() re-runs this once the
+        # model first becomes known if this pass had to run without it.
+        self._voice_arm_model = self._model_str()
+        # QURCCFG is Quectel-specific. Skipping it whenever the model is not
+        # yet known would mean never sending it on a cold boot (the ATI cache
+        # fills in later, and this only runs on connect), so send it unless we
+        # positively know the module is the non-Quectel one; anywhere else it
+        # is answered with a harmless ERROR.
+        if not self.is_fm350():
+            self.cmd_queue_append('AT+QURCCFG="urcport","all"')
+            # PCM voice: the init script sets this before we start, but any
+            # module power cycle clears it, so reassert it on every connect
+            # rather than leaving the in-call audio path dead until the next
+            # service restart.
+            #
+            # The mode differs per module. RM500Q rejects modes 0 and 1; its
+            # call audio is mode 2 = USB audio, which is safe to assert once
+            # the UAC function is in its USB composition (checked and, once
+            # per module, enabled by _provision_usb_audio below) -- asserting
+            # it then does NOT re-enumerate the module; that only happens on
+            # the composition change itself. Everything else takes mode 0 on
+            # the board's PCM/SAI link, and answers a harmless ERROR to it if
+            # it is neither.
+            if self.is_500q():
+                self.cmd_queue_append("AT+QPCMV=1,2")
+            elif self._voice_arm_model:
+                self.cmd_queue_append("AT+QPCMV=1,0")
+            # Model not known yet: send nothing. Guessing 1,0 here is not
+            # harmless like QURCCFG above -- an RM500Q rejects it, nothing
+            # re-asserted the right mode afterwards, and the module then reads
+            # digital silence off the UAC card in both directions for the
+            # whole session (proven on the wire: +QPCMV: 0,0 after a cold
+            # boot). handle_ati() re-runs this arming once the model lands.
+        self.cmd_queue_append("AT+CLIP=1")
+        threading.Thread(target=self._provision_usb_audio, daemon=True).start()
+
+    def _provision_usb_audio(self):
+        """One-time RM500Q setup: put the UAC (USB audio) function into the
+        module's USB composition.
+
+        RM500Q-GL cannot carry call audio over the board's PCM/SAI link -- the
+        SoC's SAI transmit never engages against its clocking and wedges the
+        receive stream with it. Its audio path is USB: with usbcfg's uac field
+        set, the module enumerates a 16k mono S16 sound card ("RM500QGL") that
+        carries both directions; pc_call_audio prefers that card whenever it
+        exists. Verified end to end on the target hardware: a tone played into
+        the card during a live call was recorded by the far end.
+
+        The usbcfg write persists in the module's NV and needs one module
+        reboot to apply. Guarded by a persistent flag so a module that refuses
+        the setting cannot put us in a reboot loop, and the serial connection
+        is dropped afterwards so the run loop reopens the (re-enumerated,
+        same-index) ports and re-arms the session-scoped settings."""
+        try:
+            if not self.is_500q():
+                return
+            with self.serial_lock:
+                cur = self._at_sync('AT+QCFG="usbcfg"')
+            if not cur or '"usbcfg"' not in cur:
+                return
+            # +QCFG: "usbcfg",0x2C7C,0x0800,1,1,1,1,1,0,0 -- last field is uac
+            try:
+                fields = cur.split('"usbcfg",', 1)[1].split("\n")[0].split(",")
+                uac = int(fields[8].strip().rstrip("| OK").strip())
+            except (IndexError, ValueError):
+                pcat_logger.logger.error(
+                    "modem: unparseable usbcfg reply: %s", cur)
+                return
+            if uac == 1:
+                return          # composition already carries USB audio
+            if pcat_config.get_user_config_key("modem_uac_provisioned", False):
+                pcat_logger.logger.error(
+                    "modem: usbcfg still has uac=0 after provisioning; "
+                    "RM500Q call audio will be silent")
+                return
+            fields[8] = "1"
+            with self.serial_lock:
+                rsp = self._at_sync('AT+QCFG="usbcfg",' + ",".join(
+                    f.strip() for f in fields))
+            if not rsp or "OK" not in rsp:
+                pcat_logger.logger.error(
+                    "modem: could not enable USB audio in usbcfg: %s", rsp)
+                return
+            # flag first: the reboot drops the port and this thread with it
+            pcat_config.set_user_config_key("modem_uac_provisioned", True)
+            pcat_logger.logger.info(
+                "modem: enabled USB audio in the RM500Q composition; "
+                "rebooting module to apply")
+            with self.serial_lock:
+                self._at_sync("AT+CFUN=1,1", timeout=8.0)
+            time.sleep(5)
+            with self.serial_lock:
+                self.cleanup_serial_connection()
+            self.modem_uart_connected = False
+            with self.mutex:
+                self.modem_valid = False
+        except Exception as e:
+            pcat_logger.logger.error("modem: usb audio provisioning: %s", e)
 
     def close_modem_uart(self):
         if self.serial_obj:
@@ -2778,53 +3421,44 @@ class PcModemClient (threading.Thread):
             print(f"Failed to read uptime, using default delay: {e}")
             return 2
 
-    def _get_model_with_retry(self, retries: int = 3, delay: float = 1.0) -> str | None:
+    def _model_str(self):
+        """The modem model if it is known yet, else None. Non-blocking: reads
+        the permanent cache handle_ati() fills once the modem answers ATI,
+        falling back to the live basic[] value. It never sleeps and never
+        reports a "not known yet" answer as a real one.
+
+        An early call (e.g. the first start_query pass, before ATI has been
+        answered) returns None, so every is_* predicate reads False for that
+        one pass and then self-corrects once the model lands. That is what
+        stops is_em05() from freezing a boot-race False for the whole process
+        (which mislabelled EM05 units as 5G and sent them the 5G AT command
+        set), and what keeps these predicates -- called from the modem page
+        and the App tick loop -- from stalling 3s apiece while the model is
+        still unknown.
         """
-        Try up to `retries` times to read self.basic["model"], waiting `delay` seconds
-        between attempts. Returns the model string or None if still unavailable.
-        First check permanent cache, then fall back to basic dict.
-        """
-        # First check permanent cache
         with _model_cache['lock']:
             if _model_cache['model'] is not None:
                 return _model_cache['model']
-        
-        # Fall back to retries on basic dict for legacy compatibility
-        for _ in range(retries):
-            model = self.basic.get("model")
-            if model is not None:
-                return model
-            time.sleep(delay)
-        return None
+        return self.basic.get("model") or None
 
     def is_500u(self) -> bool:
-        model = self._get_model_with_retry()
+        model = self._model_str()
         return bool(model) and "500U" in model
 
     def is_520(self) -> bool:
-        model = self._get_model_with_retry()
+        model = self._model_str()
         return bool(model) and "520" in model
 
     def is_500q(self) -> bool:
-        model = self._get_model_with_retry()
+        model = self._model_str()
         return bool(model) and "500Q" in model
 
     def is_em05(self) -> bool:
-        with _em05_cache['lock']:
-            if _em05_cache['result'] is not None:
-                return _em05_cache['result']
-        
-        model = self._get_model_with_retry()
-        result = bool(model) and "EM05" in model
-        
-        with _em05_cache['lock']:
-            _em05_cache['result'] = result
-            _em05_cache['queried'] = True
-        
-        return result
+        model = self._model_str()
+        return bool(model) and "EM05" in model
 
     def is_fm350(self) -> bool:
-        model = self._get_model_with_retry()
+        model = self._model_str()
         return bool(model) and "FM350" in model
 
     def is_supported_modem(self) -> bool:

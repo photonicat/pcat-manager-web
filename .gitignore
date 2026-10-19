@@ -26,8 +26,52 @@
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+app/app.log
+make_output.log
 app/__pycache__/
 app/venv/
 venv/
 
 __pycache__
+key*.txt
+
+# 3D model sources and build artifacts (tools/cad_to_glb.sh)
+# Drop CAD sources here; the dir is scratch and never committed.
+/models/
+# Mechanical CAD sources and mesh intermediates: large, often vendor-supplied,
+# and reproducible into .glb via tools/cad_to_glb.sh.
+*.step
+*.stp
+*.STEP
+*.STP
+*.iges
+*.igs
+*.brep
+*.brp
+*.blend
+*.blend1
+*.fbx
+*.3ds
+*.dae
+*.stl
+*.obj
+*.mtl
+*.ply
+# Converted output. NOTE: misc/make.py copies app/static/ from the working
+# tree, so an ignored .glb ships from a local build but is ABSENT in CI builds
+# (CI clones the repo). Commit the .glb with `git add -f` if /dev must show the
+# model in CI-produced packages.
+*.glb
+*.gltf
+
+# callaudio build artifacts
+/src/callaudio/*.o
+/src/callaudio/pcat-call-audio
+.venv-test/
+
+# Unsent HIL reports, written when an upload fails
+hil-report-*.json
+venv313
+
+# Claude Code local state
+.claude/

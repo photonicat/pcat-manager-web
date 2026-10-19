@@ -1,157 +1,171 @@
 #!/usr/bin/env python3
+"""Install a package file, a URL, or an archive of packages.
+
+    opkg-install.py install <file-or-url> [--verify-tls]
+
+Despite the name this drives whichever package manager the firmware has:
+opkg for .ipk on 26.04 images, apk for .apk on master images (see
+pcat_util/pkg_format.py). A device only accepts its own format.
+
+Archives (tar, tar.gz, tar.xz, tar.bz2) are unpacked and every package of the
+device's format inside is installed in one transaction.
+
+HTTPS certificates are NOT verified unless --verify-tls is given: devices
+often boot with a wrong clock (no RTC sync yet) and package mirrors are often
+on self-signed or internal hosts, both of which fail verification.
+
+The result lines are matched by templates/update.html, so keep
+"Package installed successfully.", "installation completed with warnings"
+and "installation failed" stable.
+"""
 
 import shutil
 import pathlib
 import sys
 import os
 import subprocess
-import requests
 
-## Install from a remote url
-# Steps:
-# 1. Get package file from somewhere.
-# 2. Unpack downloaded file.
-# 3. Find all ipk files in unpacked directory.
-# 4. Invoke `opkg install /xx/xx/a.ipk /xx/xx/b.ipk /xx/xx/c.ipk /xx/xx/d.ipk /xx/xx/e.ipk`
-# tar.gz, tar.xz,  tar.bz2, *.tar
-# tar -xzf xxx.tar.gz
-# tar -xjf xxx.tar.bz2
-# tar -xJf xxx.tar.xz
-# tar -xf xxx.tar
-# with open("/cmd-shell/cmd-log.txt","wb") as out, open("/cmd-shell/cmd-log.txt","wb") as err:
-### subprocess.run(["/usr/bin/opkg-install.py", "install", "/cmd-shell/a.tar.xz"], stdout=out,stderr=err)
+from pcat_util import pkg_format
+
+# Overridable so tests can run the script off-device.
+workspace = os.environ.get("PCAT_PKG_WORKSPACE", "/cmd-shell")
+MAX_SIZE_MB = 500.0
 
 
-workspace = "/cmd-shell"
+def run_install(files):
+  cmd = pkg_format.install_command(files)
+  print("Running command:", " ".join(cmd))
+  print("=" * 50)
+  process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                             universal_newlines=True, bufsize=1)
+  for line in process.stdout:
+    print(line.rstrip())
+  return_code = process.wait()
+  print("=" * 50)
+  print(f"Command completed with return code: {return_code}")
+  # opkg exits 255 when some packages installed and others did not.
+  if return_code == 0:
+    print("Package installed successfully.")
+  elif return_code == 255 and pkg_format.detect() == pkg_format.IPK:
+    print(f"Package installation completed with warnings (return code: {return_code})")
+  else:
+    print(f"Package installation failed with return code: {return_code}")
 
-if len(sys.argv) < 2:
-  print("Missing cmd argument! Available cmd: install")
-  exit(1)
 
-if sys.argv[1] != "install":
-  print("Not support cmd '{}'".format(sys.argv[1]))
-  exit(1)
+def download(url, verify_tls):
+  print("Start downloading " + url)
+  if not verify_tls:
+    print("(HTTPS certificate verification is off)")
+  try:
+    r = pkg_format.http_get(url, verify_tls=verify_tls, allow_redirects=True, timeout=60)
+    print("Download result: " + str(r.status_code))
+    r.raise_for_status()
+  except Exception as e:
+    print("Failed to download: {}".format(e))
+    print("Package installation failed")
+    exit(2)
 
-if sys.argv[1] == "install":
-  if len(sys.argv) < 3:
+  save_dir_path = pathlib.Path(__file__).parent.resolve().joinpath("temp")
+  try:
+    save_dir_path.mkdir(parents=True, exist_ok=True)
+  except Exception:
+    print("Failed to create temp dir")
+    exit(3)
+  save_file_path = save_dir_path.joinpath(os.path.basename(url.split("?")[0]))
+  save_file_path.write_bytes(r.content)
+  print("File downloaded.")
+  return str(save_file_path)
+
+
+def main(argv):
+  # stdout is a pipe to the web app, which streams it to the page line by
+  # line; block buffering would hold the log back until the install ends.
+  sys.stdout.reconfigure(line_buffering=True)
+  if len(argv) < 2:
+    print("Missing cmd argument! Available cmd: install")
+    exit(1)
+  if argv[1] != "install":
+    print("Not support cmd '{}'".format(argv[1]))
+    exit(1)
+  args = [a for a in argv[2:] if not a.startswith("--")]
+  verify_tls = "--verify-tls" in argv[2:]
+  if not args:
     print("Missing file argument!")
     exit(1)
 
+  fmt_label = pkg_format.label()
+  print("Package format on this device: {} ({})".format(
+      fmt_label, " ".join(pkg_format.install_command([])[:2])))
+
   try:
     pathlib.Path(workspace + "/out").mkdir(parents=True, exist_ok=True)
-  except:
+  except Exception:
     print("Failed to create dir in {}".format(workspace))
     exit(2)
   os.chdir(workspace)
   print("Current working dir {}".format(os.getcwd()))
-  filename = sys.argv[2]
-  if filename.startswith("http"):
-    try:
-      print("Start downloading " + filename)
-      r = requests.get(filename, allow_redirects=True)
-      print("Download result: " + str(r.status_code))
-    except:
-      print("Failed to download")
-      exit(2)
 
-    current_working_path = pathlib.Path(__file__).parent.resolve()
-    base_file_name = os.path.basename(filename)
-    save_dir_path = current_working_path.joinpath("temp")
-    save_file_path = current_working_path.joinpath("temp", base_file_name)
-    try:
-      pathlib.Path(save_dir_path).mkdir(parents=True, exist_ok=True)
-    except:
-      print("Failed to create temp dir")
-      exit(3)
+  filename = args[0]
+  if filename.startswith("http://") or filename.startswith("https://"):
+    filename = download(filename, verify_tls)
 
-    open(save_file_path, 'wb').write(r.content)
-    filename = str(save_file_path)
-    print("File downloaded.")
-
-  file_exists = os.path.exists(filename)
-  if not file_exists:
+  if not os.path.exists(filename):
     print("File '{}' not found!".format(filename))
     exit(2)
 
   shutil.rmtree('out', ignore_errors=True)
-  
+
   file_size = os.path.getsize(filename) / 1024.0 / 1024.0
   print("File size {} M".format(round(file_size, 2)))
-  if file_size > 200.0:
-    print("Not support upload file size large than 200 M")
+  if file_size > MAX_SIZE_MB:
+    print("Not support upload file size larger than {} M".format(int(MAX_SIZE_MB)))
+    print("Package installation failed")
     exit(3)
 
-  if filename.endswith(".ipk"):
-    print("Install ipk file")
-    cmd = ["opkg", "install", "--force-overwrite", "--force-depends", filename]
-    print("Running command:", " ".join(cmd))
-    print("=" * 50)
-    
-    # Stream output in real-time
-    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, 
-                              universal_newlines=True, bufsize=1)
-    
-    # Read output line by line in real-time
-    for line in process.stdout:
-        print(line.rstrip())
-    
-    # Wait for process to complete and get return code
-    return_code = process.wait()
-    print("=" * 50)
-    print(f"Command completed with return code: {return_code}")
-    
-    if return_code == 0:
-        print("ipk installed success.")
-    elif return_code == 255:
-        print(f"ipk installation completed with warnings (return code: {return_code})")
-    else:
-        print(f"ipk installation failed with return code: {return_code}")
-  elif filename.endswith(".gz") or filename.endswith(".xz") or filename.endswith(".bz2") or filename.endswith(".tar"):
+  if pkg_format.is_package(filename):
+    print("Install {} file".format(fmt_label))
+    run_install([filename])
+  elif pkg_format.is_archive(filename):
     print("Process archive file ...")
-    shutil.rmtree('out', ignore_errors=True)
     extract_dir = "out"
-    shutil.unpack_archive(filename, extract_dir)
-    result = list(pathlib.Path(extract_dir).rglob("*.ipk"))
-    files = [os.getcwd() + "/" + str(file_path) for file_path in result]
-    print(f"Found {len(files)} IPK files in archive:")
+    try:
+      shutil.unpack_archive(filename, extract_dir)
+    except Exception as e:
+      print("Failed to unpack archive: {}".format(e))
+      print("Package installation failed")
+      exit(4)
+    ext = pkg_format.extension()
+    files = sorted(os.getcwd() + "/" + str(p)
+                   for p in pathlib.Path(extract_dir).rglob("*" + ext))
+    print(f"Found {len(files)} {fmt_label} files in archive:")
     for i, file in enumerate(files, 1):
-        print(f"  {i}. {os.path.basename(file)}")
+      print(f"  {i}. {os.path.basename(file)}")
     print()
-    cmd = ["opkg", "install", "--force-overwrite", "--force-depends"]
-    cmd.extend(files)
-    print("Running command:", " ".join(cmd))
-    print("=" * 50)
-    
-    # Stream output in real-time
-    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, 
-                              universal_newlines=True, bufsize=1)
-    
-    # Read output line by line in real-time
-    for line in process.stdout:
-        print(line.rstrip())
-    
-    # Wait for process to complete and get return code
-    return_code = process.wait()
-    print("=" * 50)
-    print(f"Command completed with return code: {return_code}")
-    
-    if return_code == 0:
-        print("Archive packages installed successfully.")
-    elif return_code == 255:
-        print(f"Archive installation completed with warnings (return code: {return_code})")
+    if files:
+      run_install(files)
     else:
-        print(f"Archive installation failed with return code: {return_code}")
+      print("No {} files found in archive. Package installation failed".format(fmt_label))
     try:
       print("Clean temp files ...")
       shutil.rmtree(workspace, ignore_errors=True)
-    except:
+    except Exception:
       print("Failed to clean extracted files")
     try:
       print("Remove", filename)
       os.remove(filename)
-    except:
+    except Exception:
       print("Failed to remove", filename)
-    print("Packages update completed.")
+    print("Done.")
   else:
-    print("Not support file format!")
+    other = pkg_format.APK if pkg_format.detect() == pkg_format.IPK else pkg_format.IPK
+    if pkg_format.is_package(filename, other):
+      print("This firmware installs {} packages; {} files are not supported."
+            .format(fmt_label, pkg_format.label(other)))
+    else:
+      print("Not support file format!")
+    print("Package installation failed")
     exit(4)
+
+
+if __name__ == "__main__":
+  main(sys.argv)

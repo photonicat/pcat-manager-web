@@ -108,6 +108,104 @@ def get_event_count():
         return len(_load_events())
 
 
+# Event types that mean "the machine stopped running here". Time between one of
+# these and the following system_start is powered-off time and must not be
+# counted as on-battery time.
+_STOP_EVENTS = (
+    "system_shutdown",
+    "idle_shutdown_triggered",
+    "low_battery_shutdown_triggered",
+    "car_mode_shutdown",
+    "timer_shutdown",
+)
+
+
+def get_on_battery_session(charger_connected=None, now=None):
+    """Awake-on-battery time for the current session.
+
+    Returns {"seconds": int, "active": bool, "since": int|None} or None when the
+    log holds no dc_unplugged event to measure from.
+
+    "Session" is the stretch since DC was last unplugged: a dc_plugged_in event
+    ends it, so the counter restarts from zero on the next unplug. While DC is
+    connected the last completed run is reported with active=False.
+
+    Powered-off gaps are excluded. Runs on battery frequently end with the
+    machine dying or shutting down and later booting back up on the same
+    battery; only the awake spans between system_start and the next stop event
+    are summed, so time spent off never inflates the total.
+
+    charger_connected: current DC state. Passed in rather than read here so this
+    module stays free of hardware imports; None falls back to whichever plug
+    event came last in the log.
+    """
+    if now is None:
+        now = int(time.time())
+
+    with _log_lock:
+        events = _load_events()
+
+    # Oldest-first, and only entries carrying a usable timestamp.
+    events = [e for e in events if isinstance(e.get("ts"), int)]
+    events.sort(key=lambda e: e["ts"])
+    if not events:
+        return None
+
+    # Session start = the last unplug that has not been closed by a later plug-in.
+    start_idx = None
+    for i in range(len(events) - 1, -1, -1):
+        etype = events[i].get("type")
+        if etype == "dc_unplugged":
+            start_idx = i
+            break
+        if etype == "dc_plugged_in":
+            # Everything before this belongs to an earlier session; keep looking
+            # backwards for the unplug that opened the run this plug-in closed.
+            for j in range(i - 1, -1, -1):
+                if events[j].get("type") == "dc_unplugged":
+                    start_idx = j
+                    break
+            break
+    if start_idx is None:
+        return None
+
+    session = events[start_idx:]
+    since = session[0]["ts"]
+
+    if charger_connected is None:
+        charger_connected = any(e.get("type") == "dc_plugged_in" for e in session)
+
+    # Walk the session summing awake spans. The device is awake at the unplug
+    # (it logged the event), so the first span opens there.
+    total = 0
+    awake_from = since
+    end_ts = now
+    for e in session[1:]:
+        etype = e.get("type")
+        ts = e["ts"]
+        if etype == "dc_plugged_in":
+            # Session ends here — DC is back, the counter stops and will reset.
+            end_ts = ts
+            break
+        if etype in _STOP_EVENTS:
+            if awake_from is not None:
+                total += max(0, ts - awake_from)
+                awake_from = None
+        elif etype == "system_start":
+            # Back up after a shutdown or an unlogged death (battery ran flat,
+            # power cut): resume counting from the boot, skipping the gap.
+            if awake_from is None:
+                awake_from = ts
+    if awake_from is not None:
+        total += max(0, end_ts - awake_from)
+
+    return {
+        "seconds": int(total),
+        "active": not charger_connected,
+        "since": since,
+    }
+
+
 def clear_events():
     """Clear all events."""
     with _log_lock:

@@ -7,14 +7,21 @@
 # - Security headers (X-Frame-Options, CSP, etc.)
 # - Reasonable session lifetimes (30 days default, 180 days remember)
 
-from flask import Flask, jsonify, render_template, request, redirect, session, make_response, url_for
-from flask_socketio import SocketIO, emit, join_room, leave_room
+from flask import Flask, jsonify, render_template, request, redirect, session, make_response, url_for, g
+from flask import Response, stream_with_context
+from pc_call_audio import call_audio_bridge
+from werkzeug.exceptions import HTTPException
 from datetime import datetime, date, timedelta
 import secrets
 import time
 import urllib.parse
-from pcat_util import user_auth, pcat_logger, command_parser, hardware_util, isp_dict
-from pcat_util.openwrt import ubus_call as _openwrt_ubus_call, uci_get as _openwrt_uci_get, uci_set as _openwrt_uci_set, uci_commit as _openwrt_uci_commit, debug_status as _openwrt_debug_status
+from pcat_util import user_auth, pcat_logger, command_parser, hardware_util, isp_dict, wifi_wan, wifi_radio, wan_manager, captive
+from pcat_util import nas_manager, nas_jobs, nas_files
+from pcat_util import bluetooth as bt_util
+from pcat_util import osm_tiles
+from pcat_util import pkg_format
+from pcat_util import event_bus
+from pcat_util.openwrt import ubus_call as _openwrt_ubus_call, uci_get as _openwrt_uci_get, uci_set as _openwrt_uci_set, uci_commit as _openwrt_uci_commit, uci_show_dict as _openwrt_uci_show_dict, debug_status as _openwrt_debug_status
 import urllib.error
 import subprocess
 import threading
@@ -22,23 +29,73 @@ import threading
 import pathlib
 import json
 import base64
+import io
 import re
 import os
+import glob
+import math
 import urllib.request
 import urllib.error
 
 import pcat_config
 import oem_config
+import remember_token
 import power_event_log
 import battery_history
+import gauge_learning_log
+import locales as _locales
 import nt
 import pc_modem_client
+import pc_gps_client
+import pc_gps_logger
 import app as pc_app
 from cmd_tool import CmdTool
 from pc_terminal import terminal_manager
 
 install_thread = None
 thread_lock = threading.Lock()
+
+# Server-side store for the password used to SSO into LuCI. We deliberately do
+# NOT put the password in the Flask session cookie (signed, not encrypted) or
+# embed it in every page's HTML. A random token in the session indexes this
+# process-local map; cleared on logout / process restart.
+_DEFAULT_LUCI_PASSWORD = "photonicat"
+_luci_pw_lock = threading.Lock()
+_luci_pw_by_token = {}  # token -> plaintext password
+
+
+def _store_luci_password(password):
+    """Remember the login password for OpenWrt SSO (server memory only)."""
+    if not password:
+        return
+    old = session.pop("luci_pw_token", None)
+    token = secrets.token_hex(16)
+    with _luci_pw_lock:
+        if old:
+            _luci_pw_by_token.pop(old, None)
+        _luci_pw_by_token[token] = password
+    session["luci_pw_token"] = token
+
+
+def _clear_luci_password():
+    """Drop any stored LuCI SSO password for this session."""
+    token = session.pop("luci_pw_token", None)
+    session.pop("remembered_password", None)  # legacy key cleanup
+    if token:
+        with _luci_pw_lock:
+            _luci_pw_by_token.pop(token, None)
+
+
+def _get_luci_password():
+    """Password to POST to LuCI: the one used at login, else factory default."""
+    token = session.get("luci_pw_token")
+    if token:
+        with _luci_pw_lock:
+            pw = _luci_pw_by_token.get(token)
+        if pw:
+            return pw
+    return getattr(pcat_config, "default_luci_password", None) or _DEFAULT_LUCI_PASSWORD
+
 
 # SMS list caching for better performance
 sms_cache = {
@@ -88,6 +145,20 @@ _COUNTRY_CODES = [
     '7','1',
 ]
 
+# cell_tech values that carry no usable radio generation. handle_qnwinfo() falls
+# back to "Other" whenever AT+QNWINFO's network-mode field matches none of its
+# NR/LTE/WCDMA patterns -- which the RM500Q-GL triggers routinely by answering
+# "CDMA","46001","CDMA BC0" while actually camped on 5G. Treating those as empty
+# lets the PMU-reported modem_mode supply the generation instead, so the
+# dashboard shows "5G China Unicom" rather than "Other China Unicom".
+CELL_TECH_UNKNOWN = ("", "other", "none", "unknown")
+
+def usable_cell_tech(cell_tech):
+    """Return cell_tech when it names a real radio generation, else ""."""
+    if not cell_tech or cell_tech.strip().lower() in CELL_TECH_UNKNOWN:
+        return ""
+    return cell_tech
+
 def format_phone_number(number):
     """Prepend + to phone number if it matches a known country calling code."""
     if not number:
@@ -99,6 +170,53 @@ def format_phone_number(number):
         if number.startswith(code) and len(number) > len(code) + 4:
             return '+' + number
     return number
+
+
+def _home_dial_code():
+    """Country calling code of the SIM, read back off its own MSISDN.
+
+    Caller ID for a domestic call arrives in national format -- "13800138000",
+    no country code -- so there is nothing in the number itself to key on.
+    The SIM's own number is in the same numbering plan, so its country code is
+    the right one to borrow, and it needs no MCC table to derive. Empty when
+    the SIM does not publish an MSISDN, which is common; the number is then
+    shown exactly as the network gave it."""
+    try:
+        own = pcat_config.get_user_config_key("custom_sim_number", None) \
+            or pc_app.modem_client.basic.get("sim_number", "")
+    except Exception:
+        return ""
+    own = format_phone_number((own or "").strip())
+    if not own.startswith('+'):
+        return ""
+    for code in sorted(_COUNTRY_CODES, key=len, reverse=True):
+        if own[1:].startswith(code):
+            return code
+    return ""
+
+
+def intl_phone_number(number):
+    """Caller ID in full international form, for display. Falls back to the
+    number as received rather than guessing when the country is unknowable.
+
+    The SIM's own country wins over format_phone_number()'s prefix matching,
+    which cannot tell a national number from an international one: "1" is a
+    country code, so it reads the Chinese mobile 13800138000 as +1 3800138000.
+    Same numbering plan as the SIM is the far better assumption for a caller
+    ID that arrived without a country code."""
+    if not number:
+        return number
+    number = number.strip()
+    if number.startswith('+'):
+        return number
+    code = _home_dial_code()
+    # Only prefix something long enough to be a subscriber number -- never a
+    # short code or a service number.
+    if code and number.isdigit() and len(number) >= 7:
+        if number.startswith(code) and len(number) > len(code) + 4:
+            return '+' + number          # already international, just unsigned
+        return '+' + code + number.lstrip('0')
+    return format_phone_number(number)
 
 
 def invalidate_sms_cache():
@@ -147,7 +265,7 @@ LOGIN_WINDOW = 300    # 5 minutes in seconds
 
 # PIN protection settings
 # PIN: 2025 -> SHA-256 hash: computed in JavaScript and validated server-side
-PIN_PROTECTED_ROUTES = ['/phone', '/perf']
+PIN_PROTECTED_ROUTES = ['/perf']
 PIN_SESSION_KEY = 'pin_authenticated'
 PIN_HASH_JS = 'sha256("2025")'  # This will be computed in JavaScript
 
@@ -245,7 +363,14 @@ try:
 except:
     board_name = "photonicat"
 
-def background_install_thread(file_position, file_name):
+# Photonicat 1 (rk3568, "ariaboard,photonicat") and Photonicat 2 (rk3576,
+# "ariaboard,photonicat2") share this app but not their hardware: the MCU
+# update path, LXC, the power-LED/beeper/charge-limit controls and the
+# low-battery shutdown policy exist only on Photonicat 2, and firmware images
+# are built per board. Everything that must differ keys off this one flag.
+is_photonicat2 = (board_name == "photonicat2")
+
+def background_install_thread(file_position, file_name, verify_tls=False):
     global install_thread
     current_path = pathlib.Path(__file__).parent.resolve()
     
@@ -259,21 +384,23 @@ def background_install_thread(file_position, file_name):
         cmd = cmd_py
     else:
         pcat_logger.logger.error("opkg-install script not found (neither .pyc nor .py)")
-        socketio.emit('log_response', {'data': 'ERROR: opkg-install script not found\n'}, namespace='/')
+        publish('log_response', {'data': 'ERROR: opkg-install script not found\n'})
         return
 
     if file_position == "remote":
         file_name = pcat_config.volatile_packages_url + file_name
 
     cmd_args = ["python3", cmd, "install", file_name]
+    if verify_tls:
+        cmd_args.append("--verify-tls")
     p = subprocess.Popen(cmd_args, stdout=subprocess.PIPE, bufsize=1)
     while True:
-        socketio.sleep(0.5)
+        time.sleep(0.5)
         for line in iter(p.stdout.readline, b''):
             line_str = line.decode("utf-8")
             now = datetime.now()
             time_string = now.strftime("%H:%M:%S")
-            socketio.emit('log_response', {'data': line_str, 'ts': time_string})
+            publish('log_response', {'data': line_str, 'ts': time_string})
         p.stdout.close()
         break
     install_thread = None
@@ -284,10 +411,45 @@ class FlaskAppThread (threading.Thread):
 
     def run(self):
         print("Start web service on port", pcat_config.web_port)
+        audit_route_auth()
         try:
-            socketio.run(flask_app, host="0.0.0.0", port=pcat_config.web_port, allow_unsafe_werkzeug=True)
+            # Development listener only; in production granian serves
+            # pcat_wsgi:flask_app and this thread never starts. Was
+            # socketio.run(), which only ever wrapped werkzeug for us.
+            flask_app.run(host="0.0.0.0", port=pcat_config.web_port,
+                          threaded=True, use_reloader=False)
         except PermissionError as error:
             print("!!! Failed to start web service", error)
+
+
+class TlsFlaskAppThread (threading.Thread):
+    """Second listener for the same app, with TLS, on :9443.
+
+    Exists for one reason: browsers only allow getUserMedia (the microphone,
+    needed by the phone page's in-call audio) in a secure context. The cert
+    is self-signed, generated at first boot by the init script with px5g;
+    if it is missing this thread simply never starts and the plain-HTTP
+    service is unaffected.
+    """
+    CERT = "/etc/pcat-manager-web/ssl/cert.pem"
+    KEY = "/etc/pcat-manager-web/ssl/key.pem"
+    PORT = 9443
+
+    def __init__(self):
+        threading.Thread.__init__(self)
+        self.daemon = True
+
+    def run(self):
+        if not (os.path.exists(self.CERT) and os.path.exists(self.KEY)):
+            print("No TLS cert, https listener disabled")
+            return
+        print("Start https web service on port", self.PORT)
+        try:
+            flask_app.run(host="0.0.0.0", port=self.PORT,
+                          ssl_context=(self.CERT, self.KEY),
+                          threaded=True, use_reloader=False)
+        except Exception as error:
+            print("!!! Failed to start https web service", error)
 
 flask_app = Flask(__name__)
 
@@ -296,10 +458,83 @@ flask_app.jinja_env.globals['csrf_token'] = generate_csrf_token
 
 # Add cache bust version based on startup time
 startup_time = int(time.time())
+
+def _voice_capable_modem():
+    """True when the fitted modem actually carries in-call audio.
+
+    RM500U-CNV and RM520N-GL are the modules that do. EM05-CN never clocks the
+    PCM link (its firmware routes call audio at an absent codec chip and
+    ignores AT+QDAI), and RM500Q-GL cannot enable PCM voice at all -- the one
+    AT+QPCMV mode it accepts is USB audio, which re-enumerates the module
+    without the AT port this client needs. See pc_call_audio.py.
+
+    Non-blocking: the is_* helpers read the permanent ATI model cache. False
+    while the model is still unknown (early boot) or the modem client isn't up
+    yet."""
+    try:
+        mc = pc_app.modem_client
+        return mc.is_500u() or mc.is_520()
+    except Exception:
+        return False
+
+
+def _rev2_board():
+    """True when the MCU reports a PCAT2-REV2 (A4) board.
+
+    REV2 is the revision that brings the modem's PCM/SAI link out to the
+    codec; on REV1 (A1~A3) there is no path for call audio at all. Older,
+    jumper-blind MCU firmware answers "NT2421A4" for every board, and the
+    value is "" until the first answer lands -- neither is a REV2 claim, so an
+    unknown board reads as unsupported. Offering telephony where it cannot
+    work is the worse failure: the user enables it, dials, and hears silence.
+    """
+    try:
+        return "REV2" in (pc_app.socket_client.pmu_hw_version or "").upper()
+    except Exception:
+        return False
+
+
+def phone_capable():
+    """Can this box do telephony at all? Both halves have to be present: a
+    module that carries call audio, and a REV2 board to carry it on.
+
+    Gates the settings toggle -- there is no point offering a switch that
+    cannot do anything -- and, together with that toggle, the nav entry.
+    On a Photonicat 2 /phone itself stays reachable by URL, like the other
+    optional pages; on a Photonicat 1 the page is a 404.
+
+    The board check is not redundant with the revision check: REV1/REV2 is a
+    Photonicat 2 notion, and a Photonicat 1 that ever answered a REV2-looking
+    string must still not be offered telephony."""
+    return is_photonicat2 and _voice_capable_modem() and _rev2_board()
+
+
+def phone_menu_enabled():
+    """Nav-bar visibility for /phone: the user's opt-in, honoured only on
+    hardware that can deliver it. Off by default -- a nav entry for a feature
+    most boxes cannot use is noise, and the toggle that turns it on only
+    appears where it means something."""
+    return phone_capable() and bool(
+        pcat_config.get_user_config_key("phone_enabled", False))
+
+
 @flask_app.context_processor
 def inject_cache_bust():
     terminal_enabled = pcat_config.get_user_config_key("terminal_enabled", True)
-    return {'cache_bust_version': startup_time, 'terminal_enabled': terminal_enabled}
+    return {'cache_bust_version': startup_time, 'terminal_enabled': terminal_enabled,
+            'board_name': board_name,
+            'is_photonicat2': is_photonicat2,
+            'phone_enabled': phone_menu_enabled(),
+            'nas_enabled': pcat_config.get_user_config_key("nas_enabled", True),
+            # LXC is a Photonicat 2 feature; a stored opt-in carried onto a
+            # Photonicat 1 must not surface the nav entry there.
+            'lxc_enabled': is_photonicat2 and pcat_config.get_user_config_key("lxc_enabled", False),
+            'gps_enabled': pcat_config.get_user_config_key("gps_enabled", False),
+            # Rendered into <head> ahead of theme.js so an explicit device
+            # appearance is known before first paint. "auto" means nobody has
+            # chosen and each browser follows its own prefers-color-scheme.
+            'device_theme': explicit_theme() or "auto",
+            'theme_accent': theme_accent()}
 
 # Generate or load persistent SECRET_KEY to maintain sessions across restarts
 def get_or_create_secret_key():
@@ -352,15 +587,166 @@ flask_app.config['SESSION_COOKIE_HTTPONLY'] = True
 flask_app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 flask_app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=30)  # Default session lifetime
 
+# Persistent remember-me tokens live in SQLite at /etc/pcat-remember.db so a
+# "remember me" login survives a reboot even if SECRET_KEY is rotated (which
+# invalidates every signed session cookie).
+REMEMBER_COOKIE_NAME = 'pcat_remember'
+REMEMBER_TTL_DAYS = 180
+remember_token.init_remember_db()
+
+
+def _set_remember_cookie(response, username):
+    """Issue a fresh remember-me token and attach it to the response."""
+    selector, validator, expires_at = remember_token.issue_token(
+        username, ttl_days=REMEMBER_TTL_DAYS)
+    if not selector:
+        return response
+    response.set_cookie(
+        REMEMBER_COOKIE_NAME,
+        f"{selector}:{validator}",
+        max_age=REMEMBER_TTL_DAYS * 86400,
+        httponly=True,
+        samesite='Lax',
+        secure=flask_app.config['SESSION_COOKIE_SECURE'],
+    )
+    return response
+
+
+def _clear_remember_cookie(response):
+    """Revoke the presented token server-side and delete the cookie."""
+    selector, _ = remember_token.parse_cookie(request.cookies.get(REMEMBER_COOKIE_NAME))
+    if selector:
+        remember_token.revoke_token(selector)
+    response.delete_cookie(REMEMBER_COOKIE_NAME)
+    return response
+
+
 @flask_app.before_request
 def restore_session_lifetime():
-    """Restore session lifetime based on stored session data before each request"""
+    """Restore session lifetime, and rebuild the session from a remember-me token.
+
+    If the signed session cookie is gone (SECRET_KEY rotated, cookie expired)
+    but a valid remember-me token is present, log the user back in.
+    """
     if 'username' in session and session.permanent:
         # Check if user chose to be remembered
         if session.get('remember_login'):
             flask_app.permanent_session_lifetime = timedelta(days=180)
         else:
             flask_app.permanent_session_lifetime = timedelta(days=30)
+        return
+
+    if 'username' in session:
+        return
+
+    selector, validator = remember_token.parse_cookie(
+        request.cookies.get(REMEMBER_COOKIE_NAME))
+    if not selector:
+        return
+    username = remember_token.validate_token(selector, validator)
+    if not username:
+        return
+
+    session['username'] = username
+    session['remember_login'] = True
+    session.permanent = True
+    flask_app.permanent_session_lifetime = timedelta(days=REMEMBER_TTL_DAYS)
+    # Rotate: the presented token is single-use, a fresh one is issued in
+    # after_request. This limits the damage from a stolen cookie.
+    remember_token.revoke_token(selector)
+    g.reissue_remember_for = username
+
+
+@flask_app.after_request
+def reissue_remember_cookie(response):
+    """Attach a rotated remember-me token when a token login just happened."""
+    username = getattr(g, 'reissue_remember_for', None)
+    if username:
+        _set_remember_cookie(response, username)
+    return response
+
+
+# Endpoints (view fn names) that do their own CSRF handling or must be exempt.
+# login_action validates its own form token before a session exists; the
+# socket.io transport carries its own handshake, not a browser form POST.
+_CSRF_EXEMPT_ENDPOINTS = frozenset({"login_action"})
+# Endpoints a same-device (localhost) caller may POST without a CSRF token:
+# lets scripts/cron sync the clock from GNSS on offline installs and keep
+# AGPS assist data fresh (curl -X POST http://127.0.0.1/api/v1/gps/...).
+# Browser CSRF cannot originate from the device's own loopback, so this does
+# not widen that attack surface, and it mirrors the localhost trust
+# api_auth_required already extends.
+_CSRF_LOCALHOST_EXEMPT_ENDPOINTS = frozenset({"gps_sync_time_api",
+                                              "gps_agps_update_api",
+                                              "gps_celldb_download_api"})
+
+
+# ── credential scrubbing for logs ────────────────────────────────────────────
+# The web log (RotatingFileHandler) lands 0644 in /tmp, so request bodies must
+# never carry secrets into it in cleartext. These handlers historically logged
+# str(p_data) verbatim -- which for the wireless / APN / Smart-WAN saves meant
+# the WiFi PSK, the APN password, and EAP credentials were written to a
+# world-readable file. Scrub before logging.
+_SENSITIVE_SUBSTRINGS = ("password", "passwd", "secret", "token", "psk")
+_SENSITIVE_EXACT = {"key", "pin", "pass", "identity", "ca_cert"}
+
+
+def _redact_sensitive(value):
+    """Return a deep copy of `value` (dict/list/scalar) with any credential-
+    bearing field masked, for safe logging. Matches nested structures (e.g. an
+    'eap' sub-dict) and leaves non-sensitive fields untouched."""
+    if isinstance(value, dict):
+        out = {}
+        for k, v in value.items():
+            kl = str(k).lower()
+            if any(s in kl for s in _SENSITIVE_SUBSTRINGS) or kl in _SENSITIVE_EXACT:
+                out[k] = "***" if v not in (None, "", [], {}) else v
+            else:
+                out[k] = _redact_sensitive(v)
+        return out
+    if isinstance(value, (list, tuple)):
+        return [_redact_sensitive(v) for v in value]
+    return value
+
+
+@flask_app.before_request
+def _mark_web_activity():
+    """Record that a client is actively talking to us. The App loop reads this
+    to keep polling the STM32 for live SoC/route/modem state at the fast 10s
+    cadence while the browser or the always-on mini display is watching (both
+    poll HTTP GETs), and to relax to a slower cadence when the device is truly
+    headless. Static assets count too -- harmless, they only load on page open.
+    One timestamp write; must never block or raise the request."""
+    try:
+        pc_app.note_web_activity()
+    except Exception:
+        pass
+
+
+@flask_app.before_request
+def csrf_guard():
+    """Global CSRF enforcement on state-changing requests. Browsers attach the
+    session cookie to cross-site POSTs (SameSite=Lax only blocks some), so a
+    malicious page could otherwise drive reboot/reset/config changes. Requires
+    a valid token (X-CSRF-Token header, injected by the fetch wrapper in
+    _base.html, or a csrf_token form field) that matches the one in the signed
+    session. Read-only methods and same-process localhost callers (the mini
+    display polls GET-only) are unaffected."""
+    if request.method not in ('POST', 'PUT', 'DELETE', 'PATCH'):
+        return
+    if request.endpoint in _CSRF_EXEMPT_ENDPOINTS:
+        return
+    if (request.endpoint in _CSRF_LOCALHOST_EXEMPT_ENDPOINTS
+            and request.remote_addr in ('127.0.0.1', '::1')):
+        return
+    # socket.io has its own endpoint(s); never a browser form we issue tokens for
+    if request.path.startswith('/socket.io'):
+        return
+    token = (request.headers.get('X-CSRF-Token')
+             or request.form.get('csrf_token'))
+    if not validate_csrf_token(token):
+        return jsonify({"status": "failed",
+                        "message": "Security token invalid"}), 400
 
 if os.getenv('FLASK_TEMPLATE_RELOAD', '0') in ('development','1','true','True'):
     print("SETTING TEMPLATES_AUTO_RELOAD is True")
@@ -368,7 +754,79 @@ if os.getenv('FLASK_TEMPLATE_RELOAD', '0') in ('development','1','true','True'):
     flask_app.jinja_env.auto_reload = True
 else:
     flask_app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 3600000
-socketio = SocketIO(flask_app)
+# Server→client push. Was flask_socketio; see pcat_util/event_bus for why it
+# could not stay (every connected socket.io client permanently held one of
+# granian's four request slots, issue #113). Same publish/subscribe shape,
+# short polls instead of a held connection.
+#
+# The names below mirror the flask_socketio API they replace, so the handlers
+# and background workers read the same as before:
+#   socketio.emit(evt, data)       -> publish(evt, data)        broadcast
+#   socketio.emit(evt, d, to=room) -> publish(evt, data, room)   one room
+#   emit(evt, data)                -> reply(evt, data)           to the caller
+#   join_room(room)                -> join(room)
+#   @socketio.event                -> @bus_event
+_EVENT_HANDLERS = {}
+
+# Per-request scratch for a dispatched handler: what it replied to its caller
+# and which rooms it joined on that caller's behalf. Thread-local because
+# granian runs handlers on a pool of blocking threads, so several clients can
+# be inside dispatch at once.
+_dispatch_ctx = threading.local()
+
+
+def bus_event(fn):
+    """Register a client→server command, keyed by function name.
+
+    Same convention as @socketio.event: the client emits the handler's own
+    name. Kept so the call sites in the templates need no renaming.
+    """
+    _EVENT_HANDLERS[fn.__name__] = fn
+    return fn
+
+
+def publish(event, data=None, room=None):
+    """Broadcast to every polling client, or to one room."""
+    event_bus.publish(event, data, room=room)
+
+
+def reply(event, data=None):
+    """Answer the client that sent the command currently being dispatched.
+
+    The old bare emit() went to the calling socket alone, so these must not go
+    through the broadcast buffer -- a per-caller 'Welcome' or a scrollback
+    replay landing in every other tab would be a bug, not a nicety. Outside a
+    dispatch (a background thread) there is no caller, and this is a no-op.
+    """
+    replies = getattr(_dispatch_ctx, "replies", None)
+    if replies is not None:
+        replies.append({"event": event, "data": {} if data is None else data})
+
+
+def join(room):
+    """Subscribe the calling client to a room for its later polls."""
+    rooms = getattr(_dispatch_ctx, "join", None)
+    if rooms is not None and room not in rooms:
+        rooms.append(room)
+
+
+def _start_background_task(target, *args, **kwargs):
+    """Replacement for socketio.start_background_task.
+
+    Returns the Thread so the callers that keep a handle -- install_thread,
+    firmware_upgrade_thread -- can still test it for None to single-flight.
+    Daemon, because these must not hold a shutdown open; the firmware worker
+    already survives that by writing its state into firmware_upgrade_status.
+    """
+    thread = threading.Thread(target=target, args=args, kwargs=kwargs, daemon=True)
+    thread.start()
+    return thread
+
+
+# NAS push channel: the job engine and disk-hotplug pass emit through these
+# instead of importing flask/the bus themselves (keeps them unit-testable).
+nas_jobs.set_emitter(lambda job: publish("nas_job_status", job))
+nas_manager.set_emitter(lambda event, payload: publish(event, payload))
 
 # Suppress noisy werkzeug request logs for socket.io polling
 import logging as _logging
@@ -386,23 +844,92 @@ _werkzeug_logger.addFilter(_SocketIOPollFilter())
 # Add security headers to all responses
 @flask_app.after_request
 def add_security_headers(response):
-    response.headers['X-Frame-Options'] = 'DENY'
+    # SAMEORIGIN (not DENY): the /lxc page embeds /terminal in an iframe for
+    # the container console. Same-origin only — third-party framing stays
+    # blocked, mirrored by frame-ancestors 'self' in the CSP below (which is
+    # what modern browsers actually honor).
+    response.headers['X-Frame-Options'] = 'SAMEORIGIN'
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['X-XSS-Protection'] = '1; mode=block'
     response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
     # CSP allowing inline scripts for AlpineJS but restricting other sources
     response.headers['Content-Security-Policy'] = ("default-src 'self'; "
+                                                   "frame-ancestors 'self'; "
                                                    "script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
                                                    "style-src 'self' 'unsafe-inline'; "
                                                    "img-src 'self' data:; "
                                                    "connect-src 'self' ws: wss: *; "
                                                    "font-src 'self'; "
+                                                   # The phone page's TTS preview plays the synthesized
+                                                   # WAV straight from the fetch response via
+                                                   # URL.createObjectURL(). media-src has no default of
+                                                   # its own, so without this it falls back to
+                                                   # default-src 'self', which does not cover blob: --
+                                                   # the <audio> load is blocked and the preview button
+                                                   # silently produces no sound.
+                                                   "media-src 'self' blob:; "
+                                                   # The /dev 3D model is Draco-compressed and
+                                                   # DRACOLoader decodes it in a Web Worker built from
+                                                   # a blob: URL. Workers fall back to script-src,
+                                                   # which does not allow blob:, so without this the
+                                                   # worker is blocked and the model never decodes.
+                                                   "worker-src 'self' blob:; "
                                                    "object-src 'none'; "
                                                    "base-uri 'self';")
     # Cache static assets for 3 months; versioned files (?v=) are cache-busted on deploy
     if request.path.startswith('/static/'):
         response.headers['Cache-Control'] = 'public, max-age=7776000'
+    elif 'Cache-Control' not in response.headers:
+        # HTML pages / API JSON carry inline Alpine JS and live state, so they
+        # must never be served from a stale browser cache. Without an explicit
+        # header the browser applies heuristic caching and reuses an old page
+        # (old inline JS) after a redeploy — the "I changed the template but the
+        # page looks the same" trap. no-cache = always revalidate before use.
+        response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
     return response
+
+def render_error_page(code):
+    """Styled 404/500/etc. page (error.html, cute cat included). Must never
+    raise: a second failure inside an error handler would mask the original
+    error, so any problem here falls back to a bare-text body."""
+    try:
+        locales = _locales.get_locales("error_page", current_locale())
+        locales.update(base_locales())
+        return render_template("error.html", code=code, locales=locales), code
+    except Exception:
+        pcat_logger.logger.exception("error page render failed (code %s)", code)
+        return "Internal Server Error" if code >= 500 else f"Error {code}", code
+
+
+# Styled pages for aborted/unrouted requests (404, 405, CSRF 400, ...).
+# RequestRedirect from the URL router is also an HTTPException (3xx) and must
+# pass through untouched. API callers get JSON, not an HTML page.
+@flask_app.errorhandler(HTTPException)
+def handle_http_error(e):
+    if not e.code or e.code < 400:
+        return e
+    if request.path.startswith('/api/'):
+        return jsonify({"status": "error", "code": e.code, "message": e.name}), e.code
+    return render_error_page(e.code)
+
+
+# Log the full traceback for any unhandled exception. Without this, an uncaught
+# error in a view (e.g. a template render or config read that only fails on the
+# device) surfaces as a bare "500" with no detail in the browser and nothing
+# actionable in the log.
+@flask_app.errorhandler(Exception)
+def log_unhandled_exception(e):
+    # HTTPExceptions normally go to handle_http_error; this branch only runs
+    # if that handler itself blew up, in which case pass the response through.
+    if isinstance(e, HTTPException):
+        return e
+    import traceback
+    pcat_logger.logger.error(
+        "Unhandled exception on %s %s:\n%s",
+        request.method, request.path, traceback.format_exc())
+    if request.path.startswith('/api/'):
+        return jsonify({"status": "error", "code": 500, "message": "Internal Server Error"}), 500
+    return render_error_page(500)
 
 ## OEM image serving from boot1 base64 data
 @flask_app.route("/oem/image/<key>")
@@ -417,6 +944,117 @@ def oem_image(key):
     resp.headers['Content-Type'] = mime
     resp.headers['Cache-Control'] = 'public, max-age=86400'
     return resp
+
+## Theme accent colour (LCD colour theme -> browser favicon)
+
+# The /screen colour themes recolour the LCD; this mirrors the chosen colour
+# onto the web favicon so both match. Stored in our own user config rather
+# than read back from the display daemon, so it also works on boxes without a
+# screen and needs no daemon round-trip per favicon request.
+THEME_ACCENT_KEY = "theme_accent"
+DEFAULT_ACCENT = "#FDE021"          # Phonicat brand yellow (the shipped icon)
+HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
+
+
+def theme_accent():
+    value = pcat_config.get_user_config_key(THEME_ACCENT_KEY, "") or ""
+    return value if HEX_COLOR_RE.match(value) else DEFAULT_ACCENT
+
+
+_favicon_raster_cache = {}          # (kind, color) -> bytes
+
+
+def _tinted_raster(kind, color):
+    """The shipped favicon recoloured to `color`, as PNG/ICO bytes.
+
+    The shipped icons are a single flat colour over transparency, so keeping
+    each pixel's alpha and replacing its RGB reproduces the artwork exactly in
+    the new colour — no resampling, no palette guessing.
+
+    Returns None when Pillow is missing, so the caller can fall back to the
+    static file rather than 500.
+    """
+    key = (kind, color)
+    if key in _favicon_raster_cache:
+        return _favicon_raster_cache[key]
+    try:
+        from PIL import Image
+    except ImportError:
+        return None
+    src = {"png32": "favicon-32x32.png", "png16": "favicon-16x16.png",
+           "ico": "favicon-32x32.png"}.get(kind)
+    if not src:
+        return None
+    try:
+        img = Image.open(os.path.join(flask_app.static_folder, src))
+        img = img.convert("RGBA")
+        rgb = (int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16))
+        alpha = img.getchannel("A")
+        tinted = Image.new("RGBA", img.size, rgb + (255,))
+        tinted.putalpha(alpha)
+        buf = io.BytesIO()
+        if kind == "ico":
+            tinted.save(buf, format="ICO", sizes=[(32, 32), (16, 16)])
+        else:
+            tinted.save(buf, format="PNG")
+        data = buf.getvalue()
+    except Exception as e:
+        pcat_logger.logger.warning("favicon tint failed: %s", e)
+        return None
+    _favicon_raster_cache[key] = data
+    return data
+
+
+@flask_app.route("/favicon-theme.png")
+def favicon_theme_png():
+    """Themed raster icon. Chrome prefers a raster over an SVG when both are
+    offered, so these must be themed too or the tab keeps the shipped colour."""
+    kind = "png16" if request.args.get("s") == "16" else "png32"
+    data = _tinted_raster(kind, theme_accent())
+    if data is None:
+        return redirect("/static/favicon-{0}x{0}.png".format(
+            16 if kind == "png16" else 32))
+    resp = make_response(data)
+    resp.headers['Content-Type'] = 'image/png'
+    resp.headers['Cache-Control'] = 'public, max-age=86400'
+    return resp
+
+
+@flask_app.route("/favicon-theme.ico")
+def favicon_theme_ico():
+    data = _tinted_raster("ico", theme_accent())
+    if data is None:
+        return redirect("/static/favicon.ico")
+    resp = make_response(data)
+    resp.headers['Content-Type'] = 'image/x-icon'
+    resp.headers['Cache-Control'] = 'public, max-age=86400'
+    return resp
+
+
+@flask_app.route("/favicon-theme.svg")
+def favicon_theme_svg():
+    """The brand cube tinted with the active theme colour.
+
+    Public on purpose: a favicon is also fetched for /login, and it leaks
+    nothing beyond a colour. Built from static/logo.svg so the geometry has a
+    single source; the PNG/ICO links stay in place for browsers that do not
+    take an SVG icon.
+    """
+    try:
+        with open(os.path.join(flask_app.static_folder, "logo.svg"),
+                  encoding="utf-8") as fh:
+            svg = fh.read()
+    except OSError:
+        return "Not found", 404
+    # logo.svg paints the cube in the dark brand colour; retint every fill.
+    svg = re.sub(r'fill="#[0-9A-Fa-f]{6}"',
+                 'fill="{}"'.format(theme_accent()), svg)
+    resp = make_response(svg)
+    resp.headers['Content-Type'] = 'image/svg+xml'
+    # The href carries the colour as a cache-buster, so this can cache hard.
+    resp.headers['Cache-Control'] = 'public, max-age=86400'
+    return resp
+
 
 ## Helper functions
 
@@ -445,286 +1083,7 @@ def base_locales():
         "apple_touch_icon": oem_config.get_favicon_uri("apple"),
     }
 
-    if locale_name == "CN":
-        locales = {
-            "current_locale": locale_name,
-            "switch_to_locale": "EN",
-            "switch_to_locale_tip": "Switch to English / 切换英文",
-            "visit_wiki": "更多信息: ",
-            "community": "社区",
-            "config_title": "仪表盘",
-
-            "common_add": "添加",
-            "common_login": "登录",
-            "common_save": "保存",
-            "common_enable": "启用",
-            "common_disable": "停用",
-            "common_unknown": "未知",
-            "common_refresh": "刷新",
-            "common_yes": "是",
-            "common_no": "否",
-            "common_select_all": "全选",
-            "common_unselect_all": "全否",
-            "operation_tip": "操作提示",
-            "common_reboot": "重启",
-            "common_reboot_later": "稍后重启",
-            "common_save_success": "保存成功",
-            "need_reboot_device_now": "现在重启设备?",
-            "reboot_reason_power_settings": "电源策略设置已保存。部分设置需要重启设备后才能生效。",
-            "rebooting_tip_message_0": "设备正在准备重启，请稍候 ...",
-            "rebooting_tip_message_1": "设备正在重启中，请稍后重连 Wi-Fi 或访问后台",
-
-            "nav_dashboard": "仪表盘",
-            "nav_settings": "设置",
-            "nav_modem": "短信/蜂窝网络",
-            "nav_statistics": "数据统计",
-            "nav_update": "更新",
-            "nav_reboot_device": "重启设备",
-            "nav_logout": "登出",
-            "nav_screen": "迷你屏幕",
-
-            "remember_login_status": "记住我",
-            "form_login_title": "请输入密码",
-            "form_login_title_tip": "系统用户 root 的密码",
-            
-            "login_error_invalid_credentials": "用户名或密码错误",
-            "login_error_too_many_attempts": "登录尝试次数过多，请 5 分钟后再试",
-            "login_error_security_token": "安全令牌无效，请重试",
-            "openwrt_tooltip": "使用您登录此页面的密码或默认密码登录到 OpenWrt",
-            "net_state_disabled": "已禁用",
-            "net_state_no_link": "已启用，未连接",
-            "net_state_connected": "已连接",
-            "net_state_active_wan": "当前上网接口",
-
-            "save_action_success_and_reboot": "设置成功，请重启",
-            "save_action_success": "设置成功",
-            "save_action_failed": "设置不成功，请稍后再试",
-
-            "tab_timers": "开关机策略",
-            "tab_device_control": "设备控制",
-            "tab_general_settings": "通用设置",
-            "tab_modem": "短信/蜂窝网络",
-            "no_wifi_info_config": "没有可以配置的 Wi-Fi 信息",
-            "toggle_wifi": "Wi-Fi 开关",
-            "i_agree_tos": "我同意",
-            "tos_text": "服务条款",
-            "coming_soon": "敬请期待",
-            "coming_soon_subtext": "此功能正在开发中，请稍后再试！",
-            
-            "sms_delete_single": "删除",
-            "sms_reply": "回复",
-            "sms_reply_to": "回复至：",
-            "sms_reply_placeholder": "回复内容 ...",
-            "sms_number_placeholder": "号码",
-            "sms_send_button": "发短信",
-            "sms_send": "发送",
-            "sms_from": "发件人",
-            "sms_to": "收件人",  
-            "sms_conversations": "会话",
-            "sms_traditional": "传统",
-            "sms_clear_all_button": "清空全部",
-            "sms_clear_all_confirm_title": "确认要清空所有短信吗？",
-            "sms_clear_all_confirm_message": "此操作将删除手机和设备中存储的所有短信，无法恢复。",
-            "sms_delete_confirm": "确认删除此条短信",
-            "sms_delete_confirm_title": "确认删除与",
-            "sms_download_all": "下载全部",
-            "sms_backup_all_big": "备份所有短信",
-            "sms_messages_count": "条消息",
-            "alert_message_too_long": "消息太长！最多70个字符。",
-            "alert_send_failed": "发送失败",
-            "alert_delete_failed": "删除失败",
-            "alert_network_error_send": "发送消息时网络错误",
-            "alert_network_error_delete": "删除消息时网络错误",
-            "alert_clear_sms_failed": "清空短信失败",
-            "alert_network_error_clear": "清空短信时网络错误",
-            "alert_delete_thread_failed": "删除会话消息失败",
-            "sms_type_message_placeholder": "输入消息...",
-            "sms_number_tip": "国内号码可以前面不用加 '+86'; 国际号码前面加国家代码，如: +1123456789",
-            "sms_refresh_tooltip": "刷新短信",
-            "sms_refreshing_tooltip": "正在刷新...",
-            "modem_refresh_tooltip": "刷新调制解调器信息",
-            "sim_not_available": "SIM卡不可用",
-            "sms_show_earlier": "显示更早消息",
-            
-            # Hook related alerts
-            "alert_hook_save_success": "Hook脚本保存成功",
-            "alert_hook_save_failed": "保存失败",
-            "alert_hook_network_error": "保存时网络错误",
-            "alert_cleanup_failed": "清理失败",
-            "alert_cleanup_error": "清理时出错",
-            "alert_test_api_error": "测试Hook历史API出错",
-            "alert_table_create_success": "数据表创建成功！现在可以再次测试验证",
-            "alert_table_create_failed": "创建数据表失败",
-            "alert_table_create_error": "创建数据表时出错",
-            "alert_test_record_success": "测试记录插入成功！点击刷新查看历史记录",
-            "alert_test_record_failed": "插入测试记录失败",
-            "alert_test_record_error": "插入测试记录时出错",
-            "alert_hook_detail_failed": "加载Hook执行详情失败",
-            "alert_hook_detail_error": "加载Hook执行详情时出错",
-            
-            # SMS alerts
-            "alert_number_invalid": "号码无效！",
-            "alert_send_failed_simple": "发送失败",
-            "alert_check_interval_invalid": "检查间隔无效！",
-            "alert_modem_reset_success": "所有短信已清除，调制解调器重置成功！",
-            "alert_modem_reset_failed": "调制解调器重置失败，请重试。",
-            "alert_cpin_invalid": "CPIN必须是1到4位数字或留空。",
-            
-            # Generic messages
-            "message_unknown_error": "未知错误",
-            
-            # Missing UI translations
-            "canceling": "正在取消",
-            "dev_upgrading": "开发版升级中",
-            "important": "重要",
-            "stage_complete": "完成阶段",
-            "stage_update": "更新阶段",
-            "stage_verify": "验证阶段",
-            "updating": "正在更新",
-            "uploading": "正在上传",
-            
-            # MCU related translations
-            "mcu_firmware_matches_dev_server": "MCU固件与开发服务器版本匹配"
-        }
-    else:  # Default to English
-        locales = {
-            "current_locale": locale_name,
-            "switch_to_locale": "中文",
-            "switch_to_locale_tip": "切换简体中文 / Switch to Simplified Chinese",
-            "visit_wiki": "More Info: ",
-            "community": "Community",
-            "config_title": "Dashboard",
-            "common_add": "Add",
-            "common_login": "Login",
-            "common_save": "Save",
-            "common_enable": "Enable",
-            "common_disable": "Disable",
-            "common_unknown": "Unknown",
-            "common_refresh": "Refresh",
-            "common_yes": "Yes",
-            "common_no": "No",
-            "common_select_all": "Select All",
-            "common_unselect_all": "Unselect All",
-            "operation_tip": "Operation tip",
-            "common_reboot": "Reboot",
-            "common_reboot_later": "Reboot later",
-            "common_save_success": "Saved successfully.",
-            "need_reboot_device_now": "Reboot device now?",
-            "reboot_reason_power_settings": "Power settings have been saved. A restart may be required for some changes to take effect.",
-            "rebooting_tip_message_0": "Device is preparing to restart, please wait...",
-            "rebooting_tip_message_1": "Device is restarting, please manually reconnect to Wi-Fi later if needed.",
-
-            "nav_dashboard": "Dashboard",
-            "nav_settings": "Settings",
-            "nav_modem": "SMS/Cellular",
-            "nav_statistics": "Statistics",
-            "nav_update": "Update",
-            "nav_reboot_device": "Reboot",
-            "nav_logout": "Logout",
-            "nav_screen": "Mini Screen",
-            
-            "remember_login_status": "Remember me",
-            "form_login_title": "Enter your Password",
-            "form_login_title_tip": "Password for system root user",
-            
-            "login_error_invalid_credentials": "Invalid username or password",
-            "login_error_too_many_attempts": "Too many login attempts. Please try again in 5 minutes.",
-            "login_error_security_token": "Security token invalid. Please try again.",
-            "openwrt_tooltip": "Login to OpenWrt using the same password you logged in with or default password",
-            "net_state_disabled": "Disabled",
-            "net_state_no_link": "Enabled, no link",
-            "net_state_connected": "Connected",
-            "net_state_active_wan": "Active internet connection",
-
-            "save_action_success": "Saved successfully, please reboot.",
-            "save_action_failed": "Save failed, please retry later.",
-
-            "tab_timers": "Startup and Shutdown Policy",
-            "tab_device_control": "Device Control",
-            "tab_general_settings": "General Settings",
-            "tab_modem": "SMS/Cellular",
-            "no_wifi_info_config": "No available Wi-Fi configuration.",
-            "toggle_wifi_ssid": "Toggle Wi-Fi",
-            "i_agree_tos": "I agree to the ",
-            "tos_text": "Terms of Service",
-            "coming_soon": "Coming Soon",
-            "coming_soon_subtext": "This feature is under development. Check back soon for updates!",
-            
-            "sms_delete_single": "Delete",
-            "sms_reply": "Reply",
-            "sms_reply_to": "Reply to:",
-            "sms_reply_placeholder": "Reply content ...",
-            "sms_number_placeholder": "Number",
-            "sms_send_button": "Send SMS",
-            "sms_send": "Send",
-            "sms_from": "From",
-            "sms_to": "To",
-            "sms_conversations": "Conversations", 
-            "sms_traditional": "Traditional",
-            "sms_clear_all_button": "Clear All",
-            "sms_clear_all_confirm_title": "Are you sure you want to clear all SMS messages?",
-            "sms_clear_all_confirm_message": "This will delete all messages stored in both the phone and the device and cannot be undone.",
-            "sms_delete_confirm": "Delete this message",
-            "sms_delete_confirm_title": "Are you sure you want to delete all messages with",
-            "sms_download_all": "Download All",
-            "sms_backup_all_big": "Backup All Messages",
-            "sms_messages_count": "messages",
-            "alert_message_too_long": "Message too long! Maximum 70 characters.",
-            "alert_send_failed": "Send failed",
-            "alert_delete_failed": "Failed to delete message",
-            "alert_network_error_send": "Network error while sending message",
-            "alert_network_error_delete": "Network error while deleting message",
-            "alert_clear_sms_failed": "Failed to clear SMS messages",
-            "alert_network_error_clear": "Network error while clearing SMS messages",
-            "alert_delete_thread_failed": "Failed to delete thread messages",
-            "sms_type_message_placeholder": "Type a message...",
-            "sms_number_tip": "Domestic numbers don't need '+86'; International numbers need country code, e.g: +1123456789",
-            "sms_refresh_tooltip": "Refresh SMS Messages",
-            "sms_refreshing_tooltip": "Refreshing...",
-            "modem_refresh_tooltip": "Refresh Modem Info",
-            "sim_not_available": "SIM N/A",
-            "sms_show_earlier": "Show Earlier Messages",
-            
-            # Hook related alerts
-            "alert_hook_save_success": "Hook script saved successfully",
-            "alert_hook_save_failed": "Save failed",
-            "alert_hook_network_error": "Network error while saving",
-            "alert_cleanup_failed": "Cleanup failed",
-            "alert_cleanup_error": "Error during cleanup",
-            "alert_test_api_error": "Error testing hook history API",
-            "alert_table_create_success": "Table created successfully! You can now test again to verify",
-            "alert_table_create_failed": "Failed to create table",
-            "alert_table_create_error": "Error creating table",
-            "alert_test_record_success": "Test record inserted! Click Refresh to see it in the history",
-            "alert_test_record_failed": "Failed to insert test record",
-            "alert_test_record_error": "Error inserting test record",
-            "alert_hook_detail_failed": "Failed to load hook execution details",
-            "alert_hook_detail_error": "Error loading hook execution details",
-            
-            # SMS alerts
-            "alert_number_invalid": "Number invalid!",
-            "alert_send_failed_simple": "Send failed",
-            "alert_check_interval_invalid": "Check interval invalid!",
-            "alert_modem_reset_success": "All SMS messages cleared and modem reset successfully!",
-            "alert_modem_reset_failed": "Modem reset failed, please try again.",
-            "alert_cpin_invalid": "CPIN must be 1 to 4 digits or left blank.",
-            
-            # Generic messages
-            "message_unknown_error": "Unknown error",
-            
-            # Missing UI translations
-            "canceling": "Canceling",
-            "dev_upgrading": "Dev Upgrading",
-            "important": "Important",
-            "stage_complete": "Complete Stage",
-            "stage_update": "Update Stage",
-            "stage_verify": "Verify Stage",
-            "updating": "Updating",
-            "uploading": "Uploading",
-            
-            # MCU related translations
-            "mcu_firmware_matches_dev_server": "MCU firmware matches dev server version"
-        }
+    locales = _locales.get_base_locales(locale_name)
     locales.update(oem_locales)
     
     # Cache the result
@@ -734,31 +1093,94 @@ def base_locales():
     
     return locales
 
+# Device-wide UI language, once someone has actually chosen one. Unset means
+# "nobody has chosen", not "English".
+UI_LANGUAGE_KEY = "ui_language"
+VALID_LOCALES = ("EN", "CN", "zh_CN")
+
+
+def explicit_locale():
+    """The language an operator picked for this device, or None.
+
+    Device-wide rather than per-session on purpose: the language is a property
+    of the appliance, not of whoever is looking at it. Keeping it in the session
+    meant two browsers open on the same page rendered in two different
+    languages, and a language chosen on the settings page reverted the moment
+    someone opened the UI from a different machine.
+    """
+    saved = pcat_config.get_user_config_key(UI_LANGUAGE_KEY, None)
+    return saved if saved in VALID_LOCALES else None
+
+
+def set_explicit_locale(locale):
+    """Persist an operator's language choice for the whole device."""
+    if locale not in VALID_LOCALES:
+        return False
+    pcat_config.set_user_config_key(UI_LANGUAGE_KEY, locale)
+    return True
+
+
 def current_locale():
-    # Check if locale is set in cookie first, then session
-    if 'locale' not in session:
-        # Check for saved language preference in browser cookie
-        saved_locale = request.cookies.get('pcat_lang')
-        if saved_locale in ['EN', 'CN', 'zh_CN']:
-            c_locale = saved_locale
-        else:
-            # Detect browser language preference
-            browser_lang = request.headers.get('Accept-Language', '').lower()
-            # Default to English unless Chinese is explicitly preferred
-            if 'zh' in browser_lang:
-                c_locale = "CN"  # Simplified Chinese
-            else:
-                c_locale = "EN"  # Default to English
-        # Cache the detected locale in session for subsequent requests
-        session["locale"] = c_locale
-    else:
-        c_locale = session["locale"]
-    return c_locale
+    """The language to render in, most deliberate signal first.
+
+    1. An explicit device-wide choice always wins, for every browser -- that is
+       what "set the language" is expected to mean on an appliance.
+    2. Otherwise a per-browser preference, which is all an unauthenticated
+       visitor to the login page can set (see switch_locale_action).
+    3. Otherwise the browser's own Accept-Language, evaluated per request so
+       two machines each get their own language until someone chooses one.
+
+    Nothing is cached into the session here. Caching the *detected* default was
+    what made the first request's Accept-Language stick to that browser forever,
+    so a later device-wide choice could not dislodge it.
+    """
+    chosen = explicit_locale()
+    if chosen:
+        return chosen
+
+    per_browser = session.get("locale") or request.cookies.get('pcat_lang')
+    if per_browser in VALID_LOCALES:
+        return per_browser
+
+    browser_lang = request.headers.get('Accept-Language', '').lower()
+    # Default to English unless Chinese is explicitly preferred
+    return "CN" if 'zh' in browser_lang else "EN"
 
 def is_chinese_locale():
     """Helper function to check if current locale is any Chinese variant"""
     locale = current_locale()
     return locale in ["CN", "zh_CN"]
+
+
+# Appearance follows the same rule as the language: "auto" is the absence of a
+# choice, not a third setting to store. Kept as a string rather than a
+# nullable field because "auto" is what the UI shows and what theme.js already
+# means by "follow prefers-color-scheme".
+UI_THEME_KEY = "ui_theme"
+VALID_THEMES = ("light", "dark")
+
+
+def explicit_theme():
+    """The appearance an operator picked for this device, or None.
+
+    Only light/dark are stored. "auto" is recorded by clearing the key, so a
+    device that has been set back to auto is indistinguishable from one nobody
+    ever touched -- which is what lets each browser follow its own
+    prefers-color-scheme again.
+    """
+    saved = pcat_config.get_user_config_key(UI_THEME_KEY, None)
+    return saved if saved in VALID_THEMES else None
+
+
+def set_explicit_theme(theme):
+    """Persist an appearance choice device-wide. "auto" clears it."""
+    if theme == "auto":
+        pcat_config.set_user_config_key(UI_THEME_KEY, None)
+        return True
+    if theme not in VALID_THEMES:
+        return False
+    pcat_config.set_user_config_key(UI_THEME_KEY, theme)
+    return True
 
 def login_required():
     if 'username' not in session:
@@ -771,34 +1193,205 @@ def api_auth_required(f):
         client_ip = request.remote_addr
         if client_ip in ['127.0.0.1', '::1', 'localhost']:
             return f(*args, **kwargs)
-        
+
         if 'username' not in session:
             return jsonify({"status": "failed", "message": "Login required"}), 401
-        
+
         return f(*args, **kwargs)
+    # Marker so the startup audit can tell a wrapped view from a raw one.
+    # NB: @api_auth_required must be placed BELOW @flask_app.route (i.e. route
+    # is the outermost/top decorator) or Flask registers the raw function and
+    # this wrapper never runs. audit_route_auth() enforces that at startup.
+    decorated_function._pcat_auth_wrapped = True
     return decorated_function
 
-@socketio.event
-def client_connected(message):
-    emit('connected_response', {'data': 'Welcome\n'})
 
-@socketio.event
+def api_session_strict(f):
+    """Like api_auth_required but WITHOUT the localhost bypass. That bypass
+    exists for the on-device mini display, which polls read-only status — it
+    must never extend to endpoints that delete files, drop shares or manage
+    credentials, where a localhost-originating request (SSRF, a compromised
+    local process) would inherit full authority. Stack BELOW @flask_app.route
+    exactly like api_auth_required."""
+    from functools import wraps
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'username' not in session:
+            return jsonify({"status": "failed", "message": "Login required"}), 401
+        return f(*args, **kwargs)
+    decorated_function._pcat_auth_wrapped = True
+    return decorated_function
+
+
+def dev_only(f):
+    """Gate a route to development runs. In production (dev_mode off and not
+    --skip-auth) the endpoint returns 404 as if it did not exist, keeping
+    debug/test surface out of shipped builds. Stack BELOW @flask_app.route and
+    ABOVE @api_auth_required so the 404 check runs first. Preserves the auth
+    marker so audit_route_auth() still sees the wrapped inner view."""
+    from functools import wraps
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not pcat_config.dev_mode_enabled():
+            from flask import abort
+            abort(404)
+        return f(*args, **kwargs)
+    # Carry through the auth marker if the wrapped view already has it, so the
+    # startup audit does not flag this route as unprotected.
+    if getattr(f, "_pcat_auth_wrapped", False):
+        decorated_function._pcat_auth_wrapped = True
+    return decorated_function
+
+
+# Views that are intentionally reachable without a session. Anything else that
+# is unwrapped trips the startup audit. Endpoint names are Flask view fn names.
+_PUBLIC_ENDPOINTS = frozenset({
+    "login_action", "logout_action", "static",
+    "oem_image", "tos_action", "switch_locale_action",
+    "advanced_admin_action",  # LuCI SSO for authed users; plain redirect otherwise
+    # Read-only no-login browse of samba shares the user explicitly flagged
+    # public (per-share pcat_http_public option); GET-only and path-jailed.
+    "public_share_action",
+})
+
+
+def audit_route_auth():
+    """Fail loudly at startup if any route's view is neither auth-wrapped nor
+    explicitly public. Catches the decorator-order footgun (auth above route =
+    silently inert) before it ships an unauthenticated endpoint."""
+    unprotected = []
+    for rule in flask_app.url_map.iter_rules():
+        view = flask_app.view_functions.get(rule.endpoint)
+        if view is None:
+            continue
+        if rule.endpoint in _PUBLIC_ENDPOINTS:
+            continue
+        if getattr(view, "_pcat_auth_wrapped", False):
+            continue
+        # allow views that gate auth inline (they close over the session check)
+        src = ""
+        try:
+            import inspect
+            src = inspect.getsource(view)
+        except Exception:
+            pass
+        # _socket_authed() is the event-bus pair's inline gate (skip_auth or a
+        # session), the same check the socket.io handshake used before it.
+        if ("'username' not in session" in src or "_wifi_wan_auth_ok" in src
+                or "_socket_authed()" in src):
+            continue
+        unprotected.append((rule.endpoint, sorted(rule.methods - {"HEAD", "OPTIONS"})))
+    if unprotected:
+        msg = "SECURITY: {} route(s) reachable without auth: {}".format(
+            len(unprotected), unprotected)
+        pcat_logger.logger.error(msg)
+        print("!!!", msg)
+    return unprotected
+
+def _socket_authed():
+    """Session-based auth check for event-bus handlers. Bus commands share the
+    Flask session cookie, so every handler that mutates state or reads
+    privileged data must gate on this. Localhost is NOT bypassed here: the
+    mini display polls plain HTTP GETs and never drives the bus, so there is no
+    legitimate same-host client to exempt."""
+    return pcat_config.skip_auth or ('username' in session)
+
+
+@flask_app.route("/api/v1/events.json")
+def events_poll_action():
+    """Server→client event stream, as a short poll.
+
+    `since` is the last sequence number this client saw; omit it on the first
+    call to start at the current end of the buffer rather than replay history.
+    `rooms` is the comma-separated list of rooms the client was told to join.
+
+    This returns immediately in every case -- that is the whole point of the
+    endpoint. Blocking here to wait for an event is what socket.io did, and
+    with granian's fixed --blocking-threads pool it starved the server (issue
+    #113); see pcat_util/event_bus."""
+    if not _socket_authed():
+        return jsonify({"status": "failed", "message": "Unauthorized"}), 403
+
+    raw_since = request.args.get("since")
+    try:
+        since = int(raw_since) if raw_since not in (None, "") else None
+    except ValueError:
+        since = None
+    rooms = [r for r in (request.args.get("rooms") or "").split(",") if r]
+
+    cursor, events, resync = event_bus.poll(since, rooms)
+    return jsonify({"cursor": cursor, "events": events, "resync": resync})
+
+
+@flask_app.route("/api/v1/events/emit.json", methods=["POST"])
+def events_emit_action():
+    """Client→server command dispatch (the old socket.io emit direction).
+
+    Replies the handler addressed to its caller, plus any rooms it joined, come
+    back in this response rather than over the stream: they belong to this
+    client alone and must not reach anyone else's poll."""
+    if not _socket_authed():
+        return jsonify({"status": "failed", "message": "Unauthorized"}), 403
+
+    body = request.get_json(silent=True) or {}
+    name = body.get("event")
+    handler = _EVENT_HANDLERS.get(name)
+    if handler is None:
+        return jsonify({"status": "failed", "message": "Unknown event"}), 404
+
+    # Where the buffer stood before the handler ran. A handler that subscribes
+    # its caller to a room (terminal_open) usually also starts producing for
+    # that room immediately -- the PTY reader publishes the shell prompt within
+    # milliseconds. A poll already in flight would return a cursor past that
+    # prompt while still filtering it out, and the client would never see it.
+    # Handing back the pre-dispatch cursor lets a client that just joined rewind
+    # to it; the client de-duplicates by sequence number, so the broadcasts it
+    # already saw in between are not delivered twice.
+    join_from = event_bus.cursor()
+    _dispatch_ctx.replies = []
+    _dispatch_ctx.join = []
+    try:
+        handler(body.get("data") or {})
+        return jsonify({"status": "ok",
+                        "replies": _dispatch_ctx.replies,
+                        "join": _dispatch_ctx.join,
+                        "join_from": join_from})
+    finally:
+        # Never leave the scratch behind on a pooled thread: the next request
+        # to land on it would otherwise collect this one's replies.
+        _dispatch_ctx.replies = None
+        _dispatch_ctx.join = None
+
+
+@bus_event
+def client_connected(message):
+    if not _socket_authed():
+        return
+    reply('connected_response', {'data': 'Welcome\n'})
+
+@bus_event
 def request_install(message):
+    if not _socket_authed():
+        return
     filename = message.get("filename")
     global install_thread
     with thread_lock:
         if install_thread is None:
-            install_thread = socketio.start_background_task(background_install_thread, "local", filename)
-    emit('log_response', {'data': "Start install {filename}\n".format(filename = filename)})
+            install_thread = _start_background_task(background_install_thread, "local", filename,
+                                                    bool(message.get("verify_tls")))
+    reply('log_response', {'data': "Start install {filename}\n".format(filename = filename)})
 
-@socketio.event
+@bus_event
 def request_install_package(message):
+    if not _socket_authed():
+        return
     package = message.get("package")
     global install_thread
     with thread_lock:
         if install_thread is None:
-            install_thread = socketio.start_background_task(background_install_thread, "remote", package)
-    emit('log_response', {'data': "Start download {package}\n".format(package = package)})
+            install_thread = _start_background_task(background_install_thread, "remote", package,
+                                                    bool(message.get("verify_tls")))
+    reply('log_response', {'data': "Start download {package}\n".format(package = package)})
 
 @flask_app.route("/tos")
 def tos_action():
@@ -810,163 +1403,14 @@ def home_action():
         return redirect(f"/login?next={request.path}")
 
     c_locale = current_locale()
-    if c_locale == "CN":
-        locales = {
-            "card_main_status": "主要状态",
-            "card_system": "系统",
-            "card_connection": "连接",
-            "card_hardware": "硬件",
-
-            "connection": "连接",
-            "connection_unknown": "未知",
-            "connection_mobile": "蜂窝网络",
-            "connection_wired": "有线",
-            "connection_none": "无",
-            "connected": "已连接",
-            "disconnected": "未连接",
-            "disabled": "已禁用",
-            "unknown": "未知",
-            "wan_ethernet": "WAN (以太网)",
-            "wan_cellular": "WAN (蜂窝网络)",
-            "wwan_powered_off": "已关闭",
-            "lan_ethernet": "LAN (以太网)",
-            "signal_strength_tooltip": "信号强度百分比",
-            "dl_up_speed": "上传/下载",
-            "uptime": "开机时长",
-            "uptime_day": "天",
-            "uptime_days": "天",
-            "uptime_hour": "小时",
-            "uptime_hours": "小时", 
-            "uptime_minute": "分钟",
-            "uptime_minutes": "分钟",
-            "uptime_second": "秒",
-            "uptime_seconds": "秒",
-            "uptime_up": "运行",
-
-            "hostname": "主机名",
-            "model": "型号",
-            "firmware_version": "MCU 版本",
-            "kernel_version": "内核版本",
-
-            "ip_address": "公网 IP 地址",
-            "ipv6_address": "公网 IPv6",
-            "wan_ip": "WAN IP 地址",
-            "dhcp_clients": "DHCP 客户端",
-            "wifi_clients": "Wi-Fi 客户端",
-            "modem_mode": "网络模式",
-
-            "battery_status": "电池电量",
-            "battery_voltage": "电池电压",
-            "battery_vcw": "电池状态",
-            "battery_current": "电池电流",
-            "battery_wattage": "电池功率",
-            "battery_charging": "充电中",
-            "battery_discharging": "电池供电",
-            "battery_full": "电池充满",
-            "battery_remaining_discharge_time": "剩余放电时间",
-            "battery_remaining_charge_time": "充至90%剩余时间",
-            "charge_voltage": "输入电压",
-            "board_temperature": "主板温度",
-            "sd_card": "SD 卡",
-            "sim_card": "SIM 卡",
-            "sd_not_exist": "不存在",
-            "sd_exist": "已插入",
-            "openwrt_version": "OpenWRT 版本",
-            "machine_sn": "设备序列号",
-            "device_type_onboard": "板载",
-            "device_type_pcie": "PCIE",
-            "device_type_builtin": "内置",
-            "device_type_unknown": "未知",
-            "device_edition_home": "家庭版",
-            "device_edition_cellular": "移动版",
-            "wifi": "Wi-Fi",
-            "na": "不适用"
-        }
-    else:
-        locales = {
-            "card_main_status": "Main Status",
-            "card_system": "System",
-            "card_connection": "Connection",
-            "card_hardware": "Hardware",
-
-            "connection": "Connection",
-            "connection_unknown": "Unknown",
-            "connection_mobile": "Mobile",
-            "connection_wired": "Wired",
-            "connection_none": "None",
-            "connected": "Connected",
-            "disconnected": "Disconnected",
-            "disabled": "Disabled",
-            "unknown": "Unknown",
-            "wan_ethernet": "WAN (Ethernet)",
-            "wan_cellular": "WAN (Cellular)",
-            "wwan_powered_off": "Powered Off",
-            "lan_ethernet": "LAN (Ethernet)",
-            "signal_strength_tooltip": "Signal strength percentage",
-            "dl_up_speed": "Upload/Download",
-            "uptime": "Uptime",
-            "uptime_day": "day",
-            "uptime_days": "days",
-            "uptime_hour": "hour",
-            "uptime_hours": "hours", 
-            "uptime_minute": "minute",
-            "uptime_minutes": "minutes",
-            "uptime_second": "second",
-            "uptime_seconds": "seconds",
-            "uptime_up": "up",
-
-            "hostname": "Hostname",
-            "model": "Model",
-            "firmware_version": "MCU Version",
-            "kernel_version": "Kernel Version",
-
-            "ip_address": "Public IP Address",
-            "ipv6_address": "Public IPv6",
-            "wan_ip": "WAN IP Address",
-            "dhcp_clients": "DHCP Clients",
-            "wifi_clients": "Wi-Fi Clients",
-            "modem_mode": "Modem Mode",
-
-            "battery_status": "Battery SoC",
-            "battery_voltage": "Battery Voltage",
-            "battery_vcw": "Battery Status",
-            "battery_current": "Battery Current",
-            "battery_wattage": "Battery Wattage",
-            "battery_charging": "Charging",
-            "battery_discharging": "On Battery",
-            "battery_full": "Full",
-            "battery_remaining_discharge_time": "Remaining Battery Time",
-            "battery_remaining_charge_time": "Charge to 90%",
-            "charge_voltage": "Input Voltage",
-            "board_temperature": "Motherboard Temperature",
-            "sd_card": "SD Card",
-            "sim_card": "SIM Card",
-            "sd_not_exist": "Not Detected",
-            "sd_exist": "Present",
-            "openwrt_version": "OpenWRT Version",
-            "machine_sn": "Device S/N",
-            "device_type_onboard": "Onboard",
-            "device_type_pcie": "PCIE",
-            "device_type_builtin": "Builtin",
-            "device_type_unknown": "Unknown",
-            "device_edition_home": "Home",
-            "device_edition_cellular": "Cellular",
-            "wifi": "Wi-Fi",
-            "na": "N/A"
-        }
+    locales = _locales.get_locales("home", c_locale)
 
     locales.update(base_locales())
     
-    # Get remembered password for OpenWrt form
-    remembered_password = session.get('remembered_password', None)
-    if not remembered_password:
-        # Try to get from config or use None (will default to 'photonicat' in template)
-        remembered_password = getattr(pcat_config, 'default_luci_password', None)
-        
-    return render_template(nt.index_file_name, locales = locales, board_name = board_name, remembered_password = remembered_password)
+    return render_template(nt.index_file_name, locales = locales, board_name = board_name)
 
-@api_auth_required
 @flask_app.route("/api/v1/board_name")
+@api_auth_required
 def board_name_action():
     return board_name
 
@@ -980,13 +1424,24 @@ def switch_locale_action():
     else:  # CN or any other
         new_locale = "EN"
     
-    # Update session
+    # Update session (the per-user UI language toggle; safe to allow pre-login
+    # so the login page itself is translatable).
     session["locale"] = new_locale
 
-    # Sync language to OpenWrt LuCI setting
-    luci_lang = "zh_cn" if new_locale == "CN" else "en"
-    _openwrt_uci_set(f"luci.main.lang={luci_lang}")
-    _openwrt_uci_commit("luci")
+    # Persist device-wide, and sync the OpenWrt LuCI setting, only for an
+    # authenticated user. Both are persistent writes, so an unauthenticated (or
+    # cross-site GET) caller must not be able to flip the language for the whole
+    # appliance. See _PUBLIC_ENDPOINTS: this route stays public for the
+    # session/cookie flip, but the privileged writes are gated here.
+    #
+    # That gate is also why the session/cookie above still exists: it is all a
+    # visitor on the login page can set, and it applies only until an operator
+    # makes a real choice, which then wins everywhere (see current_locale).
+    if 'username' in session:
+        set_explicit_locale(new_locale)
+        luci_lang = "zh_cn" if new_locale == "CN" else "en"
+        _openwrt_uci_set(f"luci.main.lang={luci_lang}")
+        _openwrt_uci_commit("luci")
 
     # Create response and set cookie to remember preference
     # Redirect back to the referring page instead of always going to /
@@ -995,6 +1450,27 @@ def switch_locale_action():
     response = make_response(redirect(redirect_url))
     response.set_cookie('pcat_lang', new_locale, max_age=365*24*60*60)  # 1 year
     return response
+
+@flask_app.route("/api/v1/theme.json", methods=["POST"])
+@api_session_strict
+def save_theme_api():
+    """Persist the appearance picked from the nav menu.
+
+    Separate from the general-settings save because those buttons apply
+    instantly and the page has no Save step. Session-strict rather than
+    api_auth_required: this is a persistent device-wide write, and the
+    localhost bypass exists for the mini display's read-only polling, which has
+    no business changing how everyone's browser looks.
+
+    An unauthenticated caller (the login page's theme cycle) simply gets a 401
+    and keeps its localStorage-only preference, which is the intended split.
+    """
+    data = request.get_json(silent=True) or {}
+    theme = data.get("theme")
+    if not set_explicit_theme(theme):
+        return jsonify({"status": "failed", "message": "Invalid theme"}), 400
+    return jsonify({"status": "ok", "theme": theme})
+
 
 # ISP lookup cache - MCC/MNC data rarely changes
 isp_lookup_cache = {}
@@ -1049,6 +1525,55 @@ def get_isp_info_from_mccmnc(mccmnc):
     isp_lookup_cache[mccmnc] = result
     return result
 
+def _cell_tier_label():
+    """"4G" or "5G" for the fitted modem (EM05 is 4G-only)."""
+    try:
+        return "4G" if pc_app.modem_client.is_em05() else "5G"
+    except Exception:
+        return "5G"
+
+
+def get_network_mode_label(network_mode):
+    """Human-readable label for the user's "Internet via" selection.
+
+    Mirrors the web UI's short labels (see locales network_mode_*_short) so the
+    device mini-display can render the mode verbatim without duplicating the
+    mapping. "auto" is shown as the failover chain Eth/4G or Eth/5G; the
+    cellular tier follows the modem's capability (EM05 is 4G-only).
+
+    In "priority" mode the label is the whole enabled failover chain in table
+    order, e.g. "Eth/WiFi/5G" — every enabled slot, not just the two the legacy
+    modes knew about. Slot names are kept short on purpose: "Eth/WiFi/5G" is
+    103px in the mini-display's 15px Orbitron face, the widest string that
+    still fits page 4's 106px value column without falling back to a ticker.
+
+    Uses ASCII-only separators ("/") rather than an arrow: the mini-display
+    renders with the Latin-only Orbitron font, which has no "→" glyph.
+    """
+    if network_mode == "priority":
+        names = {"wan": "Eth", "wifi": "WiFi", "cellular": _cell_tier_label()}
+        try:
+            chain = [names[e["id"]] for e in wan_manager.get_priority()
+                     if e["enabled"] and e["id"] in names]
+        except Exception as e:
+            pcat_logger.logger.warning(
+                "network_mode_label: priority table unreadable: {}".format(e))
+            return "Eth/{}".format(_cell_tier_label())
+        if not chain:
+            return "All Off"
+        if len(chain) == 1:
+            # Single uplink: keep the legacy phrasing ("Eth Only"/"Cell Only")
+            # a device migrating from eth_only/cell_only used to show.
+            return "Cell Only" if chain[0] in ("4G", "5G") else chain[0] + " Only"
+        return "/".join(chain)
+    if network_mode == "auto":
+        return "Eth/{}".format(_cell_tier_label())
+    return {
+        "eth_only": "Eth Only",
+        "cell_only": "Cell Only",
+        "all_off": "All Off",
+    }.get(network_mode, "Eth/{}".format(_cell_tier_label()))
+
 # Dashboard data caching for efficient data sharing and performance
 dashboard_cache = {
     'data': None,
@@ -1056,7 +1581,8 @@ dashboard_cache = {
     'lock': threading.Lock(),
     'generation_time': 0  # Track data generation time for performance monitoring
 }
-DASHBOARD_CACHE_DURATION = 5  # seconds - balance between freshness and performance
+DASHBOARD_CACHE_DURATION = 12  # seconds - must exceed the mini display's 10s
+# poll interval, or every poll misses the cache and regenerates the dashboard
 
 # Cache for expensive operations with longer duration
 expensive_ops_cache = {
@@ -1068,7 +1594,7 @@ expensive_ops_cache = {
     'onboard_wifi_enabled': {'value': True, 'timestamp': 0},
     'pcie_wifi_enabled': {'value': False, 'timestamp': 0},
 }
-EXPENSIVE_OPS_CACHE_DURATION = 15  # seconds
+EXPENSIVE_OPS_CACHE_DURATION = 5  # seconds - keeps active_egress (the LCD's top-bar icon source) fresh
 WIFI_OPS_CACHE_DURATION = 60  # seconds
 
 # Network interfaces cache for performance optimization
@@ -1108,67 +1634,18 @@ def get_cached_expensive_op(op_name, fetch_func):
         pcat_logger.logger.error(f"Error in dashboard operation {op_name}: {e}")
         return cache_entry['value']  # Return cached value on error
 
-def batch_uci_get(keys):
-    """Batch UCI get operations for better performance"""
-    import subprocess
-
-    # Use uci export to get all values at once if possible
-    try:
-        # Build single uci command with multiple gets
-        cmd = ["uci", "batch"]
-        batch_commands = [f"get {key}" for key in keys]
-
-        result = subprocess.run(cmd, input='\n'.join(batch_commands),
-                              capture_output=True, text=True, timeout=5)
-
-        if result.returncode == 0:
-            values = result.stdout.strip().split('\n')
-            return dict(zip(keys, values))
-        else:
-            # Fallback to individual calls on batch failure
-            results = {}
-            for key in keys:
-                try:
-                    value = pc_app.uci_get(key)
-                    results[key] = value
-                except:
-                    results[key] = ""
-            return results
-
-    except Exception as e:
-        pcat_logger.logger.debug(f"UCI batch operation failed, falling back to individual calls: {e}")
-        # Fallback to individual calls
-        results = {}
-        for key in keys:
-            try:
-                value = pc_app.uci_get(key)
-                results[key] = value
-            except:
-                results[key] = ""
-        return results
-
 def get_network_interfaces_data_optimized():
-    """Optimized version of network interfaces data with batched UCI operations"""
-
-    # Define all UCI keys we need to query at once
-    uci_keys = [
-        "network.wan.disabled",
-        "network.wan.device",
-        "network.wwan_lte.disabled",
-        "network.wwan_5g.disabled",
-        "network.wwan_fm350.disabled",
-        "wireless.radio0.disabled",
-        "wireless.radio1.disabled",
-        "network.@device[0].name",
-        "network.@device[0].ports",
-        "network.@device[1].name",
-        "network.@device[1].ports",
-        "network.@device[2].name",
-        "network.@device[2].ports"
-    ]
+    """Network interfaces data. The is_* helpers read a shared cached
+    'uci show' snapshot (see pcat_util.openwrt.uci_show_dict), so this costs
+    at most one uci fork per config per cache window instead of one per key."""
 
     # Process WAN interface status
     lan_enabled = pc_app.is_lan_interface_enabled()
+    lan_mode = pc_app.get_lan_mode()
+    wan_mode = pc_app.get_wan_mode()
+    # Opening this page is a good hint a cable is about to go in; collapse the
+    # power-save backoff so the port is probed now rather than up to 60s later.
+    pc_app.kick_eth_powersave()
     wan_enabled = pc_app.is_wan_interface_enabled()
     onboard_wifi_enabled = pc_app.is_onboard_wifi_enabled()
     pcie_wifi_enabled = pc_app.is_pcie_wifi_enabled()
@@ -1189,11 +1666,33 @@ def get_network_interfaces_data_optimized():
     # Which interface actually holds the default route (wan/lan/mobile/"") — used
     # to put the green "active" underline on exactly one icon.
     active_egress = pc_app.get_active_egress()
+    # In Smart WAN mode the onboard radio is retuned as the upstream STA uplink,
+    # so its own AP is parked and is_onboard_wifi_enabled() reports False. That
+    # would otherwise render the header WiFi icon as "disabled" (gray + red
+    # cross). This flag lets the UI show it as a live relay instead.
+    # Which *physical* radio carries the STA matters for the header icons: the
+    # upstream radio is user-selectable (onboard or PCIe), so the relay/green
+    # state must land on the correct one of the two WiFi icons, not always the
+    # onboard one. Resolve the class by device path (radioN numbering is not
+    # stable), same as wifi_wan/command_parser do.
+    wifi_sta_radio = ""  # "onboard" | "pcie" | "" (no active STA)
+    try:
+        wifi_sta_active = wifi_wan.is_active()
+        if wifi_sta_active:
+            sta_radio = wifi_wan.active_sta_radio()  # "radio0"/"radio1"/None
+            if sta_radio:
+                # _radio_by_class matches by device path (radioN numbering is
+                # not stable), so this stays correct regardless of ordering.
+                wifi_sta_radio = "pcie" if sta_radio == wifi_wan._radio_by_class("pcie") else "onboard"
+    except Exception:
+        wifi_sta_active = False
 
     return {
         "wan_enabled": wan_enabled,
+        "wan_mode": wan_mode,
         "sim_enabled": wwan_enabled,
         "lan_enabled": lan_enabled,
+        "lan_mode": lan_mode,
         "onboard_wifi_enabled": onboard_wifi_enabled,
         "pcie_wifi_enabled": pcie_wifi_enabled,
         "lan_exists": lan_exists,
@@ -1203,7 +1702,9 @@ def get_network_interfaces_data_optimized():
         "wan_carrier": wan_carrier,
         "lan_carrier": lan_carrier,
         "network_route_mode": network_route_mode,
-        "active_egress": active_egress
+        "active_egress": active_egress,
+        "wifi_sta_active": wifi_sta_active,
+        "wifi_sta_radio": wifi_sta_radio
     }
 
 def get_network_interfaces_data():
@@ -1230,8 +1731,10 @@ def get_network_interfaces_data():
             response_json = {
                 "network_mode": network_mode,
                 "wan_enabled": interfaces_data["wan_enabled"],
+                "wan_mode": interfaces_data.get("wan_mode", "auto"),
                 "sim_enabled": interfaces_data["sim_enabled"],
                 "lan_enabled": interfaces_data["lan_enabled"],
+                "lan_mode": interfaces_data.get("lan_mode", "auto"),
                 "onboard_wifi_enabled": interfaces_data["onboard_wifi_enabled"],
                 "pcie_wifi_enabled": interfaces_data["pcie_wifi_enabled"],
                 "energy_saving_mode": energy_saving_mode,
@@ -1242,7 +1745,9 @@ def get_network_interfaces_data():
                 "wan_carrier": interfaces_data["wan_carrier"],
                 "lan_carrier": interfaces_data["lan_carrier"],
                 "network_route_mode": interfaces_data["network_route_mode"],
-                "active_egress": interfaces_data["active_egress"]
+                "active_egress": interfaces_data["active_egress"],
+                "wifi_sta_active": interfaces_data["wifi_sta_active"],
+                "wifi_sta_radio": interfaces_data["wifi_sta_radio"]
             }
 
             # Calculate and log performance metrics
@@ -1284,18 +1789,65 @@ def get_network_interfaces_data():
                     "wan_carrier": False,
                     "lan_carrier": False,
                     "network_route_mode": "",
-                    "active_egress": ""
+                    "active_egress": "",
+                    "wifi_sta_active": False,
+                    "wifi_sta_radio": ""
                 }
+
+def _overlay_live_link_fields(dashboard):
+    """Patch cheap, link-sensitive fields onto a (possibly cached) dashboard
+    payload. Carrier is a sysfs read, active egress is memoized for a few
+    seconds, and the public/local WAN IPs live in the App thread's memory —
+    none of these need the full 12s dashboard regen, but without this overlay
+    the homepage can keep showing "ethernet connected" / a public IP for up
+    to ~12s after the cable is yanked (homepage polls every 4s, cache is 12s).
+    Returns a shallow copy so we never mutate the stored cache blob in place."""
+    if not dashboard:
+        return dashboard
+    data = dict(dashboard)
+    try:
+        data["wan_carrier"] = pc_app.does_wan_have_carrier()
+        data["lan_carrier"] = pc_app.does_lan_have_carrier()
+        data["active_egress"] = pc_app.get_active_egress()
+        # No usable uplink: force-clear IPs in the response even if the App
+        # thread has not yet run its 30s flush — the UI must not show a public
+        # address when the cable is out and nothing else is carrying traffic.
+        if not data["active_egress"]:
+            data["wan_ip"] = ""
+            data["wan_ipv6"] = ""
+            data["local_wan_ip"] = ""
+        else:
+            data["wan_ip"] = pc_app.main_app.wan_ip
+            data["wan_ipv6"] = pc_app.main_app.wan_ipv6
+            data["local_wan_ip"] = pc_app.main_app.local_wan_ip
+        # Connection class from the daemon (wired/mobile/none); cheap memory read.
+        data["connection"] = pc_app.socket_client.network_route_mode
+        data["network_route_mode"] = pc_app.socket_client.network_route_mode
+    except Exception as e:
+        pcat_logger.logger.debug(f"live link overlay failed: {e}")
+    return data
+
+
+def modem_hw_present():
+    """Is a 4G/5G module physically fitted? The modem AT tty node only exists
+    while a module is present and powered. Rfkill-ing WWAN off also removes
+    the tty, so treat powered-off as "present" and let the existing
+    powered-off notice cover that state instead of a false "no modem"."""
+    if pc_app.modem_client.modem_uart_connected or os.path.exists(pcat_config.modem_dev):
+        return True
+    return not pc_app.is_wwan_powered()
+
 
 def get_dashboard_data():
     """Get dashboard data with caching to enable single refresh sharing"""
     with dashboard_cache['lock']:
         current_time = time.time()
         
-        # Return cached data if still valid
+        # Return cached data if still valid — but always overlay live link /
+        # public-IP fields so unplug is visible on the next homepage poll.
         if (dashboard_cache['data'] is not None and 
             current_time - dashboard_cache['timestamp'] < DASHBOARD_CACHE_DURATION):
-            return dashboard_cache['data']
+            return _overlay_live_link_fields(dashboard_cache['data'])
         
         # Start performance monitoring
         start_time = time.time()
@@ -1338,6 +1890,9 @@ def get_dashboard_data():
 
         # Main dashboard data collection timing
         data_start = time.time()
+        _wifi_wan_active = wifi_wan.is_active()
+        _wifi_wan_state = (get_cached_expensive_op('wifi_wan_state', wifi_wan.get_state)
+                           if _wifi_wan_active else {})
         dashboard = {
             "connection": pc_app.socket_client.network_route_mode, 
             "down_speed": pc_app.main_app.net_download_speed,
@@ -1362,10 +1917,25 @@ def get_dashboard_data():
             "wan_ip": pc_app.main_app.wan_ip,
             "wan_ipv6": pc_app.main_app.wan_ipv6,
             "local_wan_ip": pc_app.main_app.local_wan_ip,
-            "carrier": pc_app.modem_client.basic.get("cell_tech", "") or pc_app.socket_client.modem_mode,
+            "carrier": usable_cell_tech(pc_app.modem_client.basic.get("cell_tech", "")) or pc_app.socket_client.modem_mode,
             "dhcp_clients_count": get_cached_expensive_op('dhcp_clients_count', pc_app.main_app.get_dhcp_clients_count),
-            "wifi_clients_count": get_cached_expensive_op('wifi_clients_count', command_parser.get_wifi_clients_count),
+            # Display coercion only: the shutdown logic reads the raw count and
+            # must keep seeing None (unknown) rather than 0 (empty).
+            "wifi_clients_count": get_cached_expensive_op(
+                'wifi_clients_count',
+                lambda: command_parser.get_wifi_clients_count() or 0),
             "wifi_interfaces": get_cached_expensive_op('wifi_interfaces', lambda: command_parser.parse_uci_show_wireless(False)),
+            "wifi_wan_active": _wifi_wan_active,
+            "wifi_wan_state": _wifi_wan_state,
+            # Fields below are for the device mini-display (photonicat2_display_go):
+            # the active egress lets it pick the right top-bar icon (wired / wifi /
+            # mobile), the Smart WAN signal feeds a WiFi signal bar, and
+            # network_mode is the user's "Internet via" selection.
+            "active_egress": get_cached_expensive_op('active_egress', pc_app.get_active_egress),
+            "network_mode": pcat_config.get_network_mode(),
+            "network_mode_label": get_network_mode_label(pcat_config.get_network_mode()),
+            "wifi_signal": _wifi_wan_state.get("signal"),
+            "wifi_signal_percent": _wifi_wan_state.get("signal_percent"),
             "on_charging": pc_app.socket_client.on_charging,
             "charge_percent": pc_app.socket_client.charge_percent,
             "voltage": pc_app.socket_client.battery_voltage,
@@ -1375,6 +1945,9 @@ def get_dashboard_data():
             "modem_signal_strength": signal_strength_pct,
             "isp_name": pc_app.socket_client.isp_name,
             "sd_state": pc_app.sd_card_status(),
+            "sd_info": get_cached_expensive_op('sd_info', pc_app.sd_card_info),
+            "hw_variant": get_cached_expensive_op('hw_variant', pc_app.hw_variant),
+            "nvme": get_cached_expensive_op('nvme_status', pc_app.nvme_status),
             "sim_state": pc_app.modem_client.get_inferred_sim_state(pc_app.socket_client.sim_state),
 
             # Additional fields for status bar compatibility
@@ -1383,7 +1956,8 @@ def get_dashboard_data():
             "system_status": getattr(pc_app.main_app, 'system_status', 0),
             "carmode": pc_app.socket_client.charger_on_auto_start_mode,
             "network_route_mode": pc_app.socket_client.network_route_mode,
-            "modem_mode": pc_app.socket_client.modem_mode or pc_app.modem_client.basic.get("cell_tech", ""),
+            "modem_mode": pc_app.socket_client.modem_mode or usable_cell_tech(pc_app.modem_client.basic.get("cell_tech", "")),
+            "modem_installed": modem_hw_present(),
 
             # Idle shutdown monitoring status
             "idle_shutdown_enabled": getattr(pc_app.main_app, 'idle_shutdown_enabled', False),
@@ -1421,7 +1995,10 @@ def get_dashboard_data():
 
         # Determine active power mode (1 of 4, mutually exclusive)
         saved_power_mode = pcat_config.get_power_mode()
-        if saved_power_mode == "direct_power":
+        # Direct power is a Photonicat 2 MCU power-on mode; on a Photonicat 1
+        # a stored "direct_power" (config carried over) means nothing and the
+        # detection falls through to what the PMU is actually doing.
+        if saved_power_mode == "direct_power" and is_photonicat2:
             active_power_mode = "force_power_mode"
             power_mode_remaining_minutes = 0
             car_countdown = 0
@@ -1497,8 +2074,14 @@ def get_dashboard_data():
                 battery_soc = int(open("/sys/class/power_supply/battery/capacity", "r").read().strip())
                 battery_status = pc_app.get_battery_charge_discharge_remain_time()
                 remaining_time = battery_status.get("remaining_time")
-                # Fallback: calculate from sysfs current if primary method failed
-                if remaining_time is None and battery_current_a != 0:
+                # Fallback: calculate from sysfs current if primary method failed.
+                # Skipped while settling: for the first seconds after a DC plug/
+                # unplug the primary estimator deliberately withholds a number
+                # (power_now is still swinging), and this fallback reads the same
+                # unsettled current -- computing it here would put back exactly
+                # the false "0:10 left" the settling window exists to suppress.
+                if (remaining_time is None and battery_current_a != 0
+                        and not battery_status.get("settling")):
                     try:
                         energy_full_uWh = int(open("/sys/class/power_supply/battery/energy_full_design", "r").read().strip())
                         energy_full_Wh = energy_full_uWh / 1000000
@@ -1666,8 +2249,8 @@ def get_dashboard_data():
         
         return dashboard
 
-@api_auth_required
 @flask_app.route("/api/v1/dashboard.json", methods=['GET'])
+@api_auth_required
 def dashboard_json():
     # Get request type parameter
     request_type = request.args.get('type', 'full')
@@ -1688,6 +2271,7 @@ def dashboard_json():
             "carmode": dashboard_data["carmode"],
             "network_route_mode": dashboard_data["network_route_mode"],
             "modem_mode": dashboard_data["modem_mode"],
+            "modem_installed": dashboard_data.get("modem_installed", True),
             "sim_state": dashboard_data["sim_state"],
             "connection": dashboard_data["connection"],
             "wan_ip": dashboard_data["wan_ip"],
@@ -1714,8 +2298,8 @@ def performance_monitoring_page():
     locales = base_locales()
     return render_template("performance.html", locales=locales)
 
-@api_auth_required
 @flask_app.route("/api/v1/dashboard/performance.json", methods=['GET'])
+@api_auth_required
 def dashboard_performance():
     """Get dashboard performance metrics for monitoring and optimization"""
     performance_data = {
@@ -1753,98 +2337,174 @@ def dashboard_performance():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
+from html.parser import HTMLParser
+
+# Production firmware download server (Caddy auto-index + latest_image.txt).
+PROD_FIRMWARE_BASE_URL = "https://dl.photonicat.com/images/photonicat2/openwrt/"
+# Photonicat 1 (rk3568) images live one directory over on both servers. The
+# per-board split matters: a sysupgrade image for the other board must never
+# be offered, so every firmware URL goes through the two helpers below.
+PROD_FIRMWARE_BASE_URL_PCAT1 = "https://dl.photonicat.com/images/photonicat/openwrt/"
+DEV_FIRMWARE_DIR = "rk3576-photonicat2-openwrt"
+DEV_FIRMWARE_DIR_PCAT1 = "rk3568-photonicat-openwrt"
+
+
+def prod_firmware_base_url():
+    """Production image directory for this board, trailing slash included."""
+    return PROD_FIRMWARE_BASE_URL if is_photonicat2 else PROD_FIRMWARE_BASE_URL_PCAT1
+
+
+def dev_firmware_base_url():
+    """Dev-server image directory for this board, trailing slash included."""
+    directory = DEV_FIRMWARE_DIR if is_photonicat2 else DEV_FIRMWARE_DIR_PCAT1
+    return f"{pcat_config.dev_server_base}/{directory}/"
+# Cellular-modem firmware lives under a sibling directory. No FM350-GL image is
+# published there yet (only Quectel EM05/RM500U packages, which flash via
+# qfirehose); the FM350 is a MediaTek part that needs the vendor SP Flash Tool.
+# The modem firmware-check endpoint probes here so it "just works" once an image
+# and a per-model latest_version.txt are published.
+MODEM_FIRMWARE_BASE_URL = "https://dl.photonicat.com/firmware/"
+# How many versions older than the latest the /update dropdown offers for
+# downgrades: stable server keeps it short, dev server goes further back
+# so testers can bisect regressions.
+PROD_FIRMWARE_MAX_BACK = 5
+DEV_FIRMWARE_MAX_BACK = 20
+
+class FirmwareListingParser(HTMLParser):
+    """Collect photonicat sysupgrade images (plus their .sha256 companions
+    and listing dates) from a Caddy/nginx auto-index page."""
+    def __init__(self):
+        super().__init__()
+        self.firmware_files = []
+        self.sha256_files = set()
+        self.file_dates = {}
+        self.file_datetimes = {}  # ISO timestamps from Caddy <time datetime="...">
+        self.current_link = None
+        self.in_link = False
+        self.in_date_cell = False
+
+    def handle_starttag(self, tag, attrs):
+        if tag == 'a':
+            self.in_link = True
+            for attr_name, attr_value in attrs:
+                if attr_name != 'href' or not attr_value:
+                    continue
+                # Normalize "./file" and absolute-path hrefs to the bare name
+                filename = attr_value.split('/')[-1]
+                if 'photonicatwrt' not in filename or 'sysupgrade' not in filename:
+                    continue
+                if filename.endswith('.img.gz'):
+                    self.current_link = filename
+                    self.firmware_files.append(filename)
+                elif filename.endswith('.img.gz.sha256'):
+                    self.sha256_files.add(filename[:-len('.sha256')])
+        elif tag == 'td' and self.current_link:
+            # Look for date/time cells in directory listing
+            self.in_date_cell = True
+        elif tag == 'time' and self.current_link:
+            # Caddy auto-index rows carry a machine-readable timestamp
+            for attr_name, attr_value in attrs:
+                if attr_name == 'datetime' and attr_value:
+                    self.file_datetimes[self.current_link] = attr_value
+
+    def handle_endtag(self, tag):
+        if tag == 'a':
+            self.in_link = False
+        elif tag == 'td':
+            self.in_date_cell = False
+        elif tag == 'tr':
+            self.current_link = None
+
+    def handle_data(self, data):
+        # Try to capture date/time data for the current firmware file
+        if self.current_link and self.in_date_cell and not self.in_link:
+            data = data.strip()
+            # Look for date patterns like "2024-01-15 10:30" or similar
+            if re.match(r'\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}', data):
+                self.file_dates[self.current_link] = data
+
+def extract_fw_revision(name):
+    """Extract rXXXX revision number from a filename or version string"""
+    match = re.search(r'r(\d+)', name or "")
+    return int(match.group(1)) if match else 0
+
+def extract_fw_hash(name):
+    """Extract hash code from a string like r7566-973b5947b"""
+    match = re.search(r'r\d+-([a-f0-9]+)', name or "")
+    return match.group(1) if match else ""
+
+def fetch_firmware_versions(listing_url, max_back):
+    """Fetch a firmware auto-index page and return up to 1 + max_back
+    versions, newest first, so the /update dropdown can offer downgrades."""
+    with urllib.request.urlopen(listing_url, timeout=20) as response:
+        html_content = response.read().decode('utf-8')
+    parser = FirmwareListingParser()
+    parser.feed(html_content)
+    unique_files = sorted(set(parser.firmware_files),
+                          key=lambda f: (extract_fw_revision(f), f),
+                          reverse=True)
+    versions = []
+    for filename in unique_files[:max_back + 1]:
+        build_date = parser.file_dates.get(filename, "")
+        build_epoch = 0
+        iso_ts = parser.file_datetimes.get(filename, "")
+        if iso_ts:
+            try:
+                ts = datetime.fromisoformat(iso_ts.replace('Z', '+00:00'))
+                build_epoch = int(ts.timestamp())
+                # Show in local server time, matching the version string format
+                build_date = ts.astimezone().strftime("%Y-%m-%d %H:%M")
+            except ValueError:
+                pass
+        versions.append({
+            "filename": filename,
+            "revision": extract_fw_revision(filename),
+            "hash": extract_fw_hash(filename),
+            "download_url": urllib.parse.urljoin(listing_url, filename),
+            "build_date": build_date,
+            "build_epoch": build_epoch,
+            "sha256_hash": "",
+            "sha256_available": filename in parser.sha256_files,
+        })
+    return versions
+
 @flask_app.route("/api/v1/dev_server_check.json", methods=['GET'])
+@api_auth_required
 def dev_server_check():
     """
     Check if dev server is reachable and get latest firmware info.
     Returns dev server status and firmware information.
     """
-    import re
     from urllib.parse import urljoin
     from email.utils import parsedate_to_datetime
-    from html.parser import HTMLParser
-    
-    class FirmwareParser(HTMLParser):
-        def __init__(self):
-            super().__init__()
-            self.firmware_files = []
-            self.file_dates = {}
-            self.current_link = None
-            self.in_link = False
-            self.in_date_cell = False
-            
-        def handle_starttag(self, tag, attrs):
-            if tag == 'a':
-                self.in_link = True
-                for attr_name, attr_value in attrs:
-                    if attr_name == 'href' and attr_value and attr_value.endswith('.img.gz'):
-                        if 'photonicatwrt' in attr_value and 'sysupgrade' in attr_value:
-                            self.current_link = attr_value
-                            self.firmware_files.append(attr_value)
-            elif tag == 'td' and self.current_link:
-                # Look for date/time cells in directory listing
-                self.in_date_cell = True
-                
-        def handle_endtag(self, tag):
-            if tag == 'a':
-                self.in_link = False
-            elif tag == 'td':
-                self.in_date_cell = False
-            elif tag == 'tr':
-                self.current_link = None
-                
-        def handle_data(self, data):
-            # Try to capture date/time data for the current firmware file
-            if self.current_link and self.in_date_cell and not self.in_link:
-                data = data.strip()
-                # Look for date patterns like "2024-01-15 10:30" or similar
-                if re.match(r'\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}', data):
-                    self.file_dates[self.current_link] = data
-    
-    def extract_revision_number(filename):
-        """Extract rXXXX revision number from filename"""
-        match = re.search(r'r(\d+)', filename)
-        return int(match.group(1)) if match else 0
-    
-    def extract_hash_code(version_string):
-        """Extract hash code from version string like r7566-973b5947b"""
-        match = re.search(r'r\d+-([a-f0-9]+)', version_string)
-        return match.group(1) if match else ""
-    
+
     try:
-        dev_server_url = "http://192.168.8.28:81/rk3576-photonicat2-openwrt/"
-        
-        # Check if dev server is reachable
-        with urllib.request.urlopen(dev_server_url, timeout=20) as response:
-            html_content = response.read().decode('utf-8')
-        
-        # Parse HTML to find firmware files
-        parser = FirmwareParser()
-        parser.feed(html_content)
-        
-        if not parser.firmware_files:
+        dev_server_url = dev_firmware_base_url()
+
+        # Latest firmware plus older builds testers can downgrade to
+        versions = fetch_firmware_versions(dev_server_url, DEV_FIRMWARE_MAX_BACK)
+
+        if not versions:
             return {
                 "status": "error",
                 "message": "No firmware files found on dev server",
                 "reachable": True
             }
-        
-        # Find latest firmware file (highest revision number)
-        latest_file = max(parser.firmware_files, key=extract_revision_number)
-        latest_revision = extract_revision_number(latest_file)
+
+        latest_file = versions[0]["filename"]
+        latest_revision = versions[0]["revision"]
         
         # Get current local version for comparison
         local_version = pc_app.main_app.board_info.get("openwrt_version", "")
-        local_revision = extract_revision_number(local_version)
-        local_hash = extract_hash_code(local_version)
-        dev_hash = extract_hash_code(latest_file)
+        local_revision = extract_fw_revision(local_version)
+        local_hash = extract_fw_hash(local_version)
+        dev_hash = extract_fw_hash(latest_file)
         
         # Get build date for the dev firmware file.
         # Prefer the file's Last-Modified HTTP header (authoritative server modify
         # date, works with Caddy/nginx auto-index), falling back to the date column
         # scraped from the directory listing if the header is unavailable.
-        dev_build_date = parser.file_dates.get(latest_file, "")
+        dev_build_date = versions[0]["build_date"]
         dev_build_epoch = 0
         try:
             head_req = urllib.request.Request(
@@ -1884,10 +2544,17 @@ def dev_server_check():
                 pcat_logger.logger.warning(f"Error fetching dev server firmware SHA256: {e}")
         except Exception as e:
             pcat_logger.logger.warning(f"Error processing dev server firmware SHA256: {e}")
-        
+
+        # Enrich the latest entry with the extra info fetched above so the
+        # version dropdown shows the same details as the summary cards.
+        versions[0]["build_date"] = dev_build_date
+        versions[0]["build_epoch"] = dev_build_epoch
+        versions[0]["sha256_hash"] = dev_sha256_hash
+
         response_data = {
             "status": "ok",
             "reachable": True,
+            "versions": versions,
             "local_version": local_version,
             "local_revision": local_revision,
             "local_hash": local_hash,
@@ -1922,27 +2589,105 @@ def dev_server_check():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
+def _modem_firmware_subdir(model):
+    """Map a modem model string to its firmware subdirectory on the download
+    server. Returns None for models we don't publish modem firmware for."""
+    if not model:
+        return None
+    m = model.upper()
+    if "FM350" in m:
+        return "fm350/"
+    # EM05 / RM500U are Quectel and flashed via qfirehose from the /update flow,
+    # not this dialog; leave them unmapped here.
+    return None
+
+
+@flask_app.route("/api/v1/modem/firmware_update_check.json", methods=['GET'])
 @api_auth_required
+def modem_firmware_update_check():
+    """Check whether a newer *modem* (cellular module) firmware image is
+    published on the download server for the currently detected model.
+
+    This is distinct from the router/OpenWrt firmware check. As of now no
+    FM350-GL image is hosted, so this returns status "none" cleanly; the
+    endpoint probes the server so the dialog lights up automatically once a
+    per-model ``latest_version.txt`` (and image) is published.
+    """
+    current_version = pc_app.modem_client.basic.get("firmware_version", "")
+    model = pc_app.modem_client.basic.get("model", "")
+    response_json = {
+        "status": "none",          # none | up_to_date | update_available
+        "model": model,
+        "current_version": current_version,
+        "latest_version": "",
+    }
+
+    subdir = _modem_firmware_subdir(model)
+    if not subdir:
+        # Unknown/unsupported model for this dialog — nothing to offer.
+        rsp = make_response(response_json)
+        rsp.headers['Content-Type'] = 'application/json'
+        return rsp
+
+    try:
+        latest_url = f"{MODEM_FIRMWARE_BASE_URL}{subdir}latest_version.txt"
+        data = robust_urlopen(latest_url, timeout=15)
+        latest_version = data.decode('utf-8').strip()
+        response_json["latest_version"] = latest_version
+        if latest_version and latest_version != current_version:
+            response_json["status"] = "update_available"
+        else:
+            response_json["status"] = "up_to_date"
+    except Exception as e:
+        # 404 / network error: no image published for this model. This is the
+        # expected path today for FM350 — report "none" rather than erroring.
+        pcat_logger.logger.info(f"No modem firmware published for {model}: {e}")
+        response_json["status"] = "none"
+
+    rsp = make_response(response_json)
+    rsp.headers['Content-Type'] = 'application/json'
+    return rsp
+
+
+@flask_app.route("/api/v1/firmware_user_partitions.json", methods=['GET'])
+@api_auth_required
+def firmware_user_partitions():
+    """User-created partitions on the system disk, for the upgrade modal.
+
+    Drives the -p default: a device carrying a partition the stock image does
+    not know about must be flashed with -p (do not restore the partition
+    table), or that partition is lost. Deliberately separate from
+    firmware_update_check so a failed network round-trip there cannot deprive
+    the modal of this.
+    """
+    try:
+        from pcat_util import nas_manager
+        parts = nas_manager.user_data_partitions()
+    except Exception as e:
+        # Never block the upgrade UI on a storage probe; report unknown and
+        # let the modal keep its safe default.
+        pcat_logger.logger.warning(f"user partition probe failed: {e!r}")
+        return jsonify({"ok": False, "partitions": []})
+    return jsonify({"ok": True, "partitions": parts})
+
+
 @flask_app.route("/api/v1/firmware_update_check.json", methods=['GET'])
+@api_auth_required
 def firmware_update_check():
     """
     Check for firmware updates by comparing local version with remote version.
     Returns update availability and download information.
     """
-    def extract_revision_number(version_string):
-        """Extract rXXXX revision number from version string"""
-        match = re.search(r'r(\d+)', version_string)
-        return int(match.group(1)) if match else 0
-    
     try:
         # Get current local version
         local_version = pc_app.main_app.board_info.get("openwrt_version", "")
-        local_revision = extract_revision_number(local_version)
-        
+        local_revision = extract_fw_revision(local_version)
+
         # Fetch remote version info
-        remote_url = "https://dl.photonicat.com/images/photonicat2/openwrt/latest_image.txt"
+        prod_base = prod_firmware_base_url()
+        remote_url = f"{prod_base}latest_image.txt"
         pcat_logger.logger.info(f"Checking firmware updates from: {remote_url}")
-        
+
         try:
             data = robust_urlopen(remote_url, timeout=20)
             remote_filename = data.decode('utf-8').strip()
@@ -1950,58 +2695,95 @@ def firmware_update_check():
         except Exception as e:
             pcat_logger.logger.error(f"Failed to fetch firmware info: {str(e)}")
             raise
-        
+
         # Extract remote revision number
-        remote_revision = extract_revision_number(remote_filename)
-        
+        remote_revision = extract_fw_revision(remote_filename)
+
         # Compare versions - only show update if remote is newer
         update_available = remote_revision > local_revision
-        
-        # Try to get SHA256 checksum for production firmware
+
+        # Try to get SHA256 checksum for production firmware. Not gated on
+        # update_available: the page shows the checksum/download row even when
+        # the device is up to date (or ahead, e.g. running a self-built image),
+        # and gating made those cases always report "No checksum".
         sha256_hash = ""
         sha256_available = False
-        if update_available:
-            try:
-                sha256_url = f"https://dl.photonicat.com/images/photonicat2/openwrt/{remote_filename}.sha256"
-                pcat_logger.logger.info(f"Checking for SHA256 checksum: {sha256_url}")
-                sha256_data = robust_urlopen(sha256_url, timeout=10)
-                sha256_content = sha256_data.decode('utf-8').strip()
-                sha256_hash = sha256_content.split()[0].lower()
-                sha256_available = True
-                pcat_logger.logger.info(f"Production firmware SHA256: {sha256_hash}")
-            except urllib.error.HTTPError as e:
-                if e.code == 404:
-                    pcat_logger.logger.info("Production firmware SHA256 checksum not available")
-                else:
-                    pcat_logger.logger.warning(f"Error fetching production firmware SHA256: {e}")
-            except Exception as e:
-                pcat_logger.logger.warning(f"Error processing production firmware SHA256: {e}")
+        try:
+            sha256_url = f"{prod_base}{remote_filename}.sha256"
+            pcat_logger.logger.info(f"Checking for SHA256 checksum: {sha256_url}")
+            sha256_data = robust_urlopen(sha256_url, timeout=10)
+            sha256_content = sha256_data.decode('utf-8').strip()
+            sha256_hash = sha256_content.split()[0].lower()
+            sha256_available = True
+            pcat_logger.logger.info(f"Production firmware SHA256: {sha256_hash}")
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                pcat_logger.logger.info("Production firmware SHA256 checksum not available")
+            else:
+                pcat_logger.logger.warning(f"Error fetching production firmware SHA256: {e}")
+        except Exception as e:
+            pcat_logger.logger.warning(f"Error processing production firmware SHA256: {e}")
         
-        # Get the build date from the firmware file's Last-Modified header.
+        # Get the build date from the firmware file's Last-Modified header
+        # (also not gated on update_available — the summary card shows it in
+        # the up-to-date state too).
         remote_build_date = ""
         remote_build_epoch = 0
-        if update_available:
-            try:
-                from email.utils import parsedate_to_datetime
-                fw_url = f"https://dl.photonicat.com/images/photonicat2/openwrt/{remote_filename}"
-                head_req = urllib.request.Request(fw_url, method="HEAD")
-                with urllib.request.urlopen(head_req, timeout=10) as head_resp:
-                    last_modified = head_resp.headers.get("Last-Modified", "")
-                if last_modified:
-                    lm_dt = parsedate_to_datetime(last_modified)
-                    remote_build_epoch = int(lm_dt.timestamp())
-                    remote_build_date = lm_dt.astimezone().strftime("%Y-%m-%d %H:%M")
-            except Exception as e:
-                pcat_logger.logger.warning(f"Error fetching production firmware Last-Modified: {e}")
+        try:
+            from email.utils import parsedate_to_datetime
+            fw_url = f"{prod_base}{remote_filename}"
+            head_req = urllib.request.Request(fw_url, method="HEAD")
+            with urllib.request.urlopen(head_req, timeout=10) as head_resp:
+                last_modified = head_resp.headers.get("Last-Modified", "")
+            if last_modified:
+                lm_dt = parsedate_to_datetime(last_modified)
+                remote_build_epoch = int(lm_dt.timestamp())
+                remote_build_date = lm_dt.astimezone().strftime("%Y-%m-%d %H:%M")
+        except Exception as e:
+            pcat_logger.logger.warning(f"Error fetching production firmware Last-Modified: {e}")
+
+        # Build the downgrade list from the directory listing: the official
+        # latest (from latest_image.txt) plus up to PROD_FIRMWARE_MAX_BACK
+        # older builds. Files newer than the official latest may exist in the
+        # listing but are not released yet, so they are filtered out.
+        versions = []
+        try:
+            # Fetch extra entries so unreleased builds filtered out below
+            # don't eat into the downgrade window.
+            versions = [v for v in fetch_firmware_versions(prod_base,
+                                                           PROD_FIRMWARE_MAX_BACK + 20)
+                        if v["revision"] <= remote_revision]
+        except Exception as e:
+            pcat_logger.logger.warning(f"Error fetching production firmware listing: {e}")
+        if not any(v["filename"] == remote_filename for v in versions):
+            versions.insert(0, {
+                "filename": remote_filename,
+                "revision": remote_revision,
+                "hash": extract_fw_hash(remote_filename),
+                "download_url": f"{prod_base}{remote_filename}",
+                "build_date": "",
+                "build_epoch": 0,
+                "sha256_hash": "",
+                "sha256_available": False,
+            })
+        versions = versions[:PROD_FIRMWARE_MAX_BACK + 1]
+        for v in versions:
+            if v["filename"] == remote_filename:
+                v["build_date"] = remote_build_date or v["build_date"]
+                v["build_epoch"] = remote_build_epoch or v["build_epoch"]
+                v["sha256_hash"] = sha256_hash
+                v["sha256_available"] = v["sha256_available"] or sha256_available
+                break
 
         response_data = {
             "status": "ok",
+            "versions": versions,
             "local_version": local_version,
             "local_revision": local_revision,
             "remote_filename": remote_filename,
             "remote_revision": remote_revision,
             "update_available": update_available,
-            "download_url": f"https://dl.photonicat.com/images/photonicat2/openwrt/{remote_filename}" if update_available else "",
+            "download_url": f"{prod_base}{remote_filename}",
             "sha256_hash": sha256_hash,
             "sha256_available": sha256_available,
             "remote_build_date": remote_build_date,
@@ -2030,9 +2812,217 @@ def firmware_update_check():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
+@flask_app.route("/api/v1/firmware_changelog.json", methods=['GET'])
+@api_auth_required
+def firmware_changelog():
+    """
+    Return the changelog text published next to a firmware image
+    (<image>.changelog or <image>.changelog.txt), if any.
+    Used by the version dropdown on /update.
+    """
+    source = request.args.get("source", "dev")
+    filename = request.args.get("filename", "")
+
+    # Bare image filename only — no paths, so the URL can't be redirected
+    # outside the firmware directory.
+    if not re.fullmatch(r'photonicatwrt-[\w.\-]+\.img\.gz', filename):
+        rsp = make_response({"status": "error", "message": "Invalid firmware filename"}, 400)
+        rsp.headers['Content-Type'] = 'application/json'
+        return rsp
+
+    if source == "prod":
+        base_url = prod_firmware_base_url()
+    else:
+        base_url = dev_firmware_base_url()
+
+    changelog = ""
+    for suffix in (".changelog", ".changelog.txt"):
+        try:
+            with urllib.request.urlopen(base_url + filename + suffix, timeout=8) as resp:
+                # Cap the read so a bogus/huge file can't balloon the response
+                changelog = resp.read(16384).decode('utf-8', errors='replace').strip()
+            if changelog:
+                break
+        except urllib.error.HTTPError as e:
+            if e.code != 404:
+                pcat_logger.logger.warning(f"Error fetching firmware changelog: {e}")
+        except Exception as e:
+            pcat_logger.logger.warning(f"Error fetching firmware changelog: {e}")
+
+    rsp = make_response({
+        "status": "ok",
+        "available": bool(changelog),
+        "changelog": changelog
+    })
+    rsp.headers['Content-Type'] = 'application/json'
+    return rsp
+
 # Global variables for firmware upgrade tracking
 firmware_upgrade_thread = None
 firmware_upgrade_lock = threading.Lock()
+
+# sysupgrade flags the UI may tick, listed in the order they are passed to
+# sysupgrade:
+#   -c  keep changed files in /etc/
+#   -o  keep changed files in /, except those from packages
+#   -p  do not restore the partition table after flashing (SAVE_PARTITIONS=0
+#       in sysupgrade): the live table is left as-is, so a partition the image
+#       does not know about -- e.g. a user's pcat-data volume -- survives.
+#       Unticking it lets the image rewrite the table and the bootloader.
+# Ticking neither -c nor -o means nothing is preserved, which is sysupgrade -n.
+ALLOWED_SYSUPGRADE_FLAGS = ('-c', '-o', '-p')
+DEFAULT_SYSUPGRADE_FLAGS = ('-c', '-p')
+
+def normalize_sysupgrade_flags(message):
+    """Pick the sysupgrade flags for an upgrade request sent over the socket.
+
+    Accepts the `sysupgrade_flags` list from the UI, falling back to the legacy
+    `keep_config`/`keep_config_option` pair so older clients keep working.
+    Unknown flags are dropped and an upgrade that preserves nothing gets -n.
+    """
+    raw = message.get("sysupgrade_flags")
+    if not isinstance(raw, list):
+        if "keep_config" in message or "keep_config_option" in message:
+            raw = [message.get("keep_config_option")] if message.get("keep_config", True) else []
+        else:
+            raw = list(DEFAULT_SYSUPGRADE_FLAGS)
+
+    flags = [flag for flag in ALLOWED_SYSUPGRADE_FLAGS if flag in raw]
+    if '-c' not in flags and '-o' not in flags:
+        flags.insert(0, '-n')
+    return flags
+
+# Where the detached flash writes its transcript.
+#
+# NOT /tmp: a sysupgrade ends in a reboot, /tmp is tmpfs, and so the only
+# record of why a flash failed was destroyed by the flash itself -- which is
+# exactly the state a failed OTA leaves you in, with the device back on its old
+# firmware and nothing to read. /etc is on the overlay, survives a reboot, and
+# is preserved by `sysupgrade -c` across a successful one. The start marker
+# truncates, so this holds the most recent attempt and cannot grow without
+# bound. Live progress still goes to the /tmp status file, which is state
+# rather than history and is correct to lose on reboot.
+SYSUPGRADE_LOG = '/etc/pcat-sysupgrade.log'
+
+# Pidfile written by start-stop-daemon for the detached flash shell. Distinct
+# from the '/tmp/sysupgrade.pid' the shell writes itself: this one is filled in
+# by the launcher, so it is readable the moment start-stop-daemon returns and
+# lets us confirm the flash was actually spawned before we start waiting on it.
+SYSUPGRADE_LAUNCH_PID = '/tmp/sysupgrade_launch.pid'
+
+
+def _sysupgrade_running(pid_file):
+    """True while the detached sysupgrade shell is still alive.
+
+    The shell writes its own $$ to pid_file before exec'ing sysupgrade, so this
+    tracks the whole flash, not just one child of it. A pid that has exited (or
+    a pid_file that was never written) reads as not running.
+    """
+    try:
+        with open(pid_file) as f:
+            pid = int(f.read().strip())
+    except (OSError, ValueError):
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _wait_for_sysupgrade(status_file, pid_file, timeout=900):
+    """Block until the detached sysupgrade finishes, then report what it did.
+
+    A successful flash never returns from here: stage 2 reboots the device and
+    this process dies with it. So reaching the end of this function at all
+    means the upgrade did NOT complete, and the only correct thing to do is say
+    so and leave the box running its current (still intact) firmware.
+
+    Deliberately does not reboot on any path. See background_firmware_upgrade_thread().
+    """
+    import json
+
+    waited = 0
+    poll = 2
+    last_stage = None
+
+    while waited < timeout:
+        stage = None
+        try:
+            with open(status_file) as f:
+                status = json.load(f)
+            stage = status.get('stage')
+            message = status.get('message', 'Flashing firmware...')
+        except Exception:
+            # A torn read while the shell rewrites the file is expected and not
+            # a failure; fall through to the liveness check below.
+            message = 'Flashing firmware...'
+
+        if stage != last_stage and stage:
+            pcat_logger.logger.info(f"Sysupgrade stage: {stage} - {message}")
+            last_stage = stage
+
+        if stage == 'error':
+            exit_code = 'unknown'
+            try:
+                exit_code = status.get('exit_code', 'unknown')
+            except Exception:
+                pass
+            msg = (f'Firmware flash failed (sysupgrade exit {exit_code}). '
+                   f'The device is still running its previous firmware. '
+                   f'See {SYSUPGRADE_LOG} for the full transcript.')
+            pcat_logger.logger.error(msg)
+            update_firmware_upgrade_status('error', 0, msg, error=msg)
+            return False
+
+        if stage == 'completed':
+            # Stage 2 is flashing and will reboot; hold the "in progress" UI
+            # until the box goes down under us.
+            update_firmware_upgrade_status(
+                'restart', 95,
+                'Firmware written. Device is restarting -- this page will '
+                'reconnect once it is back.')
+        else:
+            # Real progress from the flash itself, not a cosmetic timer.
+            update_firmware_upgrade_status(
+                'restart', min(50 + waited // 10, 90),
+                f'{message} (do not power off)')
+
+        if not _sysupgrade_running(pid_file) and waited > 5:
+            # The shell is gone. If it had succeeded we would have rebooted
+            # rather than got here, so treat a silent disappearance as failure.
+            if stage == 'completed':
+                update_firmware_upgrade_status(
+                    'restart', 95,
+                    'Firmware written. Waiting for the device to restart...')
+                time.sleep(30)
+                return True
+            msg = (f'Firmware flash ended without completing. The device is '
+                   f'still running its previous firmware. See {SYSUPGRADE_LOG}.')
+            pcat_logger.logger.error(msg)
+            update_firmware_upgrade_status('error', 0, msg, error=msg)
+            return False
+
+        time.sleep(poll)
+        waited += poll
+
+    msg = (f'Firmware flash did not finish within {timeout}s. The device has '
+           f'NOT been rebooted; check {SYSUPGRADE_LOG} before power-cycling.')
+    pcat_logger.logger.error(msg)
+    update_firmware_upgrade_status('error', 0, msg, error=msg)
+    return False
+
+
+class FirmwareIntegrityError(Exception):
+    """The downloaded image is not the image the server published.
+
+    A distinct type because the verification block around it deliberately
+    swallows Exception -- a missing or unreachable .sha256 must not block an
+    upgrade. A checksum that was fetched and did *not* match is the opposite
+    situation: it is the one result that must stop the flash, so it has to be
+    distinguishable from "could not verify".
+    """
+
 
 # Global status tracking for firmware upgrade (persists across page reloads)
 firmware_upgrade_status = {
@@ -2041,8 +3031,7 @@ firmware_upgrade_status = {
     'progress': 0,
     'message': '',
     'firmware_url': '',
-    'keep_config': True,
-    'keep_config_option': '-c',
+    'sysupgrade_flags': list(DEFAULT_SYSUPGRADE_FLAGS),
     'start_time': None,
     'error': None
 }
@@ -2063,10 +3052,21 @@ def update_firmware_upgrade_status(stage, progress, message, error=None):
     pcat_logger.logger.info(f"Firmware upgrade: {stage} - {progress}% - {message}")
     if error:
         pcat_logger.logger.error(f"Firmware upgrade error: {error}")
-    
-    socketio.emit('firmware_upgrade_status', firmware_upgrade_status.copy())
 
-def background_firmware_upgrade_thread(firmware_url, keep_config, keep_config_option="-c", download_method="wget"):
+    # sysupgrade is (about to be) running detached and will take the device
+    # down without another status update; flag the restart so every open page
+    # shows the "restarting" overlay via the dashboard poll, not just the
+    # update page that owns the socket.
+    if stage == 'restart' and not error:
+        try:
+            if getattr(pc_app.main_app, 'system_status', 0) == 0:
+                pc_app.main_app.system_status = 20  # prepare_rebooting
+        except Exception:
+            pass
+
+    publish('firmware_upgrade_status', firmware_upgrade_status.copy())
+
+def background_firmware_upgrade_thread(firmware_url, sysupgrade_flags, download_method="wget"):
     """Background thread for firmware download and upgrade process"""
     global firmware_upgrade_thread, firmware_upgrade_status
     import tempfile
@@ -2074,26 +3074,24 @@ def background_firmware_upgrade_thread(firmware_url, keep_config, keep_config_op
     import json
     import threading
     import time
-    
+
     # Initialize status
     firmware_upgrade_status.update({
         'active': True,
         'firmware_url': firmware_url,
-        'keep_config': keep_config,
-        'keep_config_option': keep_config_option,
+        'sysupgrade_flags': list(sysupgrade_flags),
         'start_time': time.time(),
         'error': None
     })
-    
+
     # Debug logging
     pcat_logger.logger.info(f"Starting firmware upgrade process: {firmware_url}")
-    pcat_logger.logger.info(f"Keep config: {keep_config}")
-    pcat_logger.logger.info(f"Keep config option: {keep_config_option}")
+    pcat_logger.logger.info(f"sysupgrade flags: {' '.join(sysupgrade_flags)}")
     
     try:
         # Stage 1: Download with improved progress tracking
         update_firmware_upgrade_status('download', 0, 'Initializing firmware download...')
-        socketio.sleep(0.3)
+        time.sleep(0.3)
 
         # Use /tmp directory for downloads as requested
         temp_dir = '/tmp'
@@ -2107,16 +3105,16 @@ def background_firmware_upgrade_thread(firmware_url, keep_config, keep_config_op
         pcat_logger.logger.info(f"Temp directory: {temp_dir}")
 
         update_firmware_upgrade_status('download', 0, f'Target file: {filename}')
-        socketio.sleep(0.3)
+        time.sleep(0.3)
         update_firmware_upgrade_status('download', 0, f'Download directory: {temp_dir}')
-        socketio.sleep(0.3)
+        time.sleep(0.3)
 
         # Check available disk space
         try:
             statvfs = os.statvfs(temp_dir)
             free_mb = (statvfs.f_bavail * statvfs.f_frsize) // (1024 * 1024)
             update_firmware_upgrade_status('download', 0, f'Available disk space: {free_mb}MB')
-            socketio.sleep(0.3)
+            time.sleep(0.3)
         except Exception:
             pass
 
@@ -2125,7 +3123,9 @@ def background_firmware_upgrade_thread(firmware_url, keep_config, keep_config_op
         try:
             import urllib.request
             pcat_logger.logger.info(f"Fetching file size from: {firmware_url}")
-            with urllib.request.urlopen(firmware_url) as response:
+            # timeout is required: an unreachable server would otherwise hang
+            # this download thread indefinitely on connect/read.
+            with urllib.request.urlopen(firmware_url, timeout=15) as response:
                 total_size = int(response.headers.get('Content-Length', 0))
                 pcat_logger.logger.info(f"Remote file size: {total_size} bytes ({total_size // (1024*1024)}MB)")
                 update_firmware_upgrade_status('download', 0, f'Remote firmware size: {total_size // (1024*1024)}MB ({total_size:,} bytes)')
@@ -2141,15 +3141,29 @@ def background_firmware_upgrade_thread(firmware_url, keep_config, keep_config_op
         pcat_logger.logger.info(f"Download target: {temp_file}")
         pcat_logger.logger.info(f"Download method: {download_method}")
 
-        socketio.sleep(0.3)
+        time.sleep(0.3)
         update_firmware_upgrade_status('download', 1, f'Using download method: {download_method}')
-        socketio.sleep(0.3)
+        time.sleep(0.3)
 
-        # Clean up previous download if exists
+        # Clean up previous download if exists.
+        #
+        # This said "Removing previous download" and removed nothing, while the
+        # downloaders below run with --continue. A leftover part-file was
+        # therefore resumed rather than replaced -- and on the dev server the
+        # bytes behind a URL change whenever a build is re-cut, so resuming
+        # across a rebuild splices two different images into one file. The
+        # result passes wget (the byte count is right) and fails its checksum,
+        # which until now was only a warning. Start from a clean file instead:
+        # a re-download costs seconds on a LAN and removes the whole class.
         if os.path.exists(temp_file):
             old_size = os.path.getsize(temp_file)
             update_firmware_upgrade_status('download', 1, f'Removing previous download ({old_size // (1024*1024)}MB)...')
-            socketio.sleep(0.3)
+            try:
+                os.remove(temp_file)
+                pcat_logger.logger.info(f"Removed stale download: {temp_file} ({old_size} bytes)")
+            except OSError as e:
+                pcat_logger.logger.warning(f"Could not remove stale download {temp_file}: {e}")
+            time.sleep(0.3)
 
         if download_method == "aria2c":
             # Use aria2c for download with JSON-RPC progress tracking
@@ -2193,15 +3207,23 @@ def background_firmware_upgrade_thread(firmware_url, keep_config, keep_config_op
         # Start download process
         update_firmware_upgrade_status('download', 2, f'Launching {download_method} process...')
         pcat_logger.logger.info(f"Starting {download_method} download process...")
+        # Redirect the downloader's stdout+stderr to its log file rather than
+        # PIPEs. wget --progress=dot:giga streams progress to stderr; with an
+        # undrained PIPE a long download fills the ~64KB pipe buffer, the child
+        # blocks on write, and download_process.wait() below then deadlocks
+        # (the classic PIPE + wait() pitfall). A file never blocks — and this
+        # finally makes the wget log file (computed all along but never wired
+        # up) actually capture output for the error path.
+        download_logf = open(download_log, 'w')
         download_process = subprocess.Popen(
             cmd_args,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=download_logf,
+            stderr=subprocess.STDOUT,
             text=True
         )
         pcat_logger.logger.info(f"{download_method} process started with PID: {download_process.pid}")
         update_firmware_upgrade_status('download', 3, f'{download_method} process started (PID: {download_process.pid})')
-        socketio.sleep(0.3)
+        time.sleep(0.3)
         
         # Background thread to monitor download progress
         def monitor_download_progress():
@@ -2283,23 +3305,28 @@ def background_firmware_upgrade_thread(firmware_url, keep_config, keep_config_op
         
         # Stop progress monitoring
         progress_thread.join(timeout=2)
-        
+
+        # Release our write handle now the child has exited (its stdout/stderr
+        # were redirected here); the OS has already flushed the child's writes.
+        try:
+            download_logf.close()
+        except Exception:
+            pass
+
         if download_process.returncode != 0:
-            stderr_output = download_process.stderr.read()
-            pcat_logger.logger.error(f"{download_method} stderr: {stderr_output}")
-            stdout_output = download_process.stdout.read()
-            pcat_logger.logger.error(f"{download_method} stdout: {stdout_output}")
-            
-            # Also log download log file if it exists
+            # stdout+stderr were redirected to download_log; read it back for
+            # the failure detail (there are no pipes to drain anymore).
+            log_content = ""
             if os.path.exists(download_log):
                 try:
                     with open(download_log, 'r') as f:
                         log_content = f.read()
-                        pcat_logger.logger.error(f"{download_method} log file content:\n{log_content}")
-                except:
+                    pcat_logger.logger.error(f"{download_method} log file content:\n{log_content}")
+                except Exception:
                     pcat_logger.logger.warning(f"Could not read {download_method} log file")
-                    
-            raise Exception(f"Download failed: {stderr_output}")
+
+            tail = " | ".join(log_content.strip().splitlines()[-5:]) if log_content.strip() else "see log"
+            raise Exception(f"Download failed (rc={download_process.returncode}): {tail}")
             
         # Verify download completed successfully
         final_size = 0
@@ -2314,14 +3341,14 @@ def background_firmware_upgrade_thread(firmware_url, keep_config, keep_config_op
             raise Exception("Download failed: file is empty or missing")
             
         update_firmware_upgrade_status('download', 100, f'Download completed successfully ({final_size // (1024*1024)}MB, {final_size:,} bytes)')
-        socketio.sleep(0.5)
+        time.sleep(0.5)
 
         # Stage 1.5: SHA256 Verification (if available)
         try:
             sha256_url = firmware_url + '.sha256'
             pcat_logger.logger.info(f"Attempting to download SHA256 checksum from: {sha256_url}")
             update_firmware_upgrade_status('verify', 0, 'Starting integrity verification...')
-            socketio.sleep(0.3)
+            time.sleep(0.3)
             update_firmware_upgrade_status('verify', 10, 'Downloading SHA256 checksum file...')
             
             try:
@@ -2334,7 +3361,7 @@ def background_firmware_upgrade_thread(firmware_url, keep_config, keep_config_op
                 pcat_logger.logger.info(f"Expected SHA256: {expected_sha256}")
                 
                 update_firmware_upgrade_status('verify', 30, f'Expected SHA256: {expected_sha256[:16]}...')
-                socketio.sleep(0.3)
+                time.sleep(0.3)
                 update_firmware_upgrade_status('verify', 40, 'Calculating SHA256 hash of downloaded firmware...')
 
                 # Calculate SHA256 of downloaded file
@@ -2347,9 +3374,9 @@ def background_firmware_upgrade_thread(firmware_url, keep_config, keep_config_op
                 calculated_sha256 = calculated_sha256.hexdigest().lower()
                 pcat_logger.logger.info(f"Calculated SHA256: {calculated_sha256}")
                 update_firmware_upgrade_status('verify', 80, f'Calculated SHA256: {calculated_sha256[:16]}...')
-                socketio.sleep(0.3)
+                time.sleep(0.3)
                 update_firmware_upgrade_status('verify', 90, 'Comparing checksums...')
-                socketio.sleep(0.3)
+                time.sleep(0.3)
 
                 if calculated_sha256 == expected_sha256:
                     pcat_logger.logger.info("✅ SHA256 verification PASSED - firmware integrity verified")
@@ -2357,8 +3384,13 @@ def background_firmware_upgrade_thread(firmware_url, keep_config, keep_config_op
                 else:
                     error_msg = f"❌ SHA256 verification FAILED! Expected: {expected_sha256}, Got: {calculated_sha256}"
                     pcat_logger.logger.error(error_msg)
-                    raise Exception(error_msg)
-                    
+                    raise FirmwareIntegrityError(error_msg)
+
+            except FirmwareIntegrityError:
+                # Must escape both broad handlers below. Flashing an image that
+                # failed its own published checksum is how a device ends up
+                # rebooting into the firmware it started with, or worse.
+                raise
             except urllib.error.HTTPError as e:
                 if e.code == 404:
                     pcat_logger.logger.warning("SHA256 checksum file not found - skipping verification")
@@ -2368,7 +3400,9 @@ def background_firmware_upgrade_thread(firmware_url, keep_config, keep_config_op
             except Exception as e:
                 pcat_logger.logger.warning(f"SHA256 verification failed: {str(e)} - continuing without verification")
                 update_firmware_upgrade_status('verify', 100, f'⚠️ SHA256 verification failed: {str(e)} - continuing')
-                
+
+        except FirmwareIntegrityError:
+            raise
         except Exception as e:
             pcat_logger.logger.warning(f"SHA256 verification process failed: {str(e)} - continuing without verification")
             update_firmware_upgrade_status('verify', 100, '⚠️ SHA256 verification unavailable - continuing without verification')
@@ -2376,7 +3410,7 @@ def background_firmware_upgrade_thread(firmware_url, keep_config, keep_config_op
         # Stage 2: Prepare
         pcat_logger.logger.info("Starting firmware preparation stage")
         update_firmware_upgrade_status('prepare', 0, 'Starting firmware preparation...')
-        socketio.sleep(0.3)
+        time.sleep(0.3)
 
         # Verify file integrity
         update_firmware_upgrade_status('prepare', 10, 'Checking firmware file exists...')
@@ -2385,34 +3419,25 @@ def background_firmware_upgrade_thread(firmware_url, keep_config, keep_config_op
             pcat_logger.logger.error(f"File does not exist: {temp_file}")
             raise Exception("Downloaded firmware file is missing")
 
-        socketio.sleep(0.3)
+        time.sleep(0.3)
         file_size = os.path.getsize(temp_file)
         pcat_logger.logger.info(f"File size verification: {file_size} bytes")
         update_firmware_upgrade_status('prepare', 30, f'Firmware file size: {file_size // (1024*1024)}MB ({file_size:,} bytes)')
-        socketio.sleep(0.3)
+        time.sleep(0.3)
 
         update_firmware_upgrade_status('prepare', 50, 'Validating firmware file size...')
         if file_size < 1024*1024:  # Less than 1MB
             pcat_logger.logger.error(f"File too small: {file_size} bytes")
             raise Exception(f"Downloaded firmware file is too small: {file_size} bytes")
 
-        socketio.sleep(0.3)
+        time.sleep(0.3)
         pcat_logger.logger.info("File verification passed")
         update_firmware_upgrade_status('prepare', 70, 'File size validation passed')
-        socketio.sleep(0.3)
+        time.sleep(0.3)
 
-        # Report config preservation mode
-        if keep_config and keep_config_option:
-            if keep_config_option == '-c':
-                config_desc = 'Preserve changed files in /etc/'
-            elif keep_config_option == '-o':
-                config_desc = 'Preserve changed files in / (except packages)'
-            else:
-                config_desc = f'Config option: {keep_config_option}'
-            update_firmware_upgrade_status('prepare', 85, f'Configuration mode: {config_desc}')
-        else:
-            update_firmware_upgrade_status('prepare', 85, 'Configuration mode: Fresh install (no config preservation)')
-        socketio.sleep(0.3)
+        # Report the flags the flash will run with
+        update_firmware_upgrade_status('prepare', 85, f'sysupgrade flags: {" ".join(sysupgrade_flags)}')
+        time.sleep(0.3)
 
         update_firmware_upgrade_status('prepare', 100, 'Firmware prepared for installation')
         
@@ -2420,45 +3445,30 @@ def background_firmware_upgrade_thread(firmware_url, keep_config, keep_config_op
         pcat_logger.logger.info("Starting firmware installation stage")
         pcat_logger.logger.warning("CRITICAL: Firmware installation starting - DO NOT POWER OFF!")
         update_firmware_upgrade_status('install', 0, 'Starting firmware installation...')
-        socketio.sleep(0.5)
+        time.sleep(0.5)
         update_firmware_upgrade_status('install', 5, '⚠️ DO NOT POWER OFF THE DEVICE!')
-        socketio.sleep(0.3)
+        time.sleep(0.3)
         update_firmware_upgrade_status('install', 10, 'Building sysupgrade command...')
-        socketio.sleep(0.3)
+        time.sleep(0.3)
 
         # Prepare sysupgrade command
-        sysupgrade_cmd = ['sysupgrade']
-        if keep_config and keep_config_option:
-            # Use the specific keep config option (-c or -o)
-            sysupgrade_cmd.append(keep_config_option)
-            if keep_config_option == '-c':
-                pcat_logger.logger.info("sysupgrade will preserve all changed files in /etc/ (-c flag)")
-            elif keep_config_option == '-o':
-                pcat_logger.logger.info("sysupgrade will preserve all changed files in /, except packages (-o flag)")
-            else:
-                pcat_logger.logger.info(f"sysupgrade using keep config option: {keep_config_option}")
-        else:
-            # No configuration preservation (fresh install)
-            sysupgrade_cmd.append('-n')  # Do not save configuration over reflash
-            pcat_logger.logger.info("sysupgrade will perform fresh install with no configuration preservation (-n flag)")
-            
-        sysupgrade_cmd.append(temp_file)
+        sysupgrade_cmd = ['sysupgrade'] + list(sysupgrade_flags) + [temp_file]
         pcat_logger.logger.info(f"sysupgrade command: {' '.join(sysupgrade_cmd)}")
         update_firmware_upgrade_status('install', 20, f'Command: {" ".join(sysupgrade_cmd)}')
-        socketio.sleep(0.3)
+        time.sleep(0.3)
 
         # Execute sysupgrade detached from Flask process
         pcat_logger.logger.info("Starting detached sysupgrade process...")
         update_firmware_upgrade_status('install', 30, 'Setting up detached sysupgrade process...')
-        socketio.sleep(0.3)
+        time.sleep(0.3)
 
         # Create status file for progress reporting
         status_file = '/tmp/sysupgrade_status.json'
         pid_file = '/tmp/sysupgrade.pid'
-        log_file = '/tmp/sysupgrade.log'
+        log_file = SYSUPGRADE_LOG
 
         update_firmware_upgrade_status('install', 40, 'Creating status tracking files...')
-        socketio.sleep(0.3)
+        time.sleep(0.3)
 
         # Initialize status file
         import json
@@ -2473,16 +3483,16 @@ def background_firmware_upgrade_thread(firmware_url, keep_config, keep_config_op
             json.dump(status_data, f)
 
         update_firmware_upgrade_status('install', 50, 'Setting environment variables for sysupgrade...')
-        socketio.sleep(0.3)
+        time.sleep(0.3)
         update_firmware_upgrade_status('install', 60, 'Preparing to hand off to sysupgrade process...')
 
         # Give UI time to update before starting sysupgrade
-        socketio.sleep(2)
+        time.sleep(2)
 
         # Transition to restart stage
         update_firmware_upgrade_status('restart', 0, 'Launching sysupgrade in detached mode...')
-        socketio.sleep(1)  # Allow UI to update
-        
+        time.sleep(1)  # Allow UI to update
+
         # Build detached sysupgrade command with nohup
         detached_cmd = [
             'nohup', 'sh', '-c',
@@ -2495,19 +3505,19 @@ def background_firmware_upgrade_thread(firmware_url, keep_config, keep_config_op
                 "pid": $$,
                 "started": {time.time()}
             }}' > {status_file}
-            
+
             # Store PID
             echo $$ > {pid_file}
-            
+
             # Set proper environment
             export PATH="/usr/sbin:/usr/bin:/sbin:/bin"
             export USER="root"
             export HOME="/root"
             export SHELL="/bin/sh"
-            
-            # Log start
-            echo "[$(date)] Starting sysupgrade: {' '.join(sysupgrade_cmd)}" >> {log_file}
-            
+
+            # Log start ($* expands the positional args as data, never executed)
+            echo "[$(date)] Starting sysupgrade: $*" > {log_file}
+
             # Update status to installing
             echo '{{
                 "stage": "installing",
@@ -2516,9 +3526,13 @@ def background_firmware_upgrade_thread(firmware_url, keep_config, keep_config_op
                 "pid": $$,
                 "started": {time.time()}
             }}' > {status_file}
-            
-            # Execute sysupgrade and capture output
-            {' '.join(sysupgrade_cmd)} >> {log_file} 2>&1
+
+            # Execute sysupgrade and capture output. The command is passed as
+            # positional parameters (see the argv appended to this sh -c below),
+            # so the firmware path reaches sysupgrade as a single literal arg and
+            # is never re-parsed by the shell -- a filename like 'x;reboot' can't
+            # inject commands here.
+            "$@" >> {log_file} 2>&1
             RESULT=$?
             
             # Log completion
@@ -2547,34 +3561,74 @@ def background_firmware_upgrade_thread(firmware_url, keep_config, keep_config_op
                 exit $RESULT
             fi
             
-            # Clean up PID file
+            # A successful sysupgrade does not return: stage 2 reboots the box
+            # itself. Reaching this point means the flash exited 0 without
+            # restarting, which is not a state to "help" along -- the old
+            # firmware is still the running one and is intact.
+            #
+            # What used to be here (pkill the web app, sleep 2, /sbin/reboot)
+            # was wrong twice over: the pkill pattern matched
+            # pcat-manager-web-main.py, which is not how the app is started any
+            # more (granian serves pcat_wsgi:flask_app), so it silently matched
+            # nothing; and the reboot raced the flash it was supposed to be
+            # following. Leave the PID file in place as the completion marker
+            # the waiter reads, and let the device stay up.
             rm -f {pid_file}
-            
-            # Schedule Flask termination after brief delay
-            sleep 5
-            
-            # Find and terminate Flask process gracefully
-            pkill -f "pcat-manager-web-main.py" || true
-            
-            # Force reboot if needed
-            sleep 2
-            /sbin/reboot
-            '''
-        ]
+            ''',
+            # argv passed to the script above: $0 is a dummy 'sh', and the
+            # sysupgrade command (including the untrusted firmware path) follows
+            # as $1..$N. Keeping the path in argv instead of the script text is
+            # what makes the "$@"/$* references above injection-proof.
+            'sh',
+        ] + sysupgrade_cmd
 
-        # Start detached process
-        update_firmware_upgrade_status('restart', 5, 'Starting sysupgrade process with nohup...')
-        pcat_logger.logger.info(f"Starting detached sysupgrade command")
+        # Start detached process.
+        #
+        # start-stop-daemon -b is what actually gets the flash out from under
+        # this service. setsid()+nohup alone only detach the controlling
+        # terminal and signal group -- the shell stays a PID-child of the
+        # granian worker, and /etc/init.d/pcat-manager-web's stop() walks
+        # /proc/*/stat for children of the pidfile PID and SIGKILLs every one
+        # of them. So anything that restarts the web app mid-flash (including
+        # the upgrade's own former `pkill`) would take a live sysupgrade down
+        # with it. -b forks and lets init reap, leaving nothing for stop() to
+        # match. -m writes the pidfile so we can still track the flash.
+        update_firmware_upgrade_status('restart', 5, 'Starting detached sysupgrade process...')
+        pcat_logger.logger.info("Starting detached sysupgrade command")
+        # detached_cmd is ['nohup', 'sh', '-c', <script>, 'sh', <sysupgrade...>];
+        # -b already backgrounds and redirects, so drop the nohup wrapper and
+        # hand start-stop-daemon the shell itself.
+        #
+        # -n pcatflash is load-bearing, not cosmetic. -S means "start unless a
+        # matching process is found", and with only -x /bin/sh the match is any
+        # running /bin/sh on the box -- busybox answers "/bin/sh is already
+        # running", exits 1 and never launches the flash. Verified on-device.
+        # -n narrows the match to this name, which nothing else uses.
         detached_process = subprocess.Popen(
-            detached_cmd,
+            ['start-stop-daemon', '-b', '-m', '-p', SYSUPGRADE_LAUNCH_PID,
+             '-n', 'pcatflash', '-S', '-x', '/bin/sh', '--']
+            + detached_cmd[2:],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            preexec_fn=os.setsid  # Create new process group
+            start_new_session=True,
         )
 
-        pcat_logger.logger.info(f"Detached sysupgrade process group started with PID: {detached_process.pid}")
-        update_firmware_upgrade_status('restart', 10, f'Sysupgrade process launched (PID: {detached_process.pid})')
-        socketio.sleep(0.3)
+        # Not detached_process.pid -- that is the short-lived start-stop-daemon
+        # launcher, which exits as soon as it has forked. The flash writes its
+        # own $$ to pid_file, and that is what the waiter below tracks.
+        #
+        # Check the launcher's exit status rather than assuming it worked: a
+        # refusal here (see the -n note above) would otherwise leave the UI
+        # cheerfully reporting a flash that was never started, and the box
+        # would sit on the old firmware with no error anywhere.
+        launch_rc = detached_process.wait()
+        if launch_rc != 0:
+            raise Exception(
+                f'Failed to launch sysupgrade (start-stop-daemon exit '
+                f'{launch_rc}). The device has not been modified.')
+        pcat_logger.logger.info("Detached sysupgrade launched (reparented to init)")
+        update_firmware_upgrade_status('restart', 10, 'Sysupgrade process launched')
+        time.sleep(0.3)
         update_firmware_upgrade_status('restart', 15, 'Monitoring sysupgrade startup...')
 
         # Monitor progress via status file for initial confirmation
@@ -2603,12 +3657,12 @@ def background_firmware_upgrade_thread(firmware_url, keep_config, keep_config_op
                 pcat_logger.logger.warning(f"Error reading status file: {e}")
 
             monitor_time += 1
-            socketio.sleep(1)
+            time.sleep(1)
 
         # Final status update
         pcat_logger.logger.info("Sysupgrade process detached successfully - Flask can now safely terminate")
         update_firmware_upgrade_status('restart', 50, 'Firmware flashing in progress - process running independently')
-        socketio.sleep(0.3)
+        time.sleep(0.3)
         update_firmware_upgrade_status('restart', 55, 'Cleaning up temporary files...')
 
         # NOTE: Do NOT delete temp_file here! The detached sysupgrade process
@@ -2621,27 +3675,29 @@ def background_firmware_upgrade_thread(firmware_url, keep_config, keep_config_op
                 pcat_logger.logger.info(f"Removed {download_method} log: {download_log}")
             except Exception as e:
                 pcat_logger.logger.warning(f"Failed to cleanup log file: {e}")
-            
-        # Final status update before system restart
-        socketio.sleep(0.5)
-        update_firmware_upgrade_status('restart', 70, 'Sysupgrade process is flashing firmware to device...')
-        socketio.sleep(0.5)
-        update_firmware_upgrade_status('restart', 80, 'Waiting for firmware flash to complete...')
-        socketio.sleep(0.5)
-        update_firmware_upgrade_status('restart', 90, 'Preparing for system restart...')
-        socketio.sleep(0.5)
-        pcat_logger.logger.info("Firmware upgrade completed successfully - system will restart")
-        update_firmware_upgrade_status('completed', 100, 'Firmware upgrade complete! System is restarting...')
 
-        # Brief delay to ensure final status is sent to clients
-        socketio.sleep(2)
+        # Hand the box over to sysupgrade and stop touching it.
+        #
+        # This used to walk a fixed ~6s of cosmetic progress updates and then
+        # call reboot() unconditionally, on the theory that it was a harmless
+        # "fallback" if sysupgrade had somehow not restarted on its own. It was
+        # not harmless: a real flash takes 30-90s, so the timer always expired
+        # while stage 1 was still running and rebooted the device mid-upgrade.
+        # Stage 1 hands off to procd via `ubus call system sysupgrade`, and the
+        # reboot tore down ubus underneath it -- the observed failure was
+        #   upgrade: Commencing upgrade. Closing all shell sessions.
+        #   Command failed: ubus call system sysupgrade {...} (Connection failed)
+        #   sysupgrade completed with exit code: 246
+        # with the device coming back up 9s later on the OLD firmware. Nothing
+        # had been written to flash yet, which is the only reason this was
+        # recoverable rather than a brick.
+        #
+        # sysupgrade owns the reboot. It reboots on success as the last step of
+        # stage 2, so there is nothing to fall back to: if the box is still here
+        # the flash did not finish, and rebooting is the one thing that must not
+        # happen. Wait on the flash instead and only report what it did.
+        _wait_for_sysupgrade(status_file, pid_file)
 
-        # Initiate system restart - the sysupgrade command should handle this automatically
-        # but we'll add a fallback
-        socketio.sleep(1)
-        pcat_logger.logger.info("Initiating system reboot as fallback...")
-        subprocess.run(['reboot'], check=False)
-        
     except Exception as e:
         update_firmware_upgrade_status('error', 0, f'Firmware upgrade failed: {str(e)}', error=str(e))
         
@@ -2663,9 +3719,9 @@ def update_firmware_checkpoint_status(stage, message, file_path='', sha256='', l
         'logs': logs
     }
     
-    socketio.emit('firmware_checkpoint_status', status)
+    publish('firmware_checkpoint_status', status)
 
-def background_firmware_checkpoint_thread(firmware_url, keep_config, keep_config_option="-c", download_method="wget"):
+def background_firmware_checkpoint_thread(firmware_url, download_method="wget"):
     """Background thread for firmware checkpoint - download and calculate SHA256 only"""
     import tempfile
     import hashlib
@@ -2777,19 +3833,24 @@ def background_firmware_checkpoint_thread(firmware_url, keep_config, keep_config
         except:
             pass
 
-def background_firmware_install_thread(file_path, sha256, keep_config, keep_config_option="-c"):
+def background_firmware_install_thread(file_path, sha256, sysupgrade_flags):
     """Background thread for firmware installation from checkpoint file"""
     import subprocess
     import hashlib
     import os
     import time
-    
+
+    # Bound before the try: the error handler consults it to decide whether the
+    # image is safe to delete, and must not itself raise NameError on a failure
+    # that happens before the flash is set up.
+    pid_file = '/tmp/sysupgrade.pid'
+
     try:
         pcat_logger.logger.info(f"Starting firmware installation from checkpoint: {file_path}")
         update_firmware_upgrade_status('prepare', 0, 'Starting checkpoint firmware installation...')
-        socketio.sleep(0.3)
+        time.sleep(0.3)
         update_firmware_upgrade_status('prepare', 5, f'Checkpoint file: {os.path.basename(file_path)}')
-        socketio.sleep(0.3)
+        time.sleep(0.3)
 
         # Verify file exists
         update_firmware_upgrade_status('prepare', 10, 'Checking checkpoint file exists...')
@@ -2798,15 +3859,15 @@ def background_firmware_install_thread(file_path, sha256, keep_config, keep_conf
 
         file_size = os.path.getsize(file_path)
         update_firmware_upgrade_status('prepare', 15, f'Checkpoint file size: {file_size // (1024*1024)}MB ({file_size:,} bytes)')
-        socketio.sleep(0.3)
+        time.sleep(0.3)
 
         # Re-verify SHA256 if provided
         if sha256:
             pcat_logger.logger.info("Re-verifying SHA256 before installation...")
             update_firmware_upgrade_status('verify', 0, 'Re-verifying firmware integrity before installation...')
-            socketio.sleep(0.3)
+            time.sleep(0.3)
             update_firmware_upgrade_status('verify', 20, f'Expected SHA256: {sha256[:16]}...')
-            socketio.sleep(0.3)
+            time.sleep(0.3)
             update_firmware_upgrade_status('verify', 40, 'Calculating SHA256 hash of checkpoint file...')
 
             file_sha256 = hashlib.sha256()
@@ -2816,9 +3877,9 @@ def background_firmware_install_thread(file_path, sha256, keep_config, keep_conf
 
             calculated_sha256 = file_sha256.hexdigest()
             update_firmware_upgrade_status('verify', 70, f'Calculated SHA256: {calculated_sha256[:16]}...')
-            socketio.sleep(0.3)
+            time.sleep(0.3)
             update_firmware_upgrade_status('verify', 80, 'Comparing checksums...')
-            socketio.sleep(0.3)
+            time.sleep(0.3)
             if calculated_sha256.lower() != sha256.lower():
                 raise Exception(f"SHA256 verification failed. Expected: {sha256}, Got: {calculated_sha256}")
 
@@ -2827,59 +3888,42 @@ def background_firmware_install_thread(file_path, sha256, keep_config, keep_conf
         else:
             update_firmware_upgrade_status('verify', 100, 'No SHA256 provided - skipping verification')
 
-        socketio.sleep(0.3)
+        time.sleep(0.3)
         update_firmware_upgrade_status('prepare', 40, 'Integrity verification completed')
-        socketio.sleep(0.3)
+        time.sleep(0.3)
 
-        # Report config preservation mode
-        if keep_config and keep_config_option:
-            if keep_config_option == '-c':
-                config_desc = 'Preserve changed files in /etc/'
-            elif keep_config_option == '-o':
-                config_desc = 'Preserve changed files in / (except packages)'
-            else:
-                config_desc = f'Config option: {keep_config_option}'
-            update_firmware_upgrade_status('prepare', 50, f'Configuration mode: {config_desc}')
-        else:
-            update_firmware_upgrade_status('prepare', 50, 'Configuration mode: Fresh install (no config preservation)')
-        socketio.sleep(0.3)
+        # Report the flags the flash will run with
+        update_firmware_upgrade_status('prepare', 50, f'sysupgrade flags: {" ".join(sysupgrade_flags)}')
+        time.sleep(0.3)
 
         # Prepare for installation
         pcat_logger.logger.warning("CRITICAL: Firmware installation starting - DO NOT POWER OFF!")
         update_firmware_upgrade_status('install', 0, 'Starting firmware installation...')
-        socketio.sleep(0.5)
+        time.sleep(0.5)
         update_firmware_upgrade_status('install', 5, 'DO NOT POWER OFF THE DEVICE!')
-        socketio.sleep(0.3)
+        time.sleep(0.3)
         update_firmware_upgrade_status('install', 10, 'Building sysupgrade command...')
-        socketio.sleep(0.3)
+        time.sleep(0.3)
 
         # Prepare sysupgrade command
-        sysupgrade_cmd = ['sysupgrade']
-        if keep_config and keep_config_option:
-            sysupgrade_cmd.append(keep_config_option)
-            pcat_logger.logger.info(f"sysupgrade will use config option: {keep_config_option}")
-        else:
-            sysupgrade_cmd.append('-n')
-            pcat_logger.logger.info("sysupgrade will perform fresh install with no configuration preservation (-n flag)")
-
-        sysupgrade_cmd.append(file_path)
+        sysupgrade_cmd = ['sysupgrade'] + list(sysupgrade_flags) + [file_path]
         pcat_logger.logger.info(f"sysupgrade command: {' '.join(sysupgrade_cmd)}")
         update_firmware_upgrade_status('install', 20, f'Command: {" ".join(sysupgrade_cmd)}')
-        socketio.sleep(0.3)
+        time.sleep(0.3)
 
         # Execute sysupgrade detached from Flask process
         pcat_logger.logger.info("Starting detached sysupgrade process...")
         update_firmware_upgrade_status('install', 30, 'Setting up detached sysupgrade process...')
-        socketio.sleep(0.3)
+        time.sleep(0.3)
 
         # Create status file for progress reporting
         import json
         status_file = '/tmp/sysupgrade_status.json'
         pid_file = '/tmp/sysupgrade.pid'
-        log_file = '/tmp/sysupgrade.log'
+        log_file = SYSUPGRADE_LOG
 
         update_firmware_upgrade_status('install', 40, 'Creating status tracking files...')
-        socketio.sleep(0.3)
+        time.sleep(0.3)
 
         # Initialize status file
         status_data = {
@@ -2893,13 +3937,13 @@ def background_firmware_install_thread(file_path, sha256, keep_config, keep_conf
             json.dump(status_data, f)
 
         update_firmware_upgrade_status('install', 50, 'Setting environment variables for sysupgrade...')
-        socketio.sleep(0.3)
+        time.sleep(0.3)
         update_firmware_upgrade_status('install', 60, 'Preparing to hand off to sysupgrade process...')
 
-        socketio.sleep(2)
+        time.sleep(2)
 
         update_firmware_upgrade_status('restart', 0, 'Launching sysupgrade in detached mode...')
-        socketio.sleep(1)
+        time.sleep(1)
         
         # Build detached sysupgrade command with nohup
         detached_cmd = [
@@ -2923,8 +3967,8 @@ def background_firmware_install_thread(file_path, sha256, keep_config, keep_conf
             export HOME="/root"
             export SHELL="/bin/sh"
             
-            # Log start
-            echo "[$(date)] Starting sysupgrade: {' '.join(sysupgrade_cmd)}" >> {log_file}
+            # Log start ($* expands the positional args as data, never executed)
+            echo "[$(date)] Starting sysupgrade: $*" > {log_file}
             
             # Update status to installing
             echo '{{
@@ -2935,8 +3979,12 @@ def background_firmware_install_thread(file_path, sha256, keep_config, keep_conf
                 "started": {time.time()}
             }}' > {status_file}
             
-            # Execute sysupgrade and capture output
-            {' '.join(sysupgrade_cmd)} >> {log_file} 2>&1
+            # Execute sysupgrade and capture output. The command is passed as
+            # positional parameters (see the argv appended to this sh -c below),
+            # so the firmware path reaches sysupgrade as a single literal arg and
+            # is never re-parsed by the shell -- a filename like 'x;reboot' can't
+            # inject commands here.
+            "$@" >> {log_file} 2>&1
             RESULT=$?
             
             # Log completion
@@ -2965,34 +4013,74 @@ def background_firmware_install_thread(file_path, sha256, keep_config, keep_conf
                 exit $RESULT
             fi
             
-            # Clean up PID file
+            # A successful sysupgrade does not return: stage 2 reboots the box
+            # itself. Reaching this point means the flash exited 0 without
+            # restarting, which is not a state to "help" along -- the old
+            # firmware is still the running one and is intact.
+            #
+            # What used to be here (pkill the web app, sleep 2, /sbin/reboot)
+            # was wrong twice over: the pkill pattern matched
+            # pcat-manager-web-main.py, which is not how the app is started any
+            # more (granian serves pcat_wsgi:flask_app), so it silently matched
+            # nothing; and the reboot raced the flash it was supposed to be
+            # following. Leave the PID file in place as the completion marker
+            # the waiter reads, and let the device stay up.
             rm -f {pid_file}
-            
-            # Schedule Flask termination after brief delay
-            sleep 5
-            
-            # Find and terminate Flask process gracefully
-            pkill -f "pcat-manager-web-main.py" || true
-            
-            # Force reboot if needed
-            sleep 2
-            /sbin/reboot
-            '''
-        ]
+            ''',
+            # argv passed to the script above: $0 is a dummy 'sh', and the
+            # sysupgrade command (including the untrusted firmware path) follows
+            # as $1..$N. Keeping the path in argv instead of the script text is
+            # what makes the "$@"/$* references above injection-proof.
+            'sh',
+        ] + sysupgrade_cmd
 
-        # Start detached process
-        update_firmware_upgrade_status('restart', 5, 'Starting sysupgrade process with nohup...')
-        pcat_logger.logger.info(f"Starting detached sysupgrade command")
+        # Start detached process.
+        #
+        # start-stop-daemon -b is what actually gets the flash out from under
+        # this service. setsid()+nohup alone only detach the controlling
+        # terminal and signal group -- the shell stays a PID-child of the
+        # granian worker, and /etc/init.d/pcat-manager-web's stop() walks
+        # /proc/*/stat for children of the pidfile PID and SIGKILLs every one
+        # of them. So anything that restarts the web app mid-flash (including
+        # the upgrade's own former `pkill`) would take a live sysupgrade down
+        # with it. -b forks and lets init reap, leaving nothing for stop() to
+        # match. -m writes the pidfile so we can still track the flash.
+        update_firmware_upgrade_status('restart', 5, 'Starting detached sysupgrade process...')
+        pcat_logger.logger.info("Starting detached sysupgrade command")
+        # detached_cmd is ['nohup', 'sh', '-c', <script>, 'sh', <sysupgrade...>];
+        # -b already backgrounds and redirects, so drop the nohup wrapper and
+        # hand start-stop-daemon the shell itself.
+        #
+        # -n pcatflash is load-bearing, not cosmetic. -S means "start unless a
+        # matching process is found", and with only -x /bin/sh the match is any
+        # running /bin/sh on the box -- busybox answers "/bin/sh is already
+        # running", exits 1 and never launches the flash. Verified on-device.
+        # -n narrows the match to this name, which nothing else uses.
         detached_process = subprocess.Popen(
-            detached_cmd,
+            ['start-stop-daemon', '-b', '-m', '-p', SYSUPGRADE_LAUNCH_PID,
+             '-n', 'pcatflash', '-S', '-x', '/bin/sh', '--']
+            + detached_cmd[2:],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            preexec_fn=os.setsid  # Create new process group
+            start_new_session=True,
         )
 
-        pcat_logger.logger.info(f"Detached sysupgrade process group started with PID: {detached_process.pid}")
-        update_firmware_upgrade_status('restart', 10, f'Sysupgrade process launched (PID: {detached_process.pid})')
-        socketio.sleep(0.3)
+        # Not detached_process.pid -- that is the short-lived start-stop-daemon
+        # launcher, which exits as soon as it has forked. The flash writes its
+        # own $$ to pid_file, and that is what the waiter below tracks.
+        #
+        # Check the launcher's exit status rather than assuming it worked: a
+        # refusal here (see the -n note above) would otherwise leave the UI
+        # cheerfully reporting a flash that was never started, and the box
+        # would sit on the old firmware with no error anywhere.
+        launch_rc = detached_process.wait()
+        if launch_rc != 0:
+            raise Exception(
+                f'Failed to launch sysupgrade (start-stop-daemon exit '
+                f'{launch_rc}). The device has not been modified.')
+        pcat_logger.logger.info("Detached sysupgrade launched (reparented to init)")
+        update_firmware_upgrade_status('restart', 10, 'Sysupgrade process launched')
+        time.sleep(0.3)
         update_firmware_upgrade_status('restart', 15, 'Monitoring sysupgrade startup...')
 
         # Monitor progress via status file for initial confirmation
@@ -3021,56 +4109,45 @@ def background_firmware_install_thread(file_path, sha256, keep_config, keep_conf
                 pcat_logger.logger.warning(f"Error reading status file: {e}")
 
             monitor_time += 1
-            socketio.sleep(1)
+            time.sleep(1)
 
         # Final status update
         pcat_logger.logger.info("Sysupgrade process detached successfully - Flask can now safely terminate")
         update_firmware_upgrade_status('restart', 50, 'Firmware flashing in progress - process running independently')
-        socketio.sleep(0.3)
+        time.sleep(0.3)
         update_firmware_upgrade_status('restart', 55, 'Cleaning up temporary files...')
 
-        # Cleanup temp file
-        try:
-            if os.path.exists(file_path):
-                os.remove(file_path)
-                # Also try to remove the temp directory if empty
-                temp_dir = os.path.dirname(file_path)
-                try:
-                    os.rmdir(temp_dir)
-                except:
-                    pass
-        except Exception as cleanup_error:
-            pcat_logger.logger.warning(f"Failed to cleanup checkpoint file: {cleanup_error}")
+        # Do NOT delete file_path here. sysupgrade is reading this image right
+        # now -- it was launched detached a few lines above and has not even
+        # reached "Reading partition table from image" yet. Unlinking it out
+        # from under the flash raced the read and, unlike the reboot bug below,
+        # could lose the image mid-write. The reboot at the end of a successful
+        # sysupgrade clears /tmp (tmpfs) for us, so there is nothing to clean.
+        pcat_logger.logger.info(f"Firmware file kept for sysupgrade: {file_path}")
 
-        socketio.sleep(0.5)
-        update_firmware_upgrade_status('restart', 70, 'Sysupgrade process is flashing firmware to device...')
-        socketio.sleep(0.5)
-        update_firmware_upgrade_status('restart', 80, 'Waiting for firmware flash to complete...')
-        socketio.sleep(0.5)
-        update_firmware_upgrade_status('restart', 90, 'Preparing for system restart...')
-        socketio.sleep(0.5)
+        # sysupgrade owns the reboot -- see the long note in
+        # background_firmware_upgrade_thread(). The unconditional reboot that
+        # used to sit here fired ~6s after launch and killed the flash during
+        # its procd handoff ("ubus call system sysupgrade ... (Connection
+        # failed)", exit 246), dropping the device back onto its old firmware.
+        _wait_for_sysupgrade(status_file, pid_file)
 
-        # Mark as completed
-        update_firmware_upgrade_status('completed', 100, 'Firmware upgrade complete! System is restarting...')
-        socketio.sleep(2)
-        
-        # Initiate system restart fallback
-        socketio.sleep(1)
-        pcat_logger.logger.info("Initiating system reboot as fallback...")
-        try:
-            subprocess.Popen(['reboot'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        except Exception as reboot_error:
-            pcat_logger.logger.warning(f"Failed to initiate reboot: {reboot_error}")
-        
     except Exception as e:
         error_msg = f"Firmware installation failed: {str(e)}"
         pcat_logger.logger.error(error_msg)
         pcat_logger.logger.error(f"Installation error details: {e}", exc_info=True)
         update_firmware_upgrade_status('error', 0, error_msg, str(e))
         
-        # Cleanup on error
+        # Cleanup on error, but never out from under a live flash. Once
+        # sysupgrade has been launched it is reparented to init and keeps
+        # running regardless of what happens to this thread, so an exception
+        # here (or a waiter that gave up) does not mean the image is free --
+        # deleting it then would corrupt a flash that is still reading it.
         try:
-            if os.path.exists(file_path):
+            if _sysupgrade_running(pid_file):
+                pcat_logger.logger.warning(
+                    f"Not removing {file_path}: sysupgrade is still running")
+            elif os.path.exists(file_path):
                 os.remove(file_path)
                 temp_dir = os.path.dirname(file_path)
                 try:
@@ -3080,8 +4157,8 @@ def background_firmware_install_thread(file_path, sha256, keep_config, keep_conf
         except:
             pass
 
-@api_auth_required
 @flask_app.route("/api/v1/firmware_upgrade_status.json", methods=['GET'])
+@api_auth_required
 def get_firmware_upgrade_status():
     """Get current firmware upgrade status, including detached sysupgrade process"""
     global firmware_upgrade_status
@@ -3121,7 +4198,7 @@ def get_firmware_upgrade_status():
                 })
                 
                 # Emit updated status to connected clients
-                socketio.emit('firmware_upgrade_status', response_data.copy())
+                publish('firmware_upgrade_status', response_data.copy())
                 
         except Exception as e:
             pcat_logger.logger.warning(f"Error reading detached sysupgrade status: {e}")
@@ -3132,106 +4209,146 @@ def get_firmware_upgrade_status():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@socketio.event
+@bus_event
 def request_firmware_upgrade(message):
     """Socket handler for automatic firmware upgrade"""
+    if not _socket_authed():
+        return
     firmware_url = message.get("firmware_url")
-    keep_config = message.get("keep_config", True)
-    keep_config_option = message.get("keep_config_option", "-c")  # Default to -c
+    sysupgrade_flags = normalize_sysupgrade_flags(message)
     download_method = message.get("download_method", "wget")  # Default to wget
-    
+
     if not firmware_url:
         update_firmware_upgrade_status('error', 0, 'Invalid firmware URL', error='Invalid firmware URL')
         return
         
     global firmware_upgrade_thread, firmware_upgrade_status
+    # A firmware upgrade and an MCU update must never run together — refuse if
+    # an MCU update is already in progress.
+    if mcu_update_status.get('active', False):
+        update_firmware_upgrade_status('error', 0, 'MCU update in progress',
+                                       error='An MCU update is already running')
+        return
     with firmware_upgrade_lock:
         if firmware_upgrade_thread is None and not firmware_upgrade_status.get('active', False):
             update_firmware_upgrade_status('starting', 0, 'Firmware upgrade request received')
-            firmware_upgrade_thread = socketio.start_background_task(
-                background_firmware_upgrade_thread, firmware_url, keep_config, keep_config_option, download_method
+            firmware_upgrade_thread = _start_background_task(
+                background_firmware_upgrade_thread, firmware_url, sysupgrade_flags, download_method
             )
             update_firmware_upgrade_status('starting', 0, f'Upgrade thread started for: {firmware_url.split("/")[-1]}')
         else:
             update_firmware_upgrade_status('error', 0, 'Firmware upgrade already in progress', 
                                          error='Another upgrade is already running')
 
-@socketio.event
+@bus_event
 def get_firmware_upgrade_status_socket(message):
     """Socket handler to get current firmware upgrade status"""
+    if not _socket_authed():
+        return
     global firmware_upgrade_status
-    emit('firmware_upgrade_status', firmware_upgrade_status.copy())
+    reply('firmware_upgrade_status', firmware_upgrade_status.copy())
 
-@socketio.event
+@bus_event
 def request_firmware_checkpoint(message):
     """Socket handler for firmware checkpoint mode - download only"""
+    if not _socket_authed():
+        return
     firmware_url = message.get("firmware_url")
-    keep_config = message.get("keep_config", True)
-    keep_config_option = message.get("keep_config_option", "-c")
     download_method = message.get("download_method", "wget")
-    
+
     if not firmware_url:
-        socketio.emit('firmware_checkpoint_status', {
+        publish('firmware_checkpoint_status', {
             'stage': 'error',
             'message': 'No firmware URL provided'
         })
         return
-        
+
+    # Never start a firmware checkpoint/download while an MCU update runs.
+    if mcu_update_status.get('active', False):
+        publish('firmware_checkpoint_status', {
+            'stage': 'error',
+            'message': 'An MCU update is in progress'
+        })
+        return
+
     pcat_logger.logger.info(f"Starting firmware checkpoint mode: {firmware_url}")
     
     # Start checkpoint thread
-    checkpoint_thread = socketio.start_background_task(
+    checkpoint_thread = _start_background_task(
         background_firmware_checkpoint_thread,
-        firmware_url, keep_config, keep_config_option, download_method
+        firmware_url, download_method
     )
 
-@socketio.event
+@bus_event
 def request_firmware_install_from_checkpoint(message):
     """Socket handler to install firmware from checkpoint"""
+    if not _socket_authed():
+        return
     file_path = message.get("file_path")
     sha256 = message.get("sha256")
-    keep_config = message.get("keep_config", True)
-    keep_config_option = message.get("keep_config_option", "-c")
-    
+    sysupgrade_flags = normalize_sysupgrade_flags(message)
+
     if not file_path:
         update_firmware_upgrade_status('error', 0, 'No file path provided', 'No file path provided for installation')
         return
-        
+
+    # Never flash a system firmware image while an MCU update is running.
+    if mcu_update_status.get('active', False):
+        update_firmware_upgrade_status('error', 0, 'MCU update in progress',
+                                       'An MCU update is already running')
+        return
+
     pcat_logger.logger.info(f"Starting firmware installation from checkpoint: {file_path}")
     
     # Start installation thread  
-    install_thread = socketio.start_background_task(
+    install_thread = _start_background_task(
         background_firmware_install_thread,
-        file_path, sha256, keep_config, keep_config_option
+        file_path, sha256, sysupgrade_flags
     )
 
-@socketio.event
+@bus_event
 def cleanup_checkpoint_file(message):
     """Socket handler to cleanup checkpoint file"""
+    if not _socket_authed():
+        return
+
     file_path = message.get("file_path")
-    
+
     if not file_path:
         return
-        
+
     try:
-        import os
-        if os.path.exists(file_path):
-            os.remove(file_path)
+        import os, tempfile
+        # Confine deletion to checkpoint dirs under the system temp dir. Checkpoint
+        # files are created via tempfile.mkdtemp(prefix="firmware_checkpoint_"), so
+        # a real path is <tmp>/firmware_checkpoint_XXXX/<file>. Reject anything that
+        # escapes that (path traversal, absolute paths elsewhere) before os.remove.
+        tmp_root = os.path.realpath(tempfile.gettempdir())
+        real_path = os.path.realpath(file_path)
+        parent = os.path.dirname(real_path)
+        if (os.path.dirname(parent) != tmp_root
+                or not os.path.basename(parent).startswith("firmware_checkpoint_")):
+            pcat_logger.logger.warning(
+                f"Refused cleanup of path outside checkpoint temp dir: {file_path}")
+            return
+        if os.path.exists(real_path):
+            os.remove(real_path)
             # Also try to remove the temp directory if empty
-            temp_dir = os.path.dirname(file_path)
             try:
-                os.rmdir(temp_dir)
+                os.rmdir(parent)
             except:
                 pass
-            pcat_logger.logger.info(f"Cleaned up checkpoint file: {file_path}")
+            pcat_logger.logger.info(f"Cleaned up checkpoint file: {real_path}")
     except Exception as e:
         pcat_logger.logger.warning(f"Failed to cleanup checkpoint file: {e}")
 
-@socketio.event
+@bus_event
 def cancel_firmware_upgrade(message):
     """Socket handler to cancel firmware upgrade (only during download stage)"""
+    if not _socket_authed():
+        return
     global firmware_upgrade_thread, firmware_upgrade_status
-    
+
     if firmware_upgrade_status.get('stage') == 'download':
         # Kill the background thread if it exists
         with firmware_upgrade_lock:
@@ -3248,13 +4365,13 @@ def cancel_firmware_upgrade(message):
                 # Try to kill aria2c process (this would require process management)
                 # For now, we'll just update the status
                 
-                emit('firmware_upgrade_status', {
+                reply('firmware_upgrade_status', {
                     'stage': 'cancelled',
                     'progress': 0,
                     'message': 'Download cancelled by user'
                 })
     else:
-        emit('firmware_upgrade_status', {
+        reply('firmware_upgrade_status', {
             'stage': 'error',
             'progress': 0,
             'message': 'Cannot cancel upgrade at this stage'
@@ -3284,11 +4401,14 @@ def login_action():
         input_user_password = request.form.get('password')
         if user_auth.unix_user_auth(input_user_name, input_user_password):
             session['username'] = input_user_name
-            # Store the password for OpenWrt form auto-login
-            session['remembered_password'] = input_user_password
-            
+            # Keep the password server-side only (not in the session cookie) so
+            # the OpenWrt SSO link can auto-login to LuCI without embedding the
+            # password in every page's HTML.
+            _store_luci_password(input_user_password)
+
             # Set session lifetimes and store remember preference
-            if request.form.get('remember_login'):
+            remember_me = bool(request.form.get('remember_login'))
+            if remember_me:
                 session.permanent = True
                 session['remember_login'] = True  # Store remember preference in session
                 flask_app.permanent_session_lifetime = timedelta(days=180)  # 180 days for remember login
@@ -3296,12 +4416,26 @@ def login_action():
                 session.permanent = True
                 session['remember_login'] = False  # Store remember preference in session
                 flask_app.permanent_session_lifetime = timedelta(days=30)  # 30 days for normal login
-            
-            # Check for redirect URL after login
+
+            # Check for redirect URL after login. Only allow same-site relative
+            # paths: a bare startswith('/') check lets "//evil.com" and "/\evil"
+            # through, which browsers treat as protocol-relative off-site URLs
+            # (open redirect / phishing after auth).
             next_url = request.form.get('next') or request.args.get('next')
-            if next_url and next_url.startswith('/'):  # Security check: only allow relative URLs
-                return redirect(next_url)
-            return redirect("/")
+            if (next_url and next_url.startswith('/')
+                    and not next_url.startswith('//')
+                    and not next_url.startswith('/\\')):
+                response = redirect(next_url)
+            else:
+                response = redirect("/")
+
+            # A remembered login also gets a server-side token so it survives a
+            # SECRET_KEY rotation; a normal login clears any stale token.
+            if remember_me:
+                _set_remember_cookie(response, input_user_name)
+            else:
+                _clear_remember_cookie(response)
+            return response
         else:
             locales = {}
             locales.update(base_locales())
@@ -3316,8 +4450,8 @@ def login_action():
         locales.update(base_locales())
     return render_template(nt.login_file_name, error = error, locales = locales)
 
-@api_auth_required
 @flask_app.route('/pin_verify', methods=['POST'])
+@api_auth_required
 def pin_verify():
     """Verify PIN for protected routes"""
     if 'username' not in session:
@@ -3346,7 +4480,7 @@ def pin_verify():
     else:
         return jsonify({'success': False, 'error': 'Invalid PIN'}), 403
 
-@flask_app.route('/logout', methods=['GET', 'POST'])
+@flask_app.route('/logout', methods=['POST'])
 def logout_action():
     # Clear PIN authentication as well
     session.pop(PIN_SESSION_KEY, None)
@@ -3356,8 +4490,10 @@ def logout_action():
 
     session.pop('username', None)
     session.pop('remember_login', None)  # Clear remember preference on logout
-    session.pop('remembered_password', None)  # Clear remembered password on logout
-    return redirect("/login")
+    _clear_luci_password()
+    # Revoke the remember-me token too, otherwise the next request would just
+    # log this browser straight back in.
+    return _clear_remember_cookie(make_response(redirect("/login")))
 
 @flask_app.route("/settings")
 def settings_action():
@@ -3365,41 +4501,7 @@ def settings_action():
         return redirect(f"/login?next={request.path}")
 
     c_locale = current_locale()
-    if c_locale == "CN":
-        locales = {
-            "wifi_encrp": "Wi-Fi 加密",
-            "wifi_password": "Wi-Fi 密码",
-            "wifi_frequency": "Wi-Fi 频段",
-            "wifi_channel": "Wi-Fi 频道",
-            "hide_wifi_ssid": "隐藏网络不被发现",
-            "configuring_wifi_message": "设备正在重新加载配置信息，大约需要 <span x-text='configing_timeout'></span> 秒钟 ...",
-            "configuring_wifi_message2": "网络连接有可能断开。",
-
-            "wifi_ssid_is_empty": "Wi-Fi SSID 不能为空",
-            "wifi_ssid_too_long": "Wi-Fi SSID 长度不能太长",
-            "wifi_password_is_empty": "Wi-Fi 密码不能为空",
-            "wifi_password_at_least_8": "Wi-Fi 密码长度最少为 8 位",
-            
-
-            "no_encryption": "不加密"
-        }
-    else:
-        locales = {
-            "wifi_encrp": "Wi-Fi encryption",
-            "wifi_password": "Wi-Fi password",
-            "wifi_frequency": "Wi-Fi frequency",
-            "wifi_channel": "Wi-Fi Channel",
-            "hide_wifi_ssid": "Hide Wi-Fi SSID",
-            "configuring_wifi_message": "Configuring Wi-Fi, please wait <span x-text='configing_timeout'></span> seconds ...",
-            "configuring_wifi_message2": "Wi-Fi connections may be disconnected for a while",
-
-            "wifi_ssid_is_empty": "Wi-Fi SSID is empty",
-            "wifi_ssid_too_long": "Wi-Fi SSID too long",
-            "wifi_password_is_empty": "Wi-Fi password is empty",
-            "wifi_password_at_least_8": "Wi-Fi password requires >= 8 characters",
-
-            "no_encryption": "No encryption"
-        }
+    locales = _locales.get_locales("settings", c_locale)
 
     locales.update(base_locales())
     stm32_firmware_exist = pc_app.socket_client.stm32_firmware_exist()
@@ -3429,163 +4531,11 @@ def settings_timer_action():
         return redirect(f"/login?next={request.path}")
 
     c_locale = current_locale()
-    if c_locale == "CN":
-        locales = {
-            "wifi_encrp": "Wi-Fi 加密",
-            "wifi_password": "Wi-Fi 密码",
-            "wifi_frequency": "Wi-Fi 频段",
-            "hide_wifi_ssid": "隐藏网络不被发现",
-            "configuring_wifi_message": "设备正在重新加载配置信息，大约需要 10 秒钟...",
-            "configuring_wifi_message2": "网络连接有可能断开。",
-
-            "wifi_ssid_is_empty": "Wi-Fi SSID 不能为空",
-            "wifi_ssid_too_long": "Wi-Fi SSID 长度不能太长",
-            "wifi_password_is_empty": "Wi-Fi 密码不能为空",
-            "wifi_password_at_least_8": "Wi-Fi 密码长度最少为 8 位",
-
-            "no_configuration_for_swtich_strategy": "手动模式：按电源按钮开机；再次按电源按钮或输入 shutdown 命令安全关机。不受供电状态影响，完全手动控制",
-            "when_power_supply_disconnected": "当供电断开",
-            "after_minutes": "分钟后，",
-            "device_auto_power_off": "设备自动关机",
-            "car_mode_tip_1": "车载/UPS模式：当外接供电接通时，设备自动开机；当供电断开时，设备延迟指定时间后自动安全关机",
-            "car_mode_tip_2": "说明：设置后需手动关机使配置生效。此后连接充电器自动开机，断开充电器延迟关机。若手动开机则需手动关机（不受此模式控制）",
-            "car_timeout_invalid": "设置的值不合理，最大为 600 分钟",
-            "save_action_success_carmode_tip": "设置成功，需手动关机使设置生效",
-            "manu_mode": "手动模式",
-            "car_mode": "车载/UPS模式",
-            "timer_mode": "定时模式",
-            "force_power_mode": "直连电源",
-            "force_power_mode_tip_1": "直连电源模式：外接电源接通时自动开机，断开时立即关机",
-            "force_power_mode_tip_2": "有电池时正常安全关机；无电池时立即断电。忽略电池电量检查，适用于无电池场景或需要快速响应的应用",
-            "force_power_mode_mcu_warning": "⚠️ 直连电源模式需要 MCU 固件版本 RA2E1260306000 或更高版本，请先升级 MCU 固件",
-            "force_power_mode_mcu_current": "当前 MCU 版本",
-            "power_policy_title": "开关机策略",
-            "shutdown_policy_title": "关机策略",
-            "idle_shutdown_enabled": "启用WiFi无客户端自动关机",
-            "idle_shutdown_battery_only": "仅在电池供电时生效",
-            "idle_shutdown_timeout": "空闲超时时间",
-            "idle_shutdown_minutes": "分钟",
-            "idle_shutdown_tip": "当没有WiFi客户端连接时，设备将在指定时间后自动关机。此功能与其他电源模式（如车载模式）配合使用，先触发的条件将执行关机操作",
-            "idle_status_active": "有客户端连接",
-            "idle_status_idle": "空闲",
-            "idle_remaining_time": "剩余时间",
-            "low_battery_shutdown_enabled": "启用低电量自动关机",
-            "low_battery_threshold": "电量阈值",
-            "low_battery_percent": "%",
-            "low_battery_tip": "当电池电量下降并低于设定阈值时，设备将自动关机以保护电池。此功能与其他电源模式配合使用（OR逻辑），任一条件先触发即执行关机。注意：若开机时电量在阈值附近（阈值+2%以内），则不会立即关机，需等电量明显回升后再下降才触发",
-            "power_on": "开机",
-            "power_off": "关机",
-            "timer_action": "动作",
-            "timer_time": "时间",
-            "timer_days": "重复",
-            "timer_mon": "周一",
-            "timer_tue": "周二",
-            "timer_wed": "周三",
-            "timer_thu": "周四",
-            "timer_fri": "周五",
-            "timer_sat": "周六",
-            "timer_sun": "周日",
-            "same_timer_exist": "此配置已存在",
-            "please_select_days": "请选择重复的星期！",
-            "no_more_timers_support": "最多支持设置 6 个定时项",
-            "no_encryption": "不加密",
-            "power_event_log_title": "电源事件日志",
-            "power_event_log_tip": "记录所有电源相关事件，包括开机、关机、空闲关机、低电量关机、电压波动等",
-            "power_event_clear": "清除日志",
-            "power_event_clear_confirm": "确定要清除所有电源事件日志吗？",
-            "power_event_no_events": "暂无事件记录",
-            "power_event_type_system_start": "系统启动",
-            "power_event_type_system_shutdown": "系统关机",
-            "power_event_type_idle_shutdown_triggered": "空闲关机触发",
-            "power_event_type_idle_countdown_started": "空闲倒计时开始",
-            "power_event_type_idle_countdown_reset": "空闲倒计时重置",
-            "power_event_type_low_battery_shutdown_triggered": "低电量关机触发",
-            "power_event_type_power_mode_changed": "电源模式变更",
-            "power_event_type_settings_changed": "设置变更",
-            "power_event_type_power_dip": "电压波动",
-            "power_event_type_dc_plugged_in": "DC电源接入",
-            "power_event_type_dc_unplugged": "DC电源断开"
-        }
-    else:
-        locales = {
-            "wifi_encrp": "Wi-Fi encryption",
-            "wifi_password": "Wi-Fi password",
-            "wifi_frequency": "Wi-Fi frequency",
-            "hide_wifi_ssid": "Hide Wi-Fi SSID",
-            "configuring_wifi_message": "Configuring Wi-Fi, please wait...",
-            "configuring_wifi_message2": "Wi-Fi connections may be disconnected for a while.",
-
-            "wifi_ssid_is_empty": "Wi-Fi SSID is empty",
-            "wifi_ssid_too_long": "Wi-Fi SSID too long",
-            "wifi_password_is_empty": "Wi-Fi password is empty",
-            "wifi_password_at_least_8": "Wi-Fi password length is at least 8 bits",
-
-            "no_configuration_for_swtich_strategy": "Manual Mode: Press power button to turn on; press again or enter `shutdown` command for graceful shutdown. Unaffected by power supply status, fully manual control",
-            "when_power_supply_disconnected": "When charger disconnects",
-            "after_minutes": "minutes, ",
-            "device_auto_power_off": "Device will automatically power off.",
-            "car_mode_tip_1": "Car/UPS Mode: Auto power-on when external power connects; delayed graceful shutdown after power disconnects (configurable timeout)",
-            "car_mode_tip_2": "Note: After enabling, manually shut down the device for settings to take effect. Then charger connection will trigger auto power-on, disconnection triggers delayed shutdown. Manual power-on is not controlled by this mode and requires manual shutdown",
-            "car_timeout_invalid": "Settings invalid! Max 600 minutes.",
-            "manu_mode": "Manual mode",
-            "car_mode": "Car/UPS mode",
-            "timer_mode": "Timer mode",
-            "force_power_mode": "Direct Power",
-            "force_power_mode_tip_1": "Direct Power Mode: Auto power-on when external power connects, instant power-off when disconnected",
-            "force_power_mode_tip_2": "With battery: graceful shutdown. Without battery: instant power-off. Ignores battery level checks. Ideal for battery-free setups or quick-response applications",
-            "force_power_mode_mcu_warning": "⚠️ Direct Power Mode requires MCU firmware version RA2E1260306000 or higher. Please upgrade your MCU firmware first",
-            "force_power_mode_mcu_current": "Current MCU version",
-            "power_policy_title": "Startup & Shutdown",
-            "shutdown_policy_title": "Shutdown",
-            "idle_shutdown_enabled": "Enable No WiFi Client Auto-Shutdown",
-            "idle_shutdown_battery_only": "Only when on battery",
-            "idle_shutdown_timeout": "Idle Timeout",
-            "idle_shutdown_minutes": "minutes",
-            "idle_shutdown_tip": "When no WiFi clients are connected, the device will automatically shut down after the specified time. This feature works in OR mode with other power modes (e.g., Car mode). Whichever condition triggers first will initiate shutdown",
-            "idle_status_active": "Clients Connected",
-            "idle_status_idle": "Idle",
-            "idle_remaining_time": "Time Remaining",
-            "low_battery_shutdown_enabled": "Enable Low Battery Auto-Shutdown",
-            "low_battery_threshold": "Battery Threshold",
-            "low_battery_percent": "%",
-            "low_battery_tip": "When battery level drops below the set threshold, the device will automatically shut down to protect the battery. Works in OR mode with other power modes - whichever condition triggers first will initiate shutdown. Note: If the device powers on near the threshold (within 2% above), shutdown will not trigger until the battery clearly rises above and then drops below the threshold again",
-            "power_on": "Power on",
-            "power_off": "Power off",
-            "timer_action": "Action",
-            "timer_time": "Time",
-            "timer_days": "Timer days",
-            "timer_mon": "Monday",
-            "timer_tue": "Tuesday",
-            "timer_wed": "Wednesday",
-            "timer_thu": "Thursday",
-            "timer_fri": "Friday",
-            "timer_sat": "Saturday",
-            "timer_sun": "Sunday",
-            "same_timer_exist": "Another same timer already exists!",
-            "please_select_days": "Please select days!",
-            "no_more_timers_support": "No more timers support!",
-            "no_encryption": "No encryption",
-            "power_event_log_title": "Power Event Log",
-            "power_event_log_tip": "Records all power-related events including startup, shutdown, idle shutdown, low battery shutdown, voltage dips, etc.",
-            "power_event_clear": "Clear Log",
-            "power_event_clear_confirm": "Are you sure you want to clear all power event logs?",
-            "power_event_no_events": "No events recorded",
-            "power_event_type_system_start": "System Start",
-            "power_event_type_system_shutdown": "System Shutdown",
-            "power_event_type_idle_shutdown_triggered": "Idle Shutdown Triggered",
-            "power_event_type_idle_countdown_started": "Idle Countdown Started",
-            "power_event_type_idle_countdown_reset": "Idle Countdown Reset",
-            "power_event_type_low_battery_shutdown_triggered": "Low Battery Shutdown",
-            "power_event_type_power_mode_changed": "Power Mode Changed",
-            "power_event_type_settings_changed": "Settings Changed",
-            "power_event_type_power_dip": "Power Dip",
-            "power_event_type_dc_plugged_in": "DC Plugged In",
-            "power_event_type_dc_unplugged": "DC Unplugged"
-        }
+    locales = _locales.get_locales("timer", c_locale)
     locales.update(base_locales())
     stm32_firmware_exist = pc_app.socket_client.stm32_firmware_exist()
     saved_power_mode = pcat_config.get_power_mode()
-    if saved_power_mode == "direct_power":
+    if saved_power_mode == "direct_power" and is_photonicat2:
         mode_page = "force_power_mode_page"
     elif saved_power_mode == "car":
         mode_page = "car_mode_page"
@@ -3603,281 +4553,24 @@ def modem_action():
         return redirect(f"/login?next={request.path}")
     
     c_locale = current_locale()
-    if c_locale == "CN":
-        locales = {
-            "modem_4g_only": "仅4G",
-            "modem_5g_only": "仅5G",
-            "tab_model_basic": "Modem 信息",
-            "tab_sms_box": "短信箱",
-            "tab_modem_adv": "Modem 设置",
-            "tab_modem_hook": "短信转发",
-            
-            "modem_invalid": "Modem 未连接",
-            "modem_wwan_powered_off": "WWAN 模块已关闭。请在设备控制页面开启 WWAN 电源以使用蜂窝网络和短信功能。",
-            "modem_checking_status": "检查 Modem 状态...",
-            "modem_loading_info": "加载 Modem 信息...",
-            "modem_loading_advanced": "加载 Modem 高级设置...",
-            "modem_sim_number": "SIM 卡号",
-            "custom": "自定义",
-            "modem_imei_number": "Modem IMEI号",
-            "modem_firmware_version": "Modem 固件版本号",
-            "modem_model": "Modem 型号",
-            "modem_tech_pref": "Modem 模式",
-            "modem_bands_pref": "Modem 频段",
-            "modem_roam_pref": "Modem 数据漫游",
-            "modem_temperature": "Modem 温度",
-            "modem_isp_details": "运营商信息",
-            "modem_network_info": "连接信息",
-            "modem_cell_signals": "SINR, RSRQ, RSRP, CSQ %",
-            "modem_cell_id": "Cell ID",
-            "cell_carrier_info": "载波信息",
-            "modem_usbnet_mode": "Modem USB 模式",
-            "modem_usb_speed": "USB 速度",
-            "modem_cell_info": "Cell Information",
-            "modem_serving_info": "服务信息",
-            "modem_serving_quality": "SINR, RSRQ, RSRP, SRX 数据",
-            "modem_reset_success": "Modem 重置成功",
-            "modem_factory_reset_button": "Modem 恢复出厂设置",
-            "modem_roam_pref_any": "任意运营商",
-            "modem_roam_pref_affiliated": "关联运营商",
-            "modem_roam_pref_no": "不漫游",
-            "modem_tech_pref_auto": "自动",
-            "modem_sim_absent": "未检测到 SIM 卡",
-            "modem_no_data": "无短信",
-            "modem_4g_only": "仅4G",
-            "modem_5g_only": "仅5G",
-            "modem_cpin": "SIM 卡 PIN 码",
-            "are_you_sure_reset_modem": "⚠️注意：将您的调制解调器恢复出厂设置将永久删除所有自定义设置，包括短信、APN和网络配置。是否继续？",
-            "modem_hook_enabled": "启用短信转发脚本",
-            "modem_hook_warning": "此钩子脚本会在每条短信到达时自动运行，并可能触发后续操作。⚠️警告: 仅限高级用户使用。配置错误可能导致数据泄露、文件被删除或产生额外费用。仅在您有编程基础，完全理解其行为并愿意承担所有风险的前提下使用。$1  →  sender's phone number, $2  →  message content, $3  →  timestamp",
-            "modem_hook_responsibility": "我理解风险并承担全部责任。",
-            "hook_script_tab": "脚本设置",
-            "hook_history_tab": "执行历史",
-            "hook_history_title": "短信钩子执行历史",
-            "hook_history_description": "显示所有短信钩子脚本执行的详细日志，包括执行时间、输出和错误信息。",
-            "hook_filter_status": "状态",
-            "hook_filter_all": "全部",
-            "hook_filter_success_only": "仅成功",
-            "hook_filter_failed_only": "仅失败",
-            "hook_btn_refresh": "刷新",
-            "hook_btn_test_api": "测试API",
-            "hook_btn_create_table": "创建表",
-            "hook_btn_insert_test": "插入测试",
-            "hook_btn_cleanup": "清理",
-            "hook_stats_total": "总执行次数",
-            "hook_stats_successful": "成功次数",
-            "hook_stats_failed": "失败次数",
-            "hook_stats_avg_duration": "平均执行时长",
-            "hook_table_time": "时间",
-            "hook_table_status": "状态",
-            "hook_table_sms_info": "短信信息",
-            "hook_table_duration": "执行时长",
-            "hook_table_output": "输出",
-            "hook_table_actions": "操作",
-            "hook_status_success": "成功",
-            "hook_status_failed": "失败",
-            "hook_btn_view_details": "查看详情",
-            "hook_no_records_title": "未找到钩子执行记录",
-            "hook_no_records_message": "当短信触发钩子脚本后，执行记录将显示在这里。",
-            "hook_modal_title": "钩子执行详情",
-            "hook_modal_execution_info": "执行信息",
-            "hook_modal_execution_id": "执行ID",
-            "hook_modal_return_code": "返回码",
-            "hook_modal_duration": "执行时长",
-            "hook_modal_start_time": "开始时间",
-            "hook_modal_end_time": "结束时间",
-            "hook_modal_sms_message": "短信消息",
-            "hook_modal_sms_id": "短信ID",
-            "hook_modal_sender": "发送方",
-            "hook_modal_message_timestamp": "消息时间",
-            "hook_modal_message_content": "消息内容",
-            "hook_modal_hook_command": "钩子命令",
-            "hook_modal_script_content": "脚本内容（执行时）",
-            "hook_modal_stdout": "标准输出",
-            "hook_modal_stderr": "错误输出",
-            "hook_modal_error_message": "错误信息",
-            "hook_modal_close": "关闭"
-        }
-    else:
-        locales = {
-            "modem_4g_only": "4G Only",
-            "modem_5g_only": "5G Only",
-            "tab_model_basic": "Modem Info",
-            "tab_sms_box": "SMS Inbox",
-            "tab_modem_adv": "Modem Settings",
-            "tab_modem_hook": "SMS Hook",
-            
-            "modem_invalid": "Modem Invalid or Unsupported",
-            "modem_wwan_powered_off": "WWAN module is powered off. Enable WWAN Power in Device Control to use cellular and SMS.",
-            "modem_checking_status": "Checking Modem Status...",
-            "modem_loading_info": "Loading Modem Info...",
-            "modem_loading_advanced": "Loading Modem Advanced Settings...",
-            "modem_sim_number": "SIM Number",
-            "custom": "Custom",
-            "modem_imei_number": "Modem IMEI",
-            "modem_firmware_version": "Modem Firmware Version",
-            "modem_model": "Modem Model",
-            "modem_tech_pref": "Cellular 5G/LTE Bands",
-            "modem_bands_pref": "Cellular Bands Selection",
-            "modem_roam_pref": "Data Roaming",
-            "modem_temperature": "Modem Temperature",
-            "modem_isp_details": "Operator Details",
-            "modem_network_info": "Network Information",
-            "modem_cell_signals": "SINR, RSRQ, RSRP, CSQ %",
-            "modem_cell_id": "Cell ID",
-            "cell_carrier_info": "Carrier Information",
-            "modem_usbnet_mode": "Modem USB Mode",
-            "modem_usb_speed": "USB Speed",
-            "modem_cell_info": "Cell Information",
-            "modem_serving_info": "Serving Cell Information",
-            "modem_serving_quality": "SINR, RSRQ, RSRP, SRX Data",
-            "modem_reset_success": "Modem Reset Success",
-            "modem_factory_reset_button": "Modem Factory Reset",
-            "modem_roam_pref_any": "Any",
-            "modem_roam_pref_affiliated": "Affiliated",
-            "modem_roam_pref_no": "No Roaming",
-            "modem_tech_pref_auto": "Auto",
-            "modem_sim_absent": "SIM card not detected",
-            "modem_no_data": "No SMS",
-            "modem_4g_only": "4G Only",
-            "modem_5g_only": "5G Only",
-            "modem_cpin": "SIM PIN",
-            "are_you_sure_reset_modem": "⚠️ Caution: Resetting your modem to factory settings will permanently erase all custom settings, including SMS, APN, and network configurations. Proceed?",
-            "modem_hook_warning": "This hook script runs automatically on every incoming SMS and can trigger further actions. ⚠️ Caution — advanced users only. A misconfiguration could leak data, delete files, or incur costs. Use it only if you fully understand its behavior and accept all risks. $1  →  sender's phone number, $2  →  message content, $3  →  timestamp",
-            "modem_hook_enabled": "Enable SMS Hook Script",
-            "modem_hook_responsibility": "I understand the risks and take full responsibility.",
-            "hook_script_tab": "Hook Script",
-            "hook_history_tab": "Execution History",
-            "hook_history_title": "SMS Hook Execution History",
-            "hook_history_description": "Detailed log of all SMS hook script executions with timing, output, and error information.",
-            "hook_filter_status": "Status",
-            "hook_filter_all": "All",
-            "hook_filter_success_only": "Success Only",
-            "hook_filter_failed_only": "Failed Only",
-            "hook_btn_refresh": "Refresh",
-            "hook_btn_test_api": "Test API",
-            "hook_btn_create_table": "Create Table",
-            "hook_btn_insert_test": "Insert Test",
-            "hook_btn_cleanup": "Clean Up",
-            "hook_stats_total": "Total Executions",
-            "hook_stats_successful": "Successful",
-            "hook_stats_failed": "Failed",
-            "hook_stats_avg_duration": "Avg Duration",
-            "hook_table_time": "Time",
-            "hook_table_status": "Status",
-            "hook_table_sms_info": "SMS Info",
-            "hook_table_duration": "Duration",
-            "hook_table_output": "Output",
-            "hook_table_actions": "Actions",
-            "hook_status_success": "Success",
-            "hook_status_failed": "Failed",
-            "hook_btn_view_details": "View Details",
-            "hook_no_records_title": "No hook execution records found",
-            "hook_no_records_message": "Hook executions will appear here after SMS messages trigger your hook script.",
-            "hook_modal_title": "Hook Execution Details",
-            "hook_modal_execution_info": "Execution Info",
-            "hook_modal_execution_id": "Execution ID",
-            "hook_modal_return_code": "Return Code",
-            "hook_modal_duration": "Duration",
-            "hook_modal_start_time": "Start Time",
-            "hook_modal_end_time": "End Time",
-            "hook_modal_sms_message": "SMS Message",
-            "hook_modal_sms_id": "SMS ID",
-            "hook_modal_sender": "Sender",
-            "hook_modal_message_timestamp": "Message Timestamp",
-            "hook_modal_message_content": "Message Content",
-            "hook_modal_hook_command": "Hook Command",
-            "hook_modal_script_content": "Hook Script Content (at time of execution)",
-            "hook_modal_stdout": "STDOUT Output",
-            "hook_modal_stderr": "STDERR Output",
-            "hook_modal_error_message": "Error Message",
-            "hook_modal_close": "Close"
-        }
+    locales = _locales.get_locales("modem", c_locale)
 
     locales.update(base_locales())
     stm32_firmware_exist = pc_app.socket_client.stm32_firmware_exist()
-    return render_template(nt.modem_file_name, stm32_firmware_exist = stm32_firmware_exist, locales = locales)
+    return render_template(nt.modem_file_name, stm32_firmware_exist = stm32_firmware_exist, modem_installed = modem_hw_present(), locales = locales)
 
 @flask_app.route("/phone")
-@pin_required
 def phone_action():
+    if 'username' not in session:
+        return redirect(f"/login?next={request.path}")
+    if not is_photonicat2:
+        # No call-audio path on a Photonicat 1 (the modem's PCM link reaches a
+        # codec only on PCAT2-REV2), so the page has nothing to drive. Unlike
+        # the other optional pages it is not even reachable by URL here.
+        return render_error_page(404)
+
     c_locale = current_locale()
-    if c_locale == "CN":
-        locales = {
-            "nav_phone": "电话",
-            
-            # Voice Calls translations
-            "voice_call_manager": "语音通话管理器",
-            "voice_call_under_development": "语音通话管理器 (开发中)",
-            "voice_no_active_calls": "无活跃通话",
-            "voice_calling": "正在呼叫...",
-            "voice_make_call": "拨打",
-            "voice_call_controls": "通话控制",
-            "voice_answer": "接听",
-            "voice_hangup": "挂断", 
-            "voice_audio_path": "音频路径",
-            "voice_speaker": "扬声器",
-            "voice_earpiece": "听筒",
-            "voice_headset": "耳机",
-            "voice_bluetooth": "蓝牙",
-            "voice_call_history": "通话记录",
-            "voice_all_calls": "全部通话",
-            "voice_outgoing": "拨出",
-            "voice_incoming": "接入", 
-            "voice_missed": "未接",
-            "voice_number": "号码",
-            "voice_type": "类型",
-            "voice_duration": "时长",
-            "voice_time": "时间",
-            "voice_actions": "操作",
-            "voice_call_back": "回拨",
-            "voice_delete": "删除",
-            "voice_refresh": "刷新",
-            "voice_clear": "清空",
-            "voice_no_history_found": "未找到通话记录",
-            "voice_start_making_calls": "开始拨打电话以查看历史记录",
-            "voice_no_calls_found": "未找到",
-            "voice_calls_found": "通话",
-            "voice_loading_history": "正在加载通话记录..."
-        }
-    else:
-        locales = {
-            "nav_phone": "Phone",
-            
-            # Voice Calls translations
-            "voice_call_manager": "Voice Call Manager",
-            "voice_call_under_development": "Voice Call Manager (Under Development)",
-            "voice_no_active_calls": "No active calls",
-            "voice_calling": "Calling...",
-            "voice_make_call": "Call",
-            "voice_call_controls": "Call Controls",
-            "voice_answer": "Answer",
-            "voice_hangup": "Hang Up", 
-            "voice_audio_path": "Audio Path",
-            "voice_speaker": "Speaker",
-            "voice_earpiece": "Earpiece",
-            "voice_headset": "Headset",
-            "voice_bluetooth": "Bluetooth",
-            "voice_call_history": "Call History",
-            "voice_all_calls": "All Calls",
-            "voice_outgoing": "Outgoing",
-            "voice_incoming": "Incoming", 
-            "voice_missed": "Missed",
-            "voice_number": "Number",
-            "voice_type": "Type",
-            "voice_duration": "Duration",
-            "voice_time": "Time",
-            "voice_actions": "Actions",
-            "voice_call_back": "Call Back",
-            "voice_delete": "Delete",
-            "voice_refresh": "Refresh",
-            "voice_clear": "Clear",
-            "voice_no_history_found": "No call history found",
-            "voice_start_making_calls": "Start making calls to see your history here",
-            "voice_no_calls_found": "No",
-            "voice_calls_found": "calls found",
-            "voice_loading_history": "Loading call history..."
-        }
+    locales = _locales.get_locales("phone", c_locale)
 
     locales.update(base_locales())
     return render_template("phone.html", locales = locales)
@@ -3909,6 +4602,10 @@ def general_settings_action():
 
     # Get terminal enabled setting
     current_terminal_enabled = pcat_config.get_user_config_key("terminal_enabled", True)
+    current_nas_enabled = pcat_config.get_user_config_key("nas_enabled", True)
+    current_lxc_enabled = pcat_config.get_user_config_key("lxc_enabled", False)
+    current_gps_enabled = pcat_config.get_user_config_key("gps_enabled", False)
+    current_phone_enabled = pcat_config.get_user_config_key("phone_enabled", False)
 
     # Get current TCP congestion control algorithm
     current_tcp_congestion = "cubic"
@@ -3920,42 +4617,7 @@ def general_settings_action():
     except Exception:
         pass
 
-    if c_locale == "CN":
-        locales = {
-            "general_settings_title": "通用设置",
-            "language_label": "系统语言",
-            "language_help": "同时影响本管理界面和 OpenWrt LuCI 的显示语言。",
-            "timezone_label": "时区",
-            "timezone_help": "设置设备的系统时区。",
-            "hostname_label": "主机名",
-            "hostname_help": "设置设备的主机名，用于网络标识。",
-            "hostname_placeholder": "请输入主机名",
-            "invalid_hostname": "主机名只能包含字母、数字和连字符，且不能以连字符开头或结尾。",
-            "tcp_cc_label": "TCP 拥塞控制算法",
-            "tcp_cc_help": "设置 TCP 拥塞控制算法，影响网络传输性能。",
-            "terminal_enabled_label": "Web 终端",
-            "terminal_enabled_help": "启用或禁用导航栏中的 Web 终端功能。",
-            "saved_succeed": "保存成功",
-            "saving": "保存中...",
-        }
-    else:
-        locales = {
-            "general_settings_title": "General Settings",
-            "language_label": "System Language",
-            "language_help": "Affects both this management interface and OpenWrt LuCI display language.",
-            "timezone_label": "Timezone",
-            "timezone_help": "Set the system timezone for the device.",
-            "hostname_label": "Hostname",
-            "hostname_help": "Set the device hostname for network identification.",
-            "hostname_placeholder": "Enter hostname",
-            "invalid_hostname": "Hostname can only contain letters, numbers, and hyphens. Cannot start or end with a hyphen.",
-            "tcp_cc_label": "TCP Congestion Control",
-            "tcp_cc_help": "Set the TCP congestion control algorithm to optimize network performance.",
-            "terminal_enabled_label": "Web Terminal",
-            "terminal_enabled_help": "Enable or disable the web terminal access in the navigation bar.",
-            "saved_succeed": "Saved Successfully",
-            "saving": "Saving...",
-        }
+    locales = _locales.get_locales("general_settings", c_locale)
     locales.update(base_locales())
     stm32_firmware_exist = pc_app.socket_client.stm32_firmware_exist()
     return render_template(nt.general_settings_file_name,
@@ -3965,7 +4627,53 @@ def general_settings_action():
                            current_zonename=current_zonename,
                            current_tcp_congestion=current_tcp_congestion,
                            current_terminal_enabled=current_terminal_enabled,
+                           current_nas_enabled=current_nas_enabled,
+                           current_lxc_enabled=current_lxc_enabled,
+                           current_gps_enabled=current_gps_enabled,
+                           current_phone_enabled=current_phone_enabled,
+                           gps_capable=_gps_capable_modem(),
+                           lxc_capable=is_photonicat2,
+                           # Capability gates are resolved here, not in Alpine:
+                           # an x-show/x-if on the toggle paints the row for a
+                           # frame before Alpine tears it down again, so an
+                           # unsupported box flashes a switch it must not offer.
+                           phone_capable=phone_capable(),
                            locales=locales)
+
+TCP_CONGESTION_CHOICES = ("bbr", "cubic", "reno")
+
+
+def _set_tcp_congestion(value):
+    """Apply a congestion control algorithm now and across reboots.
+
+    /etc/sysctl.conf rather than a sysctl.d drop-in because that is where the
+    existing setting lives; /etc/init.d/sysctl reads both at boot. Shared with
+    the reset path so the two cannot drift on how they persist it.
+    """
+    if value not in TCP_CONGESTION_CHOICES:
+        raise ValueError("unsupported congestion control: %r" % (value,))
+    subprocess.run(["sysctl", "-w", f"net.ipv4.tcp_congestion_control={value}"],
+                   capture_output=True, text=True, timeout=5)
+    sysctl_conf = "/etc/sysctl.conf"
+    sysctl_key = "net.ipv4.tcp_congestion_control"
+    lines = []
+    found = False
+    try:
+        with open(sysctl_conf, "r") as f:
+            lines = f.readlines()
+    except FileNotFoundError:
+        pass
+    with open(sysctl_conf, "w") as f:
+        for line in lines:
+            if line.strip().startswith(sysctl_key):
+                f.write(f"{sysctl_key}={value}\n")
+                found = True
+            else:
+                f.write(line)
+        if not found:
+            f.write(f"{sysctl_key}={value}\n")
+    return value
+
 
 @flask_app.route("/api/v1/general_settings.json", methods=["POST"])
 @api_auth_required
@@ -3976,9 +4684,21 @@ def save_general_settings_api():
 
     results = []
 
-    # Save language
+    # Save appearance, on the same rule as the language: an explicit light/dark
+    # is the device's, "auto" clears it and hands each browser back to its own
+    # prefers-color-scheme.
+    theme = data.get("theme")
+    if theme in ("auto",) + VALID_THEMES:
+        set_explicit_theme(theme)
+        results.append("theme")
+
+    # Save language. This is the deliberate "set the device's language" action,
+    # so it is stored device-wide and every browser follows it from the next
+    # request; the session/cookie below only keep this client consistent if the
+    # persistent write ever fails.
     language = data.get("language")
     if language in ["EN", "CN"]:
+        set_explicit_locale(language)
         session["locale"] = language
         luci_lang = "zh_cn" if language == "CN" else "en"
         _openwrt_uci_set(f"luci.main.lang={luci_lang}")
@@ -3996,29 +4716,9 @@ def save_general_settings_api():
 
     # Save TCP congestion control
     tcp_congestion = data.get("tcp_congestion")
-    if tcp_congestion in ["bbr", "cubic", "reno"]:
+    if tcp_congestion in TCP_CONGESTION_CHOICES:
         try:
-            subprocess.run(["sysctl", "-w", f"net.ipv4.tcp_congestion_control={tcp_congestion}"],
-                           capture_output=True, text=True, timeout=5)
-            # Persist across reboots via sysctl.conf
-            sysctl_conf = "/etc/sysctl.conf"
-            sysctl_key = "net.ipv4.tcp_congestion_control"
-            lines = []
-            found = False
-            try:
-                with open(sysctl_conf, "r") as f:
-                    lines = f.readlines()
-            except FileNotFoundError:
-                pass
-            with open(sysctl_conf, "w") as f:
-                for line in lines:
-                    if line.strip().startswith(sysctl_key):
-                        f.write(f"{sysctl_key}={tcp_congestion}\n")
-                        found = True
-                    else:
-                        f.write(line)
-                if not found:
-                    f.write(f"{sysctl_key}={tcp_congestion}\n")
+            _set_tcp_congestion(tcp_congestion)
             results.append("tcp_congestion")
         except Exception as e:
             pcat_logger.logger.error(f"Failed to set TCP congestion control: {e}")
@@ -4028,6 +4728,17 @@ def save_general_settings_api():
     if terminal_enabled is not None:
         pcat_config.set_user_config_key("terminal_enabled", bool(terminal_enabled))
         results.append("terminal_enabled")
+
+    # Menu visibility for the NAS, LXC, GPS and phone pages
+    for key in ("nas_enabled", "lxc_enabled", "gps_enabled", "phone_enabled"):
+        val = data.get(key)
+        if key == "lxc_enabled" and not is_photonicat2:
+            # No LXC on Photonicat 1: the page has no switch, and a stray
+            # value in the payload must not store an opt-in either.
+            continue
+        if val is not None:
+            pcat_config.set_user_config_key(key, bool(val))
+            results.append(key)
 
     # Save hostname
     hostname = data.get("hostname")
@@ -4047,222 +4758,545 @@ def save_general_settings_api():
         return resp
     return jsonify(response_data)
 
+
+# What "Reset to default" restores. Menu visibility repeats the fallbacks used
+# by inject_cache_bust() and the settings page, so resetting lands on the same
+# state a device ships in rather than on a second, divergent set of defaults.
+GENERAL_SETTINGS_DEFAULTS = {
+    "terminal_enabled": True,
+    "nas_enabled": True,
+    "lxc_enabled": False,
+    "gps_enabled": False,
+    "phone_enabled": False,
+    # cubic is the kernel's own default (CONFIG_DEFAULT_CUBIC); bbr is the
+    # opinionated choice this page offers, so it is not the reset target.
+    "tcp_congestion": "cubic",
+}
+
+# Straight out of /rom/etc/uci-defaults/99-default-settings, the script that
+# sets these on a factory boot -- so "reset" lands on the values the device
+# actually shipped with rather than on a second opinion about them.
+FACTORY_ZONENAME = "Asia/Shanghai"
+FACTORY_TIMEZONE = "CST-8"
+
+
+def factory_hostname():
+    """The hostname a fresh flash would pick.
+
+    Mirrors 99-default-settings, which reads the board compatible and uses
+    photonicat2-openwrt on a photonicat2 and photonicat-openwrt otherwise.
+    Derived rather than hardcoded so a different board resets to its own name.
+    """
+    try:
+        with open("/proc/device-tree/compatible", "rb") as f:
+            board = f.read().split(b"\0")[0].decode("utf-8", "replace")
+    except OSError:
+        board = ""
+    if board == "ariaboard,photonicat2":
+        return "photonicat2-openwrt"
+    return "photonicat-openwrt"
+
+
+@flask_app.route("/api/v1/general_settings/reset.json", methods=["POST"])
+@api_session_strict
+def reset_general_settings_api():
+    """Restore every setting on this page to its factory value.
+
+    Everything the page can change, including hostname and timezone: the button
+    says reset, so it resets. Factory values come from the same place a fresh
+    flash gets them (see FACTORY_* above), not from a second opinion here.
+    """
+    reset = []
+
+    # Appearance and language go back to "nobody has chosen", which returns
+    # every browser to its own system preference and Accept-Language.
+    set_explicit_theme("auto")
+    reset.append("theme")
+    pcat_config.set_user_config_key(UI_LANGUAGE_KEY, None)
+    session.pop("locale", None)
+    reset.append("language")
+
+    for key in ("terminal_enabled", "nas_enabled", "lxc_enabled",
+                "gps_enabled", "phone_enabled"):
+        pcat_config.set_user_config_key(key, GENERAL_SETTINGS_DEFAULTS[key])
+        reset.append(key)
+
+    try:
+        _set_tcp_congestion(GENERAL_SETTINGS_DEFAULTS["tcp_congestion"])
+        reset.append("tcp_congestion")
+    except Exception as e:
+        pcat_logger.logger.error(f"Reset: failed to restore TCP congestion: {e}")
+
+    # Hostname and timezone. Committed and then reloaded, so the hostname is
+    # actually in effect rather than only correct after the next reboot.
+    try:
+        _openwrt_uci_set(f"system.@system[0].hostname={factory_hostname()}")
+        _openwrt_uci_set(f"system.@system[0].zonename={FACTORY_ZONENAME}")
+        _openwrt_uci_set(f"system.@system[0].timezone={FACTORY_TIMEZONE}")
+        _openwrt_uci_commit("system")
+        subprocess.run(["/etc/init.d/system", "reload"],
+                       capture_output=True, text=True, timeout=10)
+        reset.extend(["hostname", "timezone"])
+    except Exception as e:
+        pcat_logger.logger.error(f"Reset: failed to restore hostname/timezone: {e}")
+
+    pcat_logger.logger.info("General settings reset to defaults: %s", reset)
+
+    # Clear the per-browser language cookie too, or this client would keep
+    # overriding the freshly cleared device default and the reset would look
+    # like it had not worked.
+    resp = make_response(jsonify({"status": "ok", "reset": reset}))
+    resp.delete_cookie('pcat_lang')
+    return resp
+
+def _gps_capable_modem():
+    """True when the fitted modem exposes the Quectel QGPS engine AND its
+    secondary AT port (ttyUSB2) is not owned by a dialer.
+
+    EM05 / RM500Q / EM520 run in QMI mode, where quectel-cm dials over
+    /dev/cdc-wdm0 and holds no tty — ttyUSB1 (NMEA) and ttyUSB2 (AT) are ours
+    to use. RM500U is excluded even though it has GNSS: it dials over AT on
+    ttyUSB2, and sharing that port with quectel-cm corrupts both streams.
+    FM350 has no GNSS interface at all (its USB SKU exposes zero location AT
+    commands). False while the modem model is still unknown (early boot)."""
+    try:
+        mc = pc_app.modem_client
+        return mc.is_em05() or mc.is_500q() or mc.is_520()
+    except Exception:
+        return False
+
+def _gps_restore_if_wanted():
+    """Bring the GNSS engine back after a reboot/app restart when the user
+    left it on. Called lazily from the status poll (and once via a startup
+    timer) because the modem model is unknown for the first few seconds."""
+    try:
+        if not pcat_config.get_user_config_key(pc_gps_client.GPS_POWER_KEY, False):
+            return
+        if not _gps_capable_modem():
+            return
+        client = pc_gps_client.gps_client
+        if not client.powered:
+            client.power_on()
+            return
+        # Powered, but is it? Any module reset (our own restart button, a
+        # firmware watchdog, a USB re-enumeration) leaves the session off
+        # while this flag still says on, and nothing would ever notice --
+        # observed after an AT+CFUN=1,1: NMEA stopped dead and the page sat
+        # at 0 sentences. Re-arm when the stream has gone quiet.
+        if client.nmea_stalled():
+            pcat_logger.logger.warning(
+                "gps: no NMEA for %ss, re-arming the GNSS session",
+                pc_gps_client.NMEA_STALL_SECS)
+            client.power_off()
+            client.power_on()
+    except Exception as e:
+        pcat_logger.logger.warning(f"gps: restore failed: {e}")
+
+def _gps_restore_loop():
+    """Keeper for the user's GNSS choice, for the app's lifetime.
+
+    A one-shot 20s timer used to do this, which missed whenever the modem
+    wasn't identified yet at T+20 (model detection can take much longer on a
+    slow boot/dial) or the AT channel wasn't up — and after that miss the
+    receiver only came back when someone opened the /gps page, because the
+    status poll was the only other caller. Same story for the NMEA-stall
+    re-arm: it only ran while the page was being watched. Each pass is a
+    cheap no-op when GPS is off or the stream is healthy."""
+    while True:
+        time.sleep(20)
+        _gps_restore_if_wanted()
+
+threading.Thread(target=_gps_restore_loop, name="gps-restore-keeper",
+                 daemon=True).start()
+
+# The position logger records whether or not anyone has the page open; it
+# no-ops per tick while disabled or while the receiver is off/fixless.
+pc_gps_logger.gps_logger.ensure_started()
+
+@flask_app.route("/gps")
+def gps_action():
+    if 'username' not in session:
+        return redirect(f"/login?next={request.path}")
+
+    c_locale = current_locale()
+    locales = _locales.get_locales("gps", c_locale)
+    locales.update(base_locales())
+    return render_template("gps.html",
+                           gps_capable=_gps_capable_modem(),
+                           locales=locales)
+
+@flask_app.route("/api/v1/gps.json", methods=['GET'])
+@api_auth_required
+def gps_status_api():
+    if not _gps_capable_modem():
+        try:
+            model = pc_app.modem_client.basic.get("model", "")
+        except Exception:
+            model = ""
+        return jsonify({"capable": False, "enabled": False, "powered": False,
+                        "modem_model": model})
+    _gps_restore_if_wanted()
+    status = pc_gps_client.gps_client.get_status()
+    status["capable"] = True
+    # The gps_enabled menu toggle; the mini display keys its GPS page on this.
+    status["enabled"] = pcat_config.get_user_config_key("gps_enabled", False)
+    # Cheap logger summary (cached stat) so the page can show a REC badge.
+    status["logger"] = pc_gps_logger.gps_logger.brief()
+    return jsonify(status)
+
+@flask_app.route("/api/v1/gps/power.json", methods=['POST'])
+@api_auth_required
+def gps_power_api():
+    if not _gps_capable_modem():
+        return jsonify({"status": "error", "message": "Modem has no usable GNSS"})
+    data = request.get_json() or {}
+    want_on = bool(data.get("on"))
+    if want_on:
+        ok = pc_gps_client.gps_client.power_on()
+    else:
+        ok = pc_gps_client.gps_client.power_off()
+    if ok:
+        pcat_config.set_user_config_key(pc_gps_client.GPS_POWER_KEY, want_on)
+        return jsonify({"status": "ok", "powered": want_on})
+    return jsonify({"status": "error",
+                    "message": pc_gps_client.gps_client.last_error or "GNSS command failed"})
+
+@flask_app.route("/api/v1/gps/sync_time.json", methods=['POST'])
+@api_auth_required
+def gps_sync_time_api():
+    """Set the system clock from GNSS time (RMC + measured report latency).
+    Useful offline where NTP can't reach; needs a valid fix."""
+    if not _gps_capable_modem():
+        return jsonify({"status": "error", "message": "Modem has no usable GNSS"})
+    result, err = pc_gps_client.gps_client.sync_system_time()
+    if err:
+        return jsonify({"status": "error", "message": err})
+    return jsonify({"status": "ok", **result})
+
+@flask_app.route("/api/v1/gps/agps.json", methods=['GET'])
+@api_auth_required
+def gps_agps_get_api():
+    """XTRA assist state. ?refresh=1 re-queries the module (two AT commands),
+    so the page asks for that only when the settings panel opens."""
+    if not _gps_capable_modem():
+        return jsonify({"status": "error", "message": "Modem has no usable GNSS"})
+    refresh = request.args.get("refresh") == "1"
+    return jsonify({"status": "ok",
+                    "agps": pc_gps_client.gps_client.agps_status(refresh=refresh)})
+
+@flask_app.route("/api/v1/gps/agps.json", methods=['POST'])
+@api_auth_required
+def gps_agps_update_api():
+    """Download assist data over the router's WAN and inject it (blocking,
+    up to ~60 s: download + upload + GNSS session bounce)."""
+    if not _gps_capable_modem():
+        return jsonify({"status": "error", "message": "Modem has no usable GNSS"})
+    st, err = pc_gps_client.gps_client.agps_update()
+    if err:
+        return jsonify({"status": "error", "message": err})
+    return jsonify({"status": "ok", "agps": st})
+
+@flask_app.route("/api/v1/gps/constellation.json", methods=['GET'])
+@api_auth_required
+def gps_constellation_get_api():
+    if not _gps_capable_modem():
+        return jsonify({"status": "error", "message": "Modem has no usable GNSS"})
+    return jsonify({"status": "ok",
+                    "current": pc_gps_client.gps_client.get_constellation(),
+                    "profiles": pc_gps_client.GpsClient.GNSS_PROFILES})
+
+
+@flask_app.route("/api/v1/gps/constellation.json", methods=['POST'])
+@api_auth_required
+def gps_constellation_set_api():
+    """Pick which GNSS constellations the receiver tracks.
+
+    The module only applies gnssconfig at startup, so this reports
+    `needs_restart` and the page says so — writing it mid-session silently
+    keeps the old profile (measured on an RM500Q-GL)."""
+    if not _gps_capable_modem():
+        return jsonify({"status": "error", "message": "Modem has no usable GNSS"})
+    data = request.get_json() or {}
+    try:
+        value = int(data.get("value"))
+    except (TypeError, ValueError):
+        return jsonify({"status": "error", "message": "bad value"}), 400
+    ok, detail = pc_gps_client.gps_client.set_constellation(value)
+    if not ok:
+        return jsonify({"status": "error", "message": detail or "rejected"})
+    pcat_config.set_user_config_key("gps_gnssconfig", value)
+    return jsonify({"status": "ok", "current": value, "needs_restart": True})
+
+
+@flask_app.route("/api/v1/gps/modem_restart.json", methods=['POST'])
+@api_auth_required
+def gps_modem_restart_api():
+    """Bounce the module so a saved constellation profile takes effect."""
+    if not _gps_capable_modem():
+        return jsonify({"status": "error", "message": "Modem has no usable GNSS"})
+    ok, detail = pc_gps_client.gps_client.restart_modem()
+    if not ok:
+        return jsonify({"status": "error", "message": detail or "restart failed"})
+    return jsonify({"status": "ok"})
+
+
+@flask_app.route("/osm/<int:z>/<int:x>/<int:y>.png")
+@api_auth_required
+def osm_tile_action(z, x, y):
+    """Map tiles for /gps: user-downloaded region tiles, then the builtin
+    world pack, then a live OSM fetch (cached back to the region store)."""
+    if not (0 <= z <= osm_tiles.MAX_Z and 0 <= x < 2 ** z and 0 <= y < 2 ** z):
+        return jsonify({"status": "error", "message": "bad tile"}), 404
+    p = osm_tiles.local_tile_path(z, x, y)
+    if p:
+        with open(p, "rb") as f:
+            data = f.read()
+    else:
+        data = osm_tiles.fetch_remote(z, x, y)
+        if not data:
+            return jsonify({"status": "error", "message": "tile unavailable"}), 404
+    resp = Response(data, mimetype="image/png")
+    resp.headers["Cache-Control"] = "public, max-age=86400"
+    return resp
+
+@flask_app.route("/api/v1/gps/tiles/download.json", methods=['POST'])
+@api_auth_required
+def gps_tiles_download_api():
+    data = request.get_json() or {}
+    try:
+        min_lat, max_lat = float(data["min_lat"]), float(data["max_lat"])
+        min_lon, max_lon = float(data["min_lon"]), float(data["max_lon"])
+        min_z, max_z = int(data["min_z"]), int(data["max_z"])
+    except (KeyError, TypeError, ValueError):
+        return jsonify({"status": "error", "message": "Invalid region"})
+    ok, result = osm_tiles.start_region_download(min_lat, min_lon,
+                                                 max_lat, max_lon, min_z, max_z)
+    if ok:
+        return jsonify({"status": "ok", "total": result})
+    return jsonify({"status": "error", "message": result})
+
+@flask_app.route("/api/v1/gps/tiles/status.json", methods=['GET'])
+@api_auth_required
+def gps_tiles_status_api():
+    return jsonify(osm_tiles.download_status())
+
+@flask_app.route("/api/v1/gps/tiles/config.json", methods=['GET'])
+@api_auth_required
+def gps_tiles_config_api():
+    """Offline-map panel data: storage choices (+ which one is active),
+    and the country-pack catalog with per-country size estimates."""
+    from pcat_util import cell_locate
+    return jsonify({
+        "status": "ok",
+        "stores": osm_tiles.storage_options(),
+        "store_pref": osm_tiles._store_pref(),
+        "active": osm_tiles.active_store(refresh=True),
+        "countries": osm_tiles.country_catalog(),
+        "opencellid_key": pcat_config.get_user_config_key(
+            cell_locate.OPENCELLID_KEY_CONFIG, ""),
+    })
+
+@flask_app.route("/api/v1/gps/tiles/config.json", methods=['POST'])
+@api_auth_required
+def gps_tiles_config_set_api():
+    data = request.get_json() or {}
+    if not osm_tiles.set_store(str(data.get("store", ""))):
+        return jsonify({"status": "error", "message": "storage not available"})
+    return jsonify({"status": "ok", "active": osm_tiles.active_store(refresh=True)})
+
+@flask_app.route("/api/v1/gps/cell.json", methods=['GET'])
+@api_auth_required
+def gps_cell_api():
+    """Serving cell identity + tower coordinates when a database knows it.
+    On-demand only (two AT commands + possibly a web lookup) — never on the
+    page's poll loop."""
+    from pcat_util import cell_locate
+    cell = cell_locate.serving_cell()
+    if not cell:
+        return jsonify({"status": "error",
+                        "message": "No serving cell (modem searching?)"})
+    key = pcat_config.get_user_config_key(cell_locate.OPENCELLID_KEY_CONFIG, "")
+    return jsonify({"status": "ok", "cell": cell,
+                    "tower": cell_locate.resolve(cell, key),
+                    "has_key": bool(key)})
+
+@flask_app.route("/api/v1/gps/cells_nearby.json", methods=['GET'])
+@api_auth_required
+def gps_cells_nearby_api():
+    """All known towers around a point, from the offline DB."""
+    from pcat_util import cell_locate
+    try:
+        lat = float(request.args["lat"])
+        lon = float(request.args["lon"])
+        radius = min(20000, int(request.args.get("radius", 3000)))
+    except (KeyError, TypeError, ValueError):
+        return jsonify({"status": "error", "message": "bad coordinates"})
+    towers = cell_locate.nearby_towers(lat, lon, radius)
+    if towers is None:
+        return jsonify({"status": "error",
+                        "message": "No offline cell DB installed"})
+    return jsonify({"status": "ok", "towers": towers, "count": len(towers)})
+
+@flask_app.route("/api/v1/gps/celldb.json", methods=['GET'])
+@api_auth_required
+def gps_celldb_status_api():
+    """Offline cell-DB presence + download progress. ?mcc_hint=1 also asks
+    the modem for its current country code (two AT commands)."""
+    from pcat_util import cell_locate
+    st = cell_locate.celldb_status()
+    st["status"] = "ok"
+    if request.args.get("mcc_hint") == "1":
+        cell = cell_locate.serving_cell()
+        st["mcc_hint"] = cell.get("mcc") if cell else None
+    return jsonify(st)
+
+@flask_app.route("/api/v1/gps/celldb.json", methods=['POST'])
+@api_auth_required
+def gps_celldb_download_api():
+    """Download the country tower DB from dl.photonicat.com; mcc defaults to
+    the serving cell's country."""
+    from pcat_util import cell_locate
+    mcc = (request.get_json() or {}).get("mcc")
+    if not mcc:
+        cell = cell_locate.serving_cell()
+        mcc = cell.get("mcc") if cell else None
+    if not mcc:
+        return jsonify({"status": "error",
+                        "message": "No MCC (no serving cell and none given)"})
+    ok, msg = cell_locate.start_celldb_download(mcc)
+    if not ok:
+        return jsonify({"status": "error", "message": msg})
+    return jsonify({"status": "ok", "mcc": int(mcc)})
+
+@flask_app.route("/api/v1/gps/cell_key.json", methods=['POST'])
+@api_auth_required
+def gps_cell_key_api():
+    from pcat_util import cell_locate
+    key = str((request.get_json() or {}).get("key", "")).strip()[:64]
+    pcat_config.set_user_config_key(cell_locate.OPENCELLID_KEY_CONFIG, key)
+    return jsonify({"status": "ok"})
+
+@flask_app.route("/api/v1/gps/tiles/country.json", methods=['POST'])
+@api_auth_required
+def gps_tiles_country_api():
+    data = request.get_json() or {}
+    ok, result = osm_tiles.start_country_download(str(data.get("code", "")))
+    if ok:
+        return jsonify({"status": "ok", "total": result})
+    return jsonify({"status": "error", "message": result})
+
+@flask_app.route("/api/v1/gps/logger.json", methods=['GET'])
+@api_auth_required
+def gps_logger_get_api():
+    """Logger settings + storage summary + the recorded track list, in one
+    response — the settings panel needs all of it at once."""
+    lg = pc_gps_logger.gps_logger
+    out = lg.status()
+    out["status"] = "ok"
+    out["tracks"] = lg.list_tracks()
+    return jsonify(out)
+
+@flask_app.route("/api/v1/gps/logger.json", methods=['POST'])
+@api_auth_required
+def gps_logger_set_api():
+    data = request.get_json() or {}
+    lg = pc_gps_logger.gps_logger
+    if "mode" in data and not lg.set_mode(data["mode"]):
+        return jsonify({"status": "error", "message": "bad mode"}), 400
+    if "fmt" in data and not lg.set_fmt(data["fmt"]):
+        return jsonify({"status": "error", "message": "bad format"}), 400
+    if "store" in data and not lg.set_store(data["store"]):
+        return jsonify({"status": "error",
+                        "message": "storage not available"}), 400
+    if "cap_mb" in data:
+        try:
+            ok = lg.set_cap_mb(int(data["cap_mb"]))
+        except (TypeError, ValueError):
+            ok = False
+        if not ok:
+            return jsonify({"status": "error", "message": "bad cap"}), 400
+    if "rotate" in data and not lg.set_rotate(data["rotate"]):
+        return jsonify({"status": "error", "message": "bad rotation"}), 400
+    if "enabled" in data:
+        lg.set_enabled(bool(data["enabled"]))
+    out = lg.status()
+    out["status"] = "ok"
+    return jsonify(out)
+
+@flask_app.route("/api/v1/gps/track.json", methods=['GET'])
+@api_auth_required
+def gps_track_get_api():
+    seg_id = request.args.get("id", "")
+    try:
+        max_points = int(request.args.get("max", pc_gps_logger.VIEW_MAX_POINTS))
+    except ValueError:
+        max_points = pc_gps_logger.VIEW_MAX_POINTS
+    track = pc_gps_logger.gps_logger.read_track(seg_id, max_points)
+    if track is None:
+        return jsonify({"status": "error", "message": "no such track"}), 404
+    track["status"] = "ok"
+    return jsonify(track)
+
+@flask_app.route("/gps/track/<seg_id>.gpx")
+@api_auth_required
+def gps_track_gpx_action(seg_id):
+    # Streamed: a 1 s-interval segment can hold 260k points (~30 MB of GPX),
+    # which must not be built as one string on the device.
+    gen = pc_gps_logger.gps_logger.export_gpx_iter(seg_id)
+    if gen is None:
+        return jsonify({"status": "error", "message": "no such track"}), 404
+    resp = Response(gen, mimetype="application/gpx+xml")
+    resp.headers["Content-Disposition"] = \
+        f"attachment; filename=photonicat-{seg_id}.gpx"
+    return resp
+
+@flask_app.route("/gps/day/<day>.gpx")
+@api_auth_required
+def gps_day_gpx_action(day):
+    """Every segment recorded on one UTC day combined into a single GPX
+    <trk> (one <trkseg> per segment). Streamed for the same reason as the
+    per-track export."""
+    gen = pc_gps_logger.gps_logger.export_day_gpx_iter(day)
+    if gen is None:
+        return jsonify({"status": "error", "message": "no tracks that day"}), 404
+    resp = Response(gen, mimetype="application/gpx+xml")
+    resp.headers["Content-Disposition"] = \
+        f"attachment; filename=photonicat-day-{day}.gpx"
+    return resp
+
+@flask_app.route("/gps/track/<seg_id>.bin")
+@api_auth_required
+def gps_track_raw_action(seg_id):
+    """The stored segment file as-is (compressed or raw) — the efficient
+    backup path next to the interoperable-but-fat GPX export."""
+    hit = pc_gps_logger.gps_logger.raw_file(seg_id)
+    if hit is None:
+        return jsonify({"status": "error", "message": "no such track"}), 404
+    path, filename = hit
+    with open(path, "rb") as f:
+        data = f.read()
+    resp = Response(data, mimetype="application/octet-stream")
+    resp.headers["Content-Disposition"] = f"attachment; filename={filename}"
+    return resp
+
+@flask_app.route("/api/v1/gps/track/delete.json", methods=['POST'])
+@api_auth_required
+def gps_track_delete_api():
+    data = request.get_json() or {}
+    lg = pc_gps_logger.gps_logger
+    if data.get("all"):
+        return jsonify({"status": "ok", "removed": lg.clear_all()})
+    if lg.delete_track(data.get("id", "")):
+        return jsonify({"status": "ok", "removed": 1})
+    return jsonify({"status": "error", "message": "no such track"}), 404
+
 @flask_app.route("/device_control")
 def device_control_action():
     if 'username' not in session:
         return redirect(f"/login?next={request.path}")
     
     c_locale = current_locale()
-    if c_locale == "CN":
-        locales = {
-            "power_led_control": "电源指示灯控制",
-            "power_led_help_text": "控制电源指示灯的开关状态，支持定时功能。",
-            "power_led_all_day": "全天开启",
-            "power_led_off_start_time": "LED 开启开始时间",
-            "power_led_off_end_time": "LED 开启结束时间",
-            "power_led_on_start_time": "LED 开启开始时间",
-            "power_led_on_end_time": "LED 开启结束时间",
-            "led_mode_off": "关闭",
-            "led_mode_timed": "定时",
-            "led_mode_all_day": "全天",
-            "time_on_from": "开启时间从",
-            "time_off_to": "关闭时间到",
-            "beeper_control": "蜂鸣器控制",
-            "beeper_help_text": "控制蜂鸣器的开关状态，支持定时功能。",
-            "beeper_all_day": "全天开启",
-            "beeper_off_start_time": "蜂鸣器关闭开始时间",
-            "beeper_off_end_time": "蜂鸣器关闭结束时间",
-            "beeper_on_start_time": "蜂鸣器开启开始时间",
-            "beeper_on_end_time": "蜂鸣器开启结束时间",
-            "beeper_mode_off": "关闭",
-            "beeper_mode_timed": "定时",
-            "beeper_mode_all_day": "全天",  
-            "network_save": "保存网络设置",
-            "section_network_mode": "网络设置",
-            "card_network_mode": "网络接入",
-            "network_mode_auto": "自动",
-            "network_mode_eth_only": "仅网线",
-            "network_mode_cell_only": "仅蜂窝",
-            "network_mode_auto_help": "根据可用性自动在以太网和蜂窝网络之间切换",
-            "network_mode_eth_only_help": "仅使用以太网连接，有线连接时禁用蜂窝网络",
-            "network_mode_cell_only_help": "仅使用蜂窝网络连接，以太网被禁用",
-            "network_mode_current": "当前",
-            "network_mode_auto_short": "自动",
-            "network_mode_eth_only_short": "仅以太网",
-            "network_mode_cell_only_short": "仅蜂窝",
-            "network_mode_auto_short_help": "根据可用性自动在以太网和蜂窝网络之间切换",
-            "network_mode_eth_only_short_help": "仅使用以太网连接，有线连接时禁用蜂窝网络",
-            "network_mode_cell_only_short_help": "仅使用蜂窝网络连接，以太网被禁用",
-            "network_mode_all_off_short": "全关闭",
-            "network_mode_all_off_short_help": "关闭所有网络连接，仅保持 Wi-Fi 和 LAN",
-            "network_settings_warning": "网络设置保存有警告。WiFi 可能需要重新连接或设备可能需要重启。",
-            "card_device_reset": "系统控制",
-            "cpu_powersave": "CPU 节能",
-            "cpu_powersave_help_text": "关闭大核(A72)，仅使用小核(A53)运行，降低功耗和发热。",
-            "reset_restart_shutdown": "重置、重启 & 关机",
-            "fan_settings": "智能风扇",
-            "fan_settings_help_text": "智能风扇控制：滑动条设置最大转速。系统自动根据温度调节，实际转速不超过用户设定上限。",
-            "fan_mode_manual": "手动",
-            "fan_mode_smart_quiet": "安静",
-            "fan_mode_smart_cool": "冷却",
-            "fan_mode_manual_help": "手动控制：直接设置风扇转速",
-            "fan_mode_smart_quiet_help": "智能安静：充电时 45°C / 电池时 52°C 启动风扇",
-            "fan_mode_smart_cool_help": "智能冷却：充电时 43°C / 电池时 48°C 启动风扇",
-            "fan_speed_label": "风扇转速",
-            "fan_max_speed_label": "最大转速",
-            "fan_mode_saved": "风扇模式已保存",
-            "fan_mode_save_failed": "风扇模式保存失败",
-            "fan_mode_save_error": "风扇模式保存出错",
-            "wwan_power": "WWAN 电源",
-            "wwan_power_help_text": "完全关闭 WWAN 模块以节省电量。关闭后将无法发送或接收短信。",
-            "lan_interface_toggle_help_text": "关闭 LAN 网卡可以降低功耗增加续航",
-            "onboard_wifi_toggle_help_text": "关闭板载 WiFi 可以降低功耗增加续航",
-            "pcie_wifi_toggle_help_text": "关闭 PCIE WiFi 可以降低功耗增加续航",
-            "charge_limit": "充电限制",
-            "charge_limit_help": "限制电池最大充电量以延长电池寿命",
-            "beeper_settings": "蜂鸣器",
-            "beeper_settings_help_text": "关闭蜂鸣器，机器可以完全静音。",
-            "wan_interface": "WAN 网卡",
-            "cellular_network": "蜂窝网络",
-            "lan_interface": "LAN 网卡",
-            "onboard_wifi": "板载 WiFi",
-            "pcie_wifi": "PCIE WiFi",
-            "configuring_network": "正在配置网络，请稍候...",
-            "apn_auto_config": "自动配置",
-            "apn_manu_config": "手动配置",
-            "apn_setup": "APN 配置",
-            "apn_address": "APN 地址",
-            "apn_user_name": "用户名",
-            "apn_password": "密码",
-            "apn_auth_way": "验证方式",
-            "please_input_apn_addr": "请输入 APN 地址！",
-            "device_reset": "出厂重置",
-            "device_restart": "设备重启",
-            "device_shutdown": "设备关机",
-            "are_you_sure_reset": "注意：将您的调制解调器重置为出厂设置将永久删除所有自定义设置，包括短信、APN 和网络配置。是否继续？",
-            "resetting_device": "设备正在恢复出厂设置，请稍候...",
-            "reset_help_text": "恢复出厂设置后，所有配置信息、插件、或数据全部重置到出厂时的状态。",
-            "restart_help_text": "重启设备, 目前的网络会断开，请稍后重新连接。",
-            "shutdown_help_text": "关机后，目前的网络会断开，确认关机？",
-            "wan_toggle_help_text": "开启或关闭 WAN 网卡，关闭可以降低功耗增加续航",
-            "cellular_network_toggle_help_text": "开启或关闭蜂窝网络 Modem",
-            "lan_toggle_help_text": "开启或关闭 LAN 网卡，关闭可以降低功耗增加续航",
-            "onboard_wifi_toggle_help_text": "开启或关闭板载 WiFi，关闭可以降低功耗增加续航",
-            "pcie_wifi_toggle_help_text": "开启或关闭 PCIE WiFi，关闭可以降低功耗增加续航",
-            "saved_succeed": "保存成功",
-            "saving": "保存中...",
-            
-            # Control button labels
-            "control_off": "关闭",
-            "control_on": "开启", 
-            "control_timed": "定时",
-            "control_current": "当前"
-        }
-    else:
-        locales = {
-            "power_led_control": "Power LED Control",
-            "power_led_help_text": "Control power LED on/off with optional timing.",
-            "power_led_all_day": "All Day On",
-            "power_led_off_start_time": "LED Off Start Time",
-            "power_led_off_end_time": "LED Off End Time",
-            "power_led_on_start_time": "LED On Start Time",
-            "power_led_on_end_time": "LED On End Time",
-            "led_mode_off": "Off",
-            "led_mode_timed": "Timed",
-            "led_mode_all_day": "All Day",
-            "time_on_from": "On from",
-            "time_off_to": "Off to",
-            "beeper_control": "Beeper Control",
-            "beeper_help_text": "Control beeper on/off with optional timing.",
-            "beeper_all_day": "All Day On",
-            "beeper_off_start_time": "Beeper Off Start Time",
-            "beeper_off_end_time": "Beeper Off End Time",
-            "beeper_on_start_time": "Beeper On Start Time",
-            "beeper_on_end_time": "Beeper On End Time",
-            "beeper_mode_off": "Off",
-            "beeper_mode_timed": "Timed",
-            "beeper_mode_all_day": "All Day",
-            "network_save": "Save Network Settings",
-            "section_network_mode": "Network Settings",
-            "card_network_mode": "Internet via",
-            "network_mode_auto": "Auto",
-            "network_mode_eth_only": "Eth Only",
-            "network_mode_cell_only": "Cell Only",
-            "network_mode_auto_help": "Automatically switches between Ethernet and Cellular based on availability",
-            "network_mode_eth_only_help": "Uses only Ethernet connection, disables cellular when wired",
-            "network_mode_cell_only_help": "Uses only Cellular connection, Ethernet is disabled",
-            "network_mode_current": "Current",
-            "network_mode_auto_short": "Auto",
-            "network_mode_eth_only_short": "Eth Only",
-            "network_mode_cell_only_short": "Cell Only",
-            "network_mode_auto_short_help": "Automatically switches between Ethernet and Cellular based on availability",
-            "network_mode_eth_only_short_help": "Uses only Ethernet connection, disables cellular when wired",
-            "network_mode_cell_only_short_help": "Uses only Cellular connection, Ethernet is disabled",
-            "network_mode_all_off_short": "All Off",
-            "network_mode_all_off_short_help": "Disables all network connections, keeps only Wi-Fi and LAN",
-            "network_settings_warning": "Network settings saved with warnings. WiFi may need to reconnect or device may need reboot.",
-            "card_device_reset": "System Control",
-            "cpu_powersave": "CPU Powersave",
-            "cpu_powersave_help_text": "Disable big cores (A72), run on LITTLE cores (A53) only to reduce power and heat.",
-            "reset_restart_shutdown": "Reset, Restart & Shutdown",
-            "fan_settings": "Smart Fan",
-            "fan_settings_help_text": "Smart Fan Control: Slider sets maximum speed limit. System automatically adjusts based on temperature. Actual speed never exceeds user-set limit.",
-            "fan_mode_manual": "Manual",
-            "fan_mode_smart_quiet": "Quiet",
-            "fan_mode_smart_cool": "Cool",
-            "fan_mode_manual_help": "Manual control: directly sets fan speed",
-            "fan_mode_smart_quiet_help": "Smart Quiet: fan starts at 45°C (charging) / 52°C (battery)",
-            "fan_mode_smart_cool_help": "Smart Cool: fan starts at 43°C (charging) / 48°C (battery)",
-            "fan_speed_label": "Fan Speed",
-            "fan_max_speed_label": "Max Speed",
-            "fan_mode_saved": "Fan mode saved",
-            "fan_mode_save_failed": "Failed to save fan mode",
-            "fan_mode_save_error": "Error saving fan mode",
-            "wwan_power": "WWAN Power",
-            "wwan_power_help_text": "Completely power off the WWAN module to save power. SMS will not be available when powered off.",
-            "lan_interface_toggle_help_text": "Disabling the LAN interface can reduce power consumption and increase battery life.",
-            "onboard_wifi_toggle_help_text": "Disabling the Onboard WiFi can reduce power consumption and increase battery life.",
-            "pcie_wifi_toggle_help_text": "Disabling the PCIE WiFi can reduce power consumption and increase battery life.",
-            "charge_limit": "Charge Limit",
-            "charge_limit_help": "Limit max battery charge to extend battery lifespan",
-            "beeper_settings": "Beeper",
-            "beeper_settings_help_text": "Disable beeper, the device will be completely silent.",
-            "wan_interface": "WAN NIC",
-            "cellular_network": "Cellular Module",
-            "lan_interface": "LAN NIC",
-            "onboard_wifi": "Onboard WiFi",
-            "pcie_wifi": "PCIE WiFi",
-            "configuring_network": "Configuring network, please wait...",
-            "apn_auto_config": "Auto Config",
-            "apn_manu_config": "Manual Config",
-            "apn_setup": "APN Setup",
-            "apn_address": "APN Address",
-            "apn_user_name": "User Name",
-            "apn_password": "Password",
-            "apn_auth_way": "Auth type",
-            "please_input_apn_addr": "Please input APN!",
-            "device_reset": "Factory Reset",
-            "device_restart": "Device Restart",
-            "device_shutdown": "Device Shutdown",
-            "are_you_sure_reset": "Caution: Resetting your modem to factory settings will permanently delete all custom settings, including SMS, APN, and network configurations. Proceed?",
-            "resetting_device": "Resetting device, please wait ...",
-            "reset_help_text": "After device reset, all configurations and data will be reset to manufacturing default.",
-            "restart_help_text": "Restart device, the current network will be disconnected, please reconnect later.",
-            "shutdown_help_text": "Shutdown device, the current network will be disconnected, confirm shutdown?",
-            "wan_toggle_help_text": "Disabling the WAN interface can reduce power consumption and increase battery life.",
-            "cellular_network_toggle_help_text": "Enable / Disable Cellular Network",
-            "lan_toggle_help_text": "Disabling the LAN interface can reduce power consumption and increase battery life.",
-            "onboard_wifi_toggle_help_text": "Enable / Disable Onboard WiFi, disable can reduce power consumption and increase battery life.",
-            "pcie_wifi_toggle_help_text": "Enable / Disable PCIE WiFi, disable can reduce power consumption and increase battery life.",
-            "saved_succeed": "Saved Successfully",
-            "saving": "Saving...",
-            
-            # Control button labels
-            "control_off": "Off",
-            "control_on": "On", 
-            "control_timed": "Timed",
-            "control_current": "Current"
-        }
+    locales = _locales.get_locales("device_control", c_locale)
     locales.update(base_locales())
     stm32_firmware_exist = pc_app.socket_client.stm32_firmware_exist()
     is_em05_modem = pc_app.modem_client.is_em05()
@@ -4274,73 +5308,12 @@ def statistics():
         return redirect(f"/login?next={request.path}")
 
     c_locale = current_locale()
-    if c_locale == "CN":
-        locales = {
-            "card_device_list": "设备列表",
-            "card_traffic_stats": "流量统计",
-
-            "mac_address": "MAC 地址",
-            "ip_address": "IP 地址",
-            "device_name": "设备名",
-
-            "statistics_reset_confirm": "你确定要清空当前统计数据吗？",
-            "statistics_reset_success": "统计数据已清空",
-            "network_type_wired": "有线网络",
-            "network_type_mobile": "蜂窝网络",
-            "today_used": "今天使用",
-            "week_used": "本周使用",
-            "month_used": "本月使用",
-            "last_month_used": "上月使用",
-            "battery_chart_title": "电池历史",
-            "battery_chart_soc": "电量 %",
-            "battery_chart_voltage": "电压 V",
-            "battery_chart_current": "功率 W",
-            "battery_chart_temp": "主板温度",
-            "battery_chart_24h": "24小时",
-            "battery_chart_7d": "7天",
-            "battery_chart_30d": "30天",
-            "battery_chart_no_data": "暂无电池数据",
-            "battery_chart_power_on": "开机",
-            "battery_chart_power_off": "关机",
-            "battery_chart_dc_plug": "DC接入",
-            "battery_chart_dc_unplug": "DC断开"
-        }
-    else:
-        locales = {
-            "card_device_list": "Device List",
-            "card_traffic_stats": "Mobile Traffic Statistics",
-
-            "mac_address": "MAC Address",
-            "ip_address": "IP Address",
-            "device_name": "Device Name",
-
-            "statistics_reset_confirm": "Are you sure to reset the statistics data?",
-            "statistics_reset_success": "Statistics Data Reset",
-            "network_type_wired": "Wired Network",
-            "network_type_mobile": "Cellular Network",
-            "today_used": "Today Usage",
-            "week_used": "This Week Usage",
-            "month_used": "This Month Usage",
-            "last_month_used": "Last Month Usage",
-            "battery_chart_title": "Battery History",
-            "battery_chart_soc": "SOC %",
-            "battery_chart_voltage": "Voltage V",
-            "battery_chart_current": "Power W",
-            "battery_chart_temp": "MB Temp",
-            "battery_chart_24h": "24h",
-            "battery_chart_7d": "7 Days",
-            "battery_chart_30d": "30 Days",
-            "battery_chart_no_data": "No battery data available",
-            "battery_chart_power_on": "Power On",
-            "battery_chart_power_off": "Power Off",
-            "battery_chart_dc_plug": "DC In",
-            "battery_chart_dc_unplug": "DC Out"
-        }
+    locales = _locales.get_locales("statistics", c_locale)
     locales.update(base_locales())
     return render_template(nt.statistics_file_name, locales = locales)
 
-@api_auth_required
 @flask_app.route("/stats/reset", methods=['POST'])
+@api_auth_required
 def statistics_reset_action():
     if 'username' not in session:
         rsp = make_response(json.dumps({"status": "error", "message": "Authentication required", "redirect": f"/login?next={request.path}"})) 
@@ -4361,241 +5334,68 @@ def update_action():
         return redirect(f"/login?next={request.path}")
 
     c_locale = current_locale()
-    if c_locale == "CN":
-        locales = {
-            "card_title_ipk_upload": "第三方 IPK/插件 安装",
-            "card_title_ipk_update": "系统 IPK/插件 更新",
-            "please_select_a_update_pkg": "请选择更新包。",
-            "upload": "上传",
-            "upload_ipks": "上传 IPK(s)",
-            "choose_file": "选择文件",
-            "install_custom_ipk_title": "安装自定义 IPK/插件包",
-            "install_custom_ipk_description": "上传并安装第三方 IPK 包或插件，以扩展您的设备功能。",
-            "choose_your_file": "选择您的文件",
-            "card_title_ipk_manager": "IPK 包管理",
-            "download_from_url": "从链接下载",
-            "paste_ipk_url": "粘贴 IPK 包链接",
-            "download_url_placeholder": "请输入 IPK 包下载链接 (支持 .ipk, .gz, .xz, .bz2, .tar, 最大300MB)",
-            "download_button": "下载并安装",
-            "downloading": "正在下载",
-            "download_logs": "下载安装日志",
-            "download_progress": "下载进度",
-            "file_too_large_300mb": "文件过大 (最大300MB)",
-            "no_ipk_in_archive": "压缩包中未找到IPK文件",
-            "extraction_failed": "解压失败",
-            "or_separator": "或",
-            "ipk_package_name": "软件包名称",
-            "ipk_package_current_version": "当前版本",
-            "ipk_package_latest_version": "最新版本",
-            "not_need_update": "已最新",
-            "need_update": "可以更新",
-            "upload_operation_tip": "点击或拖拽文件到此处上传",
-            "help_text": "支持 IPK 格式的包，或者 gz、bz2、xz 和 tar 格式的压缩包。压缩包将自动解压并安装其中的所有IPK文件。",
-            "check_update": "检查更新", 
-            "no_package_info": "没有版本信息", 
-            "update": "更新",
-            "upgrade_help_text1": "操作提示：更新 IPK 包后，请重启设备，以保证更新生效。",
-            "upgrade_help_text2": "在更新某些 IPK 包后，网络有可能断开片刻。",
-            "card_title_firmware_manager": "Photonicat 系统镜像管理",
-            "firmware_checking": "检查中",
-            "firmware_new_version_available": "🎉 新版本可用！",
-            "firmware_up_to_date": "固件已是最新版本！",
-            "firmware_current_version": "当前版本",
-            "firmware_latest_version": "最新版本",
-            "firmware_download_button": "下载固件",
-            "firmware_flash_button": "刷写固件",
-            "firmware_auto_upgrade_button": "自动升级",
-            "firmware_manual_update": "手动更新",
-            "firmware_manual_update_text": "如需手动刷写系统镜像，请访问：",
-            "firmware_luci_flash_button": "打开 LuCI 刷机界面",
-            
-            # New automatic upgrade locales
-            "firmware_upgrading": "正在升级固件",
-            "confirm_firmware_upgrade": "确认固件升级",
-            "firmware_upgrade_warning": "此操作将自动下载并安装最新固件。升级过程中设备将重启，请确保电源稳定。",
-            "upgrade_process": "升级流程",
-            "stage_download": "下载",
-            "stage_prepare": "准备",
-            "stage_install": "安装",
-            "stage_restart": "重启",
-            "keep_current_settings": "保留当前配置",
-            "cancel": "取消",
-            "start_upgrade": "开始升级",
-            "confirm_cancel_download": "确定要取消下载吗？已下载的文件将被删除。",
-            "download_method": "下载方式",
-            "recommended": "推荐",
-            "faster_but_less_reliable": "更快但不太稳定",
-            "download_method_help": "wget 更稳定，aria2c 更快但在某些网络环境下可能不稳定",
-            "data_loss_warning": "数据丢失警告",
-            "firmware_upgrade_data_loss_warning": "固件升级可能会导致数据丢失。请确保已备份重要数据。如未选择保留配置，所有设置将被重置。",
-            
-            # Dev server locales
-            "dev_server_title": "开发服务器",
-            "dev_only": "仅限开发",
-            "production_server_title": "固件升级",
-            "stable": "稳定版 - dl.photonicat.com",
-            "dev_firmware_available": "⚡ 开发版本可用！",
-            "dev_firmware_up_to_date": "✅ 开发固件已是最新！",
-            "dev_latest_version": "开发最新版本",
-            "dev_current_version": "开发当前版本",
-            "dev_download_button": "下载开发版固件",
-            "dev_auto_upgrade_button": "升级开发版",
-            
-            # MCU Update Locales - Chinese
-            "card_title_mcu_manager": "MCU 固件管理",
-            "mcu_checking": "检查 MCU 中...",
-            "mcu_dev_server_title": "MCU 服务器 (DEV)",
-            "mcu_production_server_title": "MCU 服务器",
-            "mcu_dev_update_available": "开发 MCU 更新可用!",
-            "mcu_new_version_available": "MCU 更新可用!",
-            "mcu_dev_up_to_date": "开发 MCU 已是最新!",
-            "mcu_up_to_date": "MCU 已是最新!",
-            "mcu_current_version": "当前 MCU 版本",
-            "mcu_latest_version": "最新 MCU 版本",
-            "mcu_prod_latest_version": "MCU最新版本",
-            "mcu_dev_latest_version": "MCU开发最新版本",
-            "mcu_dev_update_button": "更新 MCU (开发)",
-            "mcu_dev_reinstall_button": "重新安装 MCU",
-            "mcu_auto_update_button": "更新 MCU",
-            "mcu_updating": "更新中...",
-            "confirm_mcu_upgrade": "确认 MCU 更新",
-            "mcu_upgrade_warning": "这将更新您的 MCU 固件。过程是安全的，但不应被中断。",
-            "mcu_upgrade_process": "更新过程",
-            "mcu_upgrade_power_warning": "更新过程中请勿断电！",
-            "start_mcu_update": "开始更新",
-            "starting": "启动中...",
-            "debug_logs": "调试日志",
-            
-            # Configuration preservation options
-            "config_preservation_options": "配置保留选项",
-            "config_preserve_etc": "-c: 保留 /etc/ 中所有更改的文件（默认，推荐）",
-            "config_preserve_all": "-o: 保留 / 中所有更改的文件，除了来自软件包的文件但包括更改的配置",
-            "config_fresh_install": "-n: 全新安装，删除所有配置文件",
-            "config_preservation_help": "选择升级期间如何保留您的配置。",
-            
-            # Download methods with dual language
-            "download_method_wget": "wget（单线程下载）",
-            "download_method_aria2c": "aria2c（多线程下载）"
-            }
-    else:
-        locales = {
-            "card_title_ipk_upload": "Third-party IPK installations",
-            "card_title_ipk_update": "System IPK/plugins updates",
-            "please_select_a_update_pkg": "Please select a package.",
-            "upload": "Upload",
-            "upload_ipks": "Upload IPK(s)",
-            "choose_file": "Choose File",
-            "install_custom_ipk_title": "Install Custom IPK/Plugin Packages",
-            "install_custom_ipk_description": "Upload and install third-party IPK packages or plugins to extend your device functionality.",
-            "choose_your_file": "Choose Your File",
-            "card_title_ipk_manager": "IPK Package Management",
-            "download_from_url": "Download from URL",
-            "paste_ipk_url": "Paste IPK Package Link",
-            "download_url_placeholder": "Enter IPK package download URL (supports .ipk, .gz, .xz, .bz2, .tar, max 300MB)",
-            "download_button": "Auto Install",
-            "downloading": "Downloading",
-            "download_logs": "Download and Install Logs",
-            "download_progress": "Download Progress",
-            "file_too_large_300mb": "File too large (max 300MB)",
-            "no_ipk_in_archive": "No IPK files found in archive",
-            "extraction_failed": "Extraction failed",
-            "or_separator": "OR",
-            "ipk_package_name": "Package Name",
-            "ipk_package_current_version": "Current Version",
-            "ipk_package_latest_version": "Latest Version",
-            "not_need_update": "Already Up-to-date",
-            "need_update": "Update",
-            "upload_operation_tip": "Click or drag files to upload...",
-            "help_text": "Support IPK packages, or compressed archives (gz/bz2/xz/tar). Archives will be automatically extracted and all IPK files installed.",
-            "check_update": "Checking for update",
-            "no_package_info": "No package info", 
-            "update": "Update",
-            "upgrade_help_text1": "Tip: After the update, some IPKs may require a reboot to take effect.",
-            "upgrade_help_text2": "Updating some IPK packages may cause network disconnection for a while.",
-            "card_title_firmware_manager": "Photonicat System Image Manager",
-            "firmware_checking": "Checking",
-            "firmware_new_version_available": "🎉 New Version Available!",
-            "firmware_up_to_date": "Firmware Up to Date!",
-            "firmware_current_version": "Current Version",
-            "firmware_latest_version": "Latest Version",
-            "firmware_download_button": "Download Firmware",
-            "firmware_flash_button": "Flash Firmware", 
-            "firmware_auto_upgrade_button": "Auto Upgrade",
-            "firmware_manual_update": "Manual Update",
-            "firmware_manual_update_text": "For manual system image flashing, please visit:",
-            "firmware_luci_flash_button": "Open LuCI Flash Interface",
-            
-            # New automatic upgrade locales
-            "firmware_upgrading": "Upgrading Firmware",
-            "confirm_firmware_upgrade": "Confirm Firmware Upgrade",
-            "firmware_upgrade_warning": "This will automatically download and install the latest firmware. The device will restart during the upgrade process. Please ensure stable power supply.",
-            "upgrade_process": "Upgrade Process",
-            "stage_download": "Download",
-            "stage_prepare": "Prepare", 
-            "stage_install": "Install",
-            "stage_restart": "Restart",
-            "keep_current_settings": "Keep current settings",
-            "cancel": "Cancel",
-            "start_upgrade": "Start Upgrade",
-            "confirm_cancel_download": "Are you sure you want to cancel the download? Downloaded files will be deleted.",
-            "download_method": "Download Method",
-            "recommended": "recommended",
-            "faster_but_less_reliable": "faster but less reliable",
-            "download_method_help": "wget is more stable, aria2c is faster but may be unstable in some network environments",
-            "data_loss_warning": "Data Loss Warning",
-            "firmware_upgrade_data_loss_warning": "Firmware upgrade may cause data loss. Please ensure important data is backed up. If settings are not preserved, all configurations will be reset.",
-            
-            # Dev server locales
-            "dev_server_title": "Photonicat Image Server (DEV)",
-            "dev_only": "dev only",
-            "production_server_title": "Photonicat Image Server",
-            "stable": "stable - dl.photonicat.com",
-            "dev_firmware_available": "⚡ Dev Version Available!",
-            "dev_firmware_up_to_date": "✅ Dev Firmware Up to Date!",
-            "dev_latest_version": "Dev Latest Version",
-            "dev_current_version": "Dev Current Version",
-            "dev_download_button": "Download Dev Firmware",
-            "dev_auto_upgrade_button": "Upgrade Dev Version",
-            
-            # MCU Update Locales - English
-            "card_title_mcu_manager": "MCU Firmware Manager",
-            "mcu_checking": "Checking MCU...",
-            "mcu_dev_server_title": "MCU Server (DEV)", 
-            "mcu_production_server_title": "MCU Firmware",
-            "mcu_dev_update_available": "Dev MCU Update Available!",
-            "mcu_new_version_available": "MCU Update Available!",
-            "mcu_dev_up_to_date": "Dev MCU Up to Date!",
-            "mcu_up_to_date": "MCU Up to Date!",
-            "mcu_current_version": "Current MCU Version",
-            "mcu_latest_version": "Latest MCU Version", 
-            "mcu_prod_latest_version": "MCU Latest Version",
-            "mcu_dev_latest_version": "MCU Dev Latest Version",
-            "mcu_dev_update_button": "Update MCU (Dev)",
-            "mcu_dev_reinstall_button": "Reinstall MCU",
-            "mcu_auto_update_button": "Update MCU",
-            "mcu_updating": "Updating...",
-            "confirm_mcu_upgrade": "Confirm MCU Update",
-            "mcu_upgrade_warning": "This will update your MCU firmware. The process is safe but should not be interrupted.",
-            "mcu_upgrade_process": "Update Process",
-            "mcu_upgrade_power_warning": "Do not power off during the update process!",
-            "start_mcu_update": "Start Update",
-            "starting": "Starting...",
-            "debug_logs": "Debug Logs",
-            
-            # Configuration preservation options  
-            "config_preservation_options": "Configuration Preservation Options",
-            "config_preserve_etc": "-c: Preserve all changed files in /etc/ (default, recommended)",
-            "config_preserve_all": "-o: Preserve all changed files in /, except those from packages but including changed configs",
-            "config_fresh_install": "-n: Fresh install, remove all configuration files",
-            "config_preservation_help": "Choose how to preserve your configuration during upgrade.",
-            
-            # Download methods with dual language
-            "download_method_wget": "wget (single-threaded download)",
-            "download_method_aria2c": "aria2c (multi-threaded download)"
-             }
+    locales = _locales.get_locales("update", c_locale)
     locales.update(base_locales())
+    # Package texts name the one format this firmware installs ("IPK" or
+    # "APK"); the locale strings carry it as {fmt} / {ext}.
+    fmt_label = pkg_format.label()
+    fmt_ext = pkg_format.extension()
+    for key, value in locales.items():
+        if isinstance(value, str) and ("{fmt}" in value or "{ext}" in value):
+            locales[key] = value.replace("{fmt}", fmt_label).replace("{ext}", fmt_ext)
 
-    return render_template(nt.update_file_name, locales = locales, show_debug_logs = pcat_config.get_show_debug_logs())
+    return render_template(nt.update_file_name, locales = locales,
+                           show_debug_logs = pcat_config.get_show_debug_logs(),
+                           pkg_format_label = fmt_label,
+                           pkg_accept = ",".join(pkg_format.accepted_extensions()))
+
+@flask_app.route("/battery")
+def battery_action():
+    # Battery telemetry was folded into the unified device diagnostics page
+    # (/dev), which shows battery + accelerometer + modem log together. Keep
+    # this route as a redirect so old bookmarks/links still land somewhere.
+    if not is_photonicat2:
+        # /dev is a 404 on a Photonicat 1; answer here rather than bouncing
+        # the browser to one.
+        return render_error_page(404)
+    return redirect("/dev")
+
+@flask_app.route("/dev")
+def dev_action():
+    """Device diagnostics: battery health, accelerometer (not present on this
+    hardware — shown as a placeholder), and the live modem dial log. Not linked
+    from the nav; reached from /battery's redirect or by URL.
+
+    Photonicat 2 only: most of what it reports (pack current, board
+    temperature, MCU hardware revision, the accelerometer) has no source on a
+    Photonicat 1, so the page would read as a wall of blanks."""
+    if 'username' not in session:
+        return redirect(f"/login?next={request.path}")
+    if not is_photonicat2:
+        return render_error_page(404)
+
+    c_locale = current_locale()
+    locales = _locales.get_locales("dev", c_locale)
+    locales.update(base_locales())
+    stm32_firmware_exist = pc_app.socket_client.stm32_firmware_exist()
+    # Board revision as reported by the MCU: PCAT2-REV1 (A1~A3) / PCAT2-REV2
+    # (A4, adds charge-limit control + phone audio) on fw >= RA2E1260807000;
+    # older jumper-blind firmware answers "NT2421A4"; "" until known.
+    hardware_revision = pc_app.socket_client.pmu_hw_version or ""
+    return render_template(nt.dev_file_name,
+                           stm32_firmware_exist = stm32_firmware_exist,
+                           hardware_revision = hardware_revision,
+                           locales = locales)
+
+@flask_app.route("/buzzer")
+def buzzer_action():
+    # The buzzer tester was folded into the unified device diagnostics page
+    # (/dev) alongside battery, accelerometer and the logs. Keep this route as
+    # a redirect so old bookmarks/links still land somewhere.
+    if not is_photonicat2:
+        # No beeper on a Photonicat 1, and /dev is a 404 there.
+        return render_error_page(404)
+    return redirect("/dev")
 
 @flask_app.route("/about")
 def about_action():
@@ -4608,21 +5408,66 @@ def about_action():
 
 @flask_app.route("/advanced_admin")
 def advanced_admin_action():
-    host_ip = request.host.split(':')[0]
-    advanced_url = "http://" + host_ip + ":" + str(pcat_config.luci_port)
-    return redirect(advanced_url)
+    """Open LuCI. When the user is authenticated (or --skip-auth), auto-POST
+    root credentials so they land inside LuCI without retyping the password.
+    Unauthenticated callers (e.g. the login-page link) just get a redirect so
+    we never hand out credentials to anonymous visitors.
 
-@api_auth_required
+    Password is taken from the server-side login store (same password used for
+    this management UI) and falls back to the factory default 'photonicat'.
+    Unlike the old header form, the password is NOT embedded in every page."""
+    import html as _html
+
+    host_ip = request.host.split(':')[0]
+    luci_url = "http://" + host_ip + ":" + str(pcat_config.luci_port) + "/cgi-bin/luci/"
+
+    if not (pcat_config.skip_auth or 'username' in session):
+        return redirect(luci_url)
+
+    password = _get_luci_password()
+    # Explicit HTML escaping: password may contain quotes / & etc.
+    esc_url = _html.escape(luci_url, quote=True)
+    esc_pw = _html.escape(password, quote=True)
+    return (
+        "<!DOCTYPE html>\n"
+        "<html lang=\"en\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+        "<title>OpenWrt Login</title></head><body>\n"
+        f"<form id=\"luci_login\" method=\"POST\" action=\"{esc_url}\">\n"
+        "  <input type=\"hidden\" name=\"luci_username\" value=\"root\">\n"
+        f"  <input type=\"hidden\" name=\"luci_password\" value=\"{esc_pw}\">\n"
+        "</form>\n"
+        "<script>document.getElementById('luci_login').submit();</script>\n"
+        "<p>Logging into OpenWrt&hellip;</p>\n"
+        "</body></html>\n"
+    )
+
+def _unsupported_package_message(name):
+    """Why `name` cannot be installed here, naming the format that can."""
+    fmt = pkg_format.label()
+    other = pkg_format.APK if pkg_format.detect() == pkg_format.IPK else pkg_format.IPK
+    if pkg_format.is_package(name, other):
+        return ("This firmware installs {} packages; {} files are not supported."
+                .format(fmt, pkg_format.label(other)))
+    return "Unsupported file type. Supported: " + ", ".join(pkg_format.accepted_extensions())
+
 @flask_app.route("/pkg_upload", methods=['POST'])
+@api_auth_required
 def pkg_upload_action():
     if 'username' not in session:
         rsp = make_response("{\"status\": \"failed\", \"message\": \"Login required\"}")
         rsp.headers['Content-Type'] = 'application/json'
         return rsp
     
-    uploaded_file = request.files['package']
-    filename = uploaded_file.filename
-    
+    uploaded_file = request.files.get('package')
+    # basename: the client picks this name, and it becomes a path on disk.
+    filename = os.path.basename(uploaded_file.filename or '') if uploaded_file else ''
+    if filename == '':
+        return jsonify({"status": "failed", "message": "No file selected"})
+    if not pkg_format.is_accepted(filename):
+        return jsonify({"status": "failed", "message":
+                        _unsupported_package_message(filename)})
+
     if filename != '':
         current_working_path = pathlib.Path(__file__).parent.resolve()
         save_dir_path = current_working_path.joinpath("temp")
@@ -4644,8 +5489,8 @@ def pkg_upload_action():
         rsp.headers['Content-Type'] = 'application/json'
         return rsp
 
-@api_auth_required
 @flask_app.route("/pkg_versions", methods=['GET'])
+@api_auth_required
 def pkg_versions_action():
     info = pc_app.pcat_package_version_info()
     rsp = make_response(jsonify({"versions": info}))
@@ -4653,8 +5498,8 @@ def pkg_versions_action():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/pkg_update", methods=['GET'])
+@api_auth_required
 def pkg_update_action():
     if 'username' not in session:
         rsp = make_response("{\"status\": \"failed\", \"message\": \"Login required\"}")
@@ -4670,8 +5515,8 @@ def pkg_update_action():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/download_ipk", methods=['POST'])
+@api_auth_required
 def download_ipk_action():
     if 'username' not in session:
         rsp = make_response("{\"status\": \"failed\", \"message\": \"Login required\"}")
@@ -4704,13 +5549,13 @@ def download_ipk_action():
             rsp.headers['Content-Type'] = 'application/json'
             return rsp
 
-        # Validate file extension
-        supported_extensions = ['.ipk', '.gz', '.xz', '.bz2', '.tar']
-        url_lower = download_url.lower()
-        if not any(url_lower.endswith(ext) for ext in supported_extensions):
-            rsp = make_response("{\"status\": \"failed\", \"message\": \"Unsupported file type. Supported: .ipk, .gz, .xz, .bz2, .tar\"}")
-            rsp.headers['Content-Type'] = 'application/json'
-            return rsp
+        # Only this firmware's package format (plus archives of it).
+        if not pkg_format.is_accepted(parsed.path):
+            return jsonify({"status": "failed",
+                            "message": _unsupported_package_message(parsed.path)})
+        # Certificate checks are off unless the user ticks "verify"; see
+        # pkg_format.http_get().
+        verify_tls = bool(data.get("verify_tls"))
 
         # Extract filename from URL
         import os
@@ -4718,7 +5563,7 @@ def download_ipk_action():
         filename = os.path.basename(url_path)
         if not filename:
             # If no filename in URL, create one based on URL
-            filename = f"downloaded_package_{int(time.time())}.ipk"
+            filename = f"downloaded_package_{int(time.time())}{pkg_format.extension()}"
 
         # Download the file
         import requests
@@ -4737,7 +5582,8 @@ def download_ipk_action():
         local_path = upload_dir.joinpath(filename)
         
         # Download with timeout and size limits
-        response = requests.get(download_url, stream=True, timeout=30)
+        response = pkg_format.http_get(download_url, verify_tls=verify_tls,
+                                       stream=True, timeout=30)
         response.raise_for_status()
         
         # Get filename from Content-Disposition header if available
@@ -4747,13 +5593,14 @@ def download_ipk_action():
             matches = re.findall("filename=([^;]+)", content_disposition)
             if matches:
                 server_filename = matches[-1].strip('\'"')
-                if server_filename and any(server_filename.lower().endswith(ext) for ext in supported_extensions):
+                server_filename = os.path.basename(server_filename)
+                if server_filename and pkg_format.is_accepted(server_filename):
                     filename = server_filename
 
         # Check content length if available
         content_length = response.headers.get('content-length')
-        if content_length and int(content_length) > 300 * 1024 * 1024:  # 300MB limit
-            rsp = make_response("{\"status\": \"failed\", \"message\": \"File too large (max 300MB)\"}")
+        if content_length and int(content_length) > 500 * 1024 * 1024:  # 500MB limit
+            rsp = make_response("{\"status\": \"failed\", \"message\": \"File too large (max 500MB)\"}")
             rsp.headers['Content-Type'] = 'application/json'
             return rsp
 
@@ -4768,33 +5615,31 @@ def download_ipk_action():
                     f.write(chunk)
                     total_size += len(chunk)
                     # Size check during download
-                    if total_size > 300 * 1024 * 1024:  # 300MB limit
+                    if total_size > 500 * 1024 * 1024:  # 500MB limit
                         f.close()
                         os.remove(local_path)
-                        rsp = make_response("{\"status\": \"failed\", \"message\": \"File too large (max 300MB)\"}")
+                        rsp = make_response("{\"status\": \"failed\", \"message\": \"File too large (max 500MB)\"}")
                         rsp.headers['Content-Type'] = 'application/json'
                         return rsp
 
-        # For archive files, validate they contain IPK files but don't extract
-        # The opkg-install.py script will handle extraction and install all IPKs
+        # For archives, check they hold packages of this firmware's format but
+        # don't extract: opkg-install.py extracts and installs them all.
         final_filename = filename
         
-        if filename.lower().endswith(('.tar', '.gz', '.bz2', '.xz')):
+        if pkg_format.is_archive(filename):
             try:
                 import tarfile
-                # Just validate the archive contains IPK files
+                fmt = pkg_format.label()
                 with tarfile.open(local_path, 'r:*') as tar:
-                    ipk_members = [m for m in tar.getmembers() if m.name.endswith('.ipk') and m.isfile()]
+                    pkg_members = [m for m in tar.getmembers()
+                                   if m.isfile() and pkg_format.is_package(m.name)]
                     
-                    if not ipk_members:
-                        # Clean up and return error
+                    if not pkg_members:
                         local_path.unlink(missing_ok=True)
-                        rsp = make_response("{\"status\": \"failed\", \"message\": \"No IPK files found in archive\"}")
-                        rsp.headers['Content-Type'] = 'application/json'
-                        return rsp
+                        return jsonify({"status": "failed",
+                                        "message": f"No {fmt} files found in archive"})
                     
-                    # Log how many IPK files were found
-                    print(f"Archive contains {len(ipk_members)} IPK files: {[m.name for m in ipk_members[:5]]}{'...' if len(ipk_members) > 5 else ''}")
+                    print(f"Archive contains {len(pkg_members)} {fmt} files: {[m.name for m in pkg_members[:5]]}{'...' if len(pkg_members) > 5 else ''}")
                         
             except Exception as e:
                 # Clean up on error
@@ -4819,8 +5664,8 @@ def download_ipk_action():
         rsp.headers['Content-Type'] = 'application/json'
         return rsp
 
-@api_auth_required
 @flask_app.route("/system/reboot", methods=['POST'])
+@api_auth_required
 def system_reboot():
     if 'username' not in session:
         rsp = make_response(json.dumps({"status": "error", "message": "Authentication required", "redirect": f"/login?next={request.path}"})) 
@@ -4834,9 +5679,24 @@ def system_reboot():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-#factory reset modem, reset openwrt
+@flask_app.route("/system/poweroff", methods=['POST'])
 @api_auth_required
+def system_poweroff():
+    if 'username' not in session:
+        rsp = make_response(json.dumps({"status": "error", "message": "Authentication required", "redirect": f"/login?next={request.path}"}))
+        rsp.headers['Content-Type'] = 'application/json'
+        return rsp, 401
+
+    pc_app.main_app.system_status = 20 # prepare_rebooting (device goes down shortly)
+    power_event_log.log_event("system_shutdown", "User initiated poweroff")
+    threading.Timer(0.1, lambda: subprocess.run(["poweroff"])).start()
+    rsp = make_response("{\"status\": \"ok\"}")
+    rsp.headers['Content-Type'] = 'application/json'
+    return rsp
+
+#factory reset modem, reset openwrt
 @flask_app.route("/system/reset", methods=['POST'])
+@api_auth_required
 def system_reset():
     if 'username' not in session:
         rsp = make_response(json.dumps({"status": "error", "message": "Authentication required", "redirect": f"/login?next={request.path}"})) 
@@ -4866,8 +5726,8 @@ def system_reset():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp  
 
-@api_auth_required
 @flask_app.route("/system/shutdown", methods=['POST'])
+@api_auth_required
 def system_shutdown():
     if 'username' not in session:
         rsp = make_response(json.dumps({"status": "error", "message": "Authentication required", "redirect": f"/login?next={request.path}"})) 
@@ -4900,33 +5760,35 @@ def status2_json_action():
         "carmode": pc_app.socket_client.charger_on_auto_start_mode,
         "network_route_mode": pc_app.socket_client.network_route_mode,
         "network_mode": pcat_config.get_network_mode(),
-        "modem_mode": pc_app.socket_client.modem_mode or pc_app.modem_client.basic.get("cell_tech", ""),
+        "modem_mode": pc_app.socket_client.modem_mode or usable_cell_tech(pc_app.modem_client.basic.get("cell_tech", "")),
         "modem_signal_strength": pc_app.socket_client.modem_signal_strength,
         "isp_name": pc_app.socket_client.isp_name,
         "sim_state": pc_app.modem_client.get_inferred_sim_state(pc_app.socket_client.sim_state)
     }
 
-@api_auth_required
 @flask_app.route("/api/v1/system/board.json")
+@api_auth_required
 def system_board_json_action():
     rsp = make_response(_openwrt_ubus_call("system", "board"))
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
 @flask_app.route("/api/v1/system/debug_openwrt.json")
+@dev_only
+@api_auth_required
 def system_debug_openwrt_action():
     return jsonify(_openwrt_debug_status())
 
-@api_auth_required
 @flask_app.route("/api/v1/system/info.json")
+@api_auth_required
 def system_info_json_action():
     rsp = make_response(_openwrt_ubus_call("system", "info"))
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
 
-@api_auth_required
 @flask_app.route("/api/v2/wireless.json", methods=['GET'])
+@api_auth_required
 def wireless_v2_action():
     wireless_list = {}
     mock_data = request.args.get('mock') == 'true'
@@ -4936,8 +5798,8 @@ def wireless_v2_action():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/wireless.json", methods=['POST'])
+@api_auth_required
 def save_wireless_action():
     if 'username' not in session:
         json_dict = {"status": "failed", "message":"Login required", "redirect": f"/login?next={request.path}"}
@@ -4947,7 +5809,7 @@ def save_wireless_action():
     
     json_dict = {"status": "ok"}
     p_data = request.get_json()
-    pcat_logger.logger.info("Get user {} posted wireless info:{}".format(request.remote_addr, str(p_data)))
+    pcat_logger.logger.info("Get user {} posted wireless info:{}".format(request.remote_addr, _redact_sensitive(p_data)))
 
     ssid = str(p_data.get("ssid", ""))
     frequency  = str(p_data.get("frequency", ""))
@@ -4962,6 +5824,18 @@ def save_wireless_action():
         json_dict = {"status": "failed", "message": "Params invalid."}
     elif encryption not in ("none", "psk", "psk2", "sae"):
         json_dict = {"status": "failed", "message": "Params invalid."}
+    elif device == wifi_wan.active_sta_radio():
+        # The radio is retuned to the upstream's band/channel while relaying;
+        # rewriting it here would break the upstream WiFi uplink.
+        # active_sta_radio() reads the STA section's *actual* device and is
+        # None unless the relay is live, so it covers the is_active() check
+        # too. get_sta_radio() would be wrong here: it returns the configured
+        # radio *preference*, which diverges from the radio the STA really
+        # sits on (e.g. a preference change that could not move a missing
+        # section), and would then guard the wrong radio -- refusing edits to
+        # an idle AP while letting the live relay's radio be overwritten.
+        json_dict = {"status": "failed",
+                     "message": "Onboard WiFi is relaying an upstream hotspot. Disable the WiFi upstream first. / 板载WiFi正在中继上游热点，请先关闭 WiFi 上游连接。"}
 
     if json_dict["status"] == "ok":
         toggle_changed = False
@@ -4976,8 +5850,8 @@ def save_wireless_action():
                 toggle_changed = True
                 pc_app.enable_wifi_interface("radio1", p_data["enabled"])
 
-        cmdtool = CmdTool()
-        
+        wireless_cfg = _openwrt_uci_show_dict("wireless", max_age=0)
+
         # Always save WiFi configuration, regardless of whether toggle changed
         # Get current channel value before setting it
         freq_defaults = {
@@ -5028,37 +5902,531 @@ def save_wireless_action():
             # Use default when switching bands or channel doesn't fit 6 GHz spacing.
             if current_band != "6g" or current_channel_i < 1 or current_channel_i > 233:
                 current_channel = fdef["default_channel"]
-        cmdtool.prepare(["uci", "set", "wireless.{}.band={}".format(device, fdef["band"])])
-        cmdtool.prepare(["uci", "set", "wireless.{}.htmode={}".format(device, target_htmode)])
-        cmdtool.prepare(["uci", "set", "wireless.{}.channel={}".format(device, current_channel)])
-        cmdtool.prepare(["uci", "set", "wireless.{}.country=US".format(device)])
-        cmdtool.prepare(["uci", "set", "wireless.default_{}.ssid={}".format(device, ssid) ])
         # 6 GHz mandates WPA3-SAE with PMF; force it regardless of user selection.
         if fdef["band"] == "6g":
             encryption = "sae"
-        cmdtool.prepare(["uci", "set", "wireless.default_{}.encryption={}".format(device, encryption) ])
-        if p_data.get("password") != "":
-            cmdtool.prepare(["uci", "set", "wireless.default_{}.key={}".format(device, ssid_key)])
-        if p_data.get("hide_ssid") == True:
-            cmdtool.prepare(["uci", "set", "wireless.default_{}.hidden=1".format(device)])
-        else:
-            cmdtool.prepare(["uci", "delete", "wireless.default_{}.hidden".format(device)])
 
-        cmdtool.prepare(["uci", "commit", "wireless"])
-        cmdtool.prepare(["luci-reload"])
-        cmdtool.prepare(["/sbin/wifi", "reload"])
-        threading.Timer(2.0, lambda: cmdtool.start()).start()
-    
+        # Written, verified and remembered in one place (wifi_radio): the AP
+        # section is resolved rather than assumed to be default_<radio>, the
+        # commit is checked against /etc/config/wireless instead of being fired
+        # off into a background thread nobody hears back from, and the settings
+        # are kept so the boot reconcile can put them back when the firmware
+        # regenerates the config.
+        saved, _vif = wifi_radio.save_ap_config(
+            device, wireless_cfg,
+            {"band": fdef["band"], "htmode": target_htmode,
+             "channel": current_channel, "country": "US"},
+            {"ssid": ssid, "encryption": encryption,
+             # An empty password field means "leave the passphrase alone".
+             "key": ssid_key if ssid_key != "" else None,
+             "hidden": "1" if p_data.get("hide_ssid") == True else ""})
+
+        if saved:
+            # The reload is what drops every client on this AP, so it stays
+            # deferred: the response has to reach the browser first.
+            cmdtool = CmdTool()
+            cmdtool.prepare(["luci-reload"])
+            cmdtool.prepare(["/sbin/wifi", "reload"])
+            threading.Timer(2.0, lambda: cmdtool.start()).start()
+        else:
+            json_dict = {
+                "status": "failed",
+                "message": _locales.get_locales("settings", current_locale()).get(
+                    "wifi_save_not_persisted", "Wi-Fi settings could not be saved."),
+            }
+
     json_str = json.dumps(json_dict)  
     rsp = make_response(json_str)
     rsp.headers['Content-Type'] = 'application/json'
     return rsp  
 
+# ── WiFi-as-WAN ("Smart WAN" 智能多网): upstream STA on the onboard radio ────
+
+def _wifi_wan_auth_ok():
+    """Session auth honoring --skip-auth and localhost, mirroring page auth."""
+    if pcat_config.skip_auth or 'username' in session:
+        return True
+    return request.remote_addr in ('127.0.0.1', '::1', 'localhost')
+
+
+@flask_app.route("/api/v1/wifi_wan/scan.json", methods=['GET'])
+@api_auth_required
+def wifi_wan_scan_api():
+    if not _wifi_wan_auth_ok():
+        return jsonify({"status": "failed", "message": "Login required"}), 401
+    networks, error = wifi_wan.scan()
+    if error:
+        return jsonify({"status": "failed", "reason": error, "networks": []})
+    saved = {n.get("ssid") for n in pcat_config.get_wifi_wan_networks()}
+    for net in networks:
+        net["saved"] = net["ssid"] in saved
+    return jsonify({"status": "ok", "networks": networks})
+
+
+@flask_app.route("/api/v1/wifi_wan.json", methods=['GET'])
+@api_auth_required
+def wifi_wan_status_api():
+    if not _wifi_wan_auth_ok():
+        return jsonify({"status": "failed", "message": "Login required"}), 401
+    # Saved networks are exposed without their secrets (key/password/identity)
+    saved_networks = [{"ssid": n.get("ssid", ""),
+                       "encryption": n.get("encryption", "none"),
+                       "band": n.get("band", ""),
+                       "random_mac": bool(n.get("random_mac")),
+                       "custom_mac": n.get("custom_mac", ""),
+                       "has_login_cmd": bool(n.get("login_cmd"))}
+                      for n in pcat_config.get_wifi_wan_networks()]
+    return jsonify({
+        "status": "ok",
+        "available": wifi_wan.is_available(),
+        "eap_supported": wifi_wan.eap_supported(),
+        "state": wifi_wan.get_state(),
+        "saved_networks": saved_networks,
+        "network_mode": pcat_config.get_network_mode(),
+    })
+
+
+@flask_app.route("/api/v1/wifi_wan.json", methods=['POST'])
+@api_auth_required
+def wifi_wan_save_api():
+    if not _wifi_wan_auth_ok():
+        return jsonify({"status": "failed", "message": "Login required"}), 401
+    if not wifi_wan.is_available():
+        return jsonify({"status": "failed",
+                        "message": "Smart WAN requires two WiFi radios (onboard + PCIe). / 智能多网需要两个 WiFi（板载 + PCIe）。"})
+    p_data = request.get_json() or {}
+    ssid = str(p_data.get("ssid", "")).strip()
+    encryption = str(p_data.get("encryption", "none"))
+    password = str(p_data.get("password", ""))
+    band = str(p_data.get("band", ""))
+    channel = p_data.get("channel")
+    use_saved = bool(p_data.get("use_saved"))
+    random_mac = bool(p_data.get("random_mac"))
+    custom_mac = str(p_data.get("custom_mac", "")).strip()
+    login_cmd = str(p_data.get("login_cmd", ""))
+    # EAP (802.1x) params; only used when encryption == "eap".
+    eap = {
+        "type": str(p_data.get("eap_type", "peap")),
+        "identity": str(p_data.get("identity", "")),
+        "anonymous_identity": str(p_data.get("anonymous_identity", "")),
+        "ca_cert": str(p_data.get("ca_cert", "")),
+    }
+
+    if use_saved:
+        saved = next((n for n in pcat_config.get_wifi_wan_networks()
+                      if n.get("ssid") == ssid), None)
+        if saved is None:
+            return jsonify({"status": "failed", "message": "Unknown saved network."})
+        encryption = saved.get("encryption", "none")
+        password = saved.get("key", "")
+        band = band or saved.get("band", "")
+        random_mac = bool(saved.get("random_mac"))
+        custom_mac = saved.get("custom_mac", "")
+        login_cmd = saved.get("login_cmd", "")
+        eap = {
+            "type": saved.get("eap_type", "peap"),
+            "identity": saved.get("identity", ""),
+            "anonymous_identity": saved.get("anonymous_identity", ""),
+            "ca_cert": saved.get("ca_cert", ""),
+        }
+
+    if not ssid or len(ssid.encode("utf-8")) > 32:
+        return jsonify({"status": "failed", "message": "Invalid SSID."})
+    if encryption not in wifi_wan.SUPPORTED_ENCRYPTIONS:
+        return jsonify({"status": "failed", "message": "Unsupported encryption."})
+    if encryption == "eap":
+        if not wifi_wan.eap_supported():
+            return jsonify({"status": "failed",
+                            "message": "Enterprise (802.1x) WiFi is not supported by this firmware (needs full wpad). / 本固件不支持企业级 (802.1x) WiFi（需要完整 wpad）。"})
+        if eap["type"] not in wifi_wan.EAP_TYPES:
+            return jsonify({"status": "failed", "message": "Invalid EAP type."})
+        if not eap["identity"]:
+            return jsonify({"status": "failed", "message": "EAP identity (username) is required."})
+        if eap["type"] in ("peap", "ttls") and not password:
+            return jsonify({"status": "failed", "message": "EAP password is required."})
+        if len(login_cmd) > 1024:
+            return jsonify({"status": "failed", "message": "Login command too long."})
+    elif encryption != "none":
+        if not (8 <= len(password) <= 63):
+            return jsonify({"status": "failed", "message": "Password must be 8-63 characters."})
+    if len(login_cmd) > 1024:
+        return jsonify({"status": "failed", "message": "Login command too long."})
+    if band not in ("", "2g", "5g"):
+        return jsonify({"status": "failed", "message": "Invalid band."})
+    if custom_mac:
+        custom_mac = wifi_wan.valid_custom_mac(custom_mac)
+        if not custom_mac:
+            return jsonify({"status": "failed",
+                            "message": "Invalid MAC address (want aa:bb:cc:dd:ee:ff, unicast). / MAC 地址无效（格式 aa:bb:cc:dd:ee:ff，且须为单播地址）。"})
+    try:
+        channel = int(channel) if channel else None
+    except (TypeError, ValueError):
+        channel = None
+
+    pcat_logger.logger.info(
+        "User {} joining Smart WAN upstream '{}' ({} {}, random_mac={}, custom_mac={})".format(
+            request.remote_addr, ssid, encryption, band or "auto", random_mac,
+            custom_mac or "no"))
+
+    eap_arg = eap if encryption == "eap" else None
+    wifi_wan.apply_config(ssid, password, encryption, band, channel,
+                          random_mac=random_mac, custom_mac=custom_mac,
+                          eap=eap_arg)
+    pcat_config.remember_wifi_wan_network(ssid, encryption, password, band,
+                                          channel or 0, random_mac=random_mac,
+                                          custom_mac=custom_mac,
+                                          login_cmd=login_cmd, eap=eap_arg)
+
+    # Joining an upstream enables the wifi slot. Priority mode is the new
+    # Smart WAN: a device not already in priority mode is moved into it (the
+    # table's route metrics keep eth + cellular as fallbacks), rather than the
+    # retired 'smart_wan' mode.
+    if pcat_config.get_network_mode() == "priority":
+        try:
+            wan_manager.set_slot_enabled("wifi", True)
+        except Exception as e:
+            pcat_logger.logger.warning("WAN priority: wifi slot enable failed: {}".format(e))
+    else:
+        try:
+            priority = wan_manager.get_priority()
+            for entry in priority:
+                if entry["id"] == "wifi":
+                    entry["enabled"] = True
+            wan_manager.apply(priority)
+        except Exception as e:
+            pcat_logger.logger.warning("WAN priority: switch on wifi join failed: {}".format(e))
+
+    return jsonify({"status": "ok"})
+
+
+@flask_app.route("/api/v1/wifi_wan/forget.json", methods=['POST'])
+@api_auth_required
+def wifi_wan_forget_api():
+    if not _wifi_wan_auth_ok():
+        return jsonify({"status": "failed", "message": "Login required"}), 401
+    p_data = request.get_json() or {}
+    ssid = str(p_data.get("ssid", "")).strip()
+    if not ssid:
+        return jsonify({"status": "failed", "message": "Missing SSID."})
+    pcat_logger.logger.info("User {} forgetting Smart WAN network '{}'".format(
+        request.remote_addr, ssid))
+    pcat_config.forget_wifi_wan_network(ssid)
+    if wifi_wan.is_configured() and wifi_wan.get_state().get("ssid") == ssid:
+        wifi_wan.remove_sta()
+    return jsonify({"status": "ok"})
+
+
+# ── WAN priority table (metric-based multi-WAN; replaces modes + mwan3) ──────
+
+# get_active_egress() device classes -> priority slot ids
+_EGRESS_TO_SLOT = {"wan": "wan", "wifi": "wifi", "mobile": "cellular"}
+
+
+@flask_app.route("/api/v1/wan_priority.json", methods=['GET'])
+@api_auth_required
+def wan_priority_status_api():
+    if not _wifi_wan_auth_ok():
+        return jsonify({"status": "failed", "message": "Login required"}), 401
+    data = wan_manager.status()
+    data["status"] = "ok"
+    data["active_slot"] = _EGRESS_TO_SLOT.get(pc_app.get_active_egress(), "")
+    return jsonify(data)
+
+
+@flask_app.route("/api/v1/wan_priority.json", methods=['POST'])
+@api_auth_required
+def wan_priority_save_api():
+    if not _wifi_wan_auth_ok():
+        return jsonify({"status": "failed", "message": "Login required"}), 401
+    p_data = request.get_json() or {}
+    priority = p_data.get("priority")
+    wifi_radio = p_data.get("wifi_radio")
+
+    if not isinstance(priority, list) or not priority:
+        return jsonify({"status": "failed", "message": "Missing priority list."})
+    ids = [(item or {}).get("id") for item in priority]
+    if len(set(ids)) != len(ids) or any(i not in wan_manager.SLOTS for i in ids):
+        return jsonify({"status": "failed", "message": "Invalid priority list."})
+    if wifi_radio is not None and wifi_radio not in ("onboard", "pcie"):
+        return jsonify({"status": "failed", "message": "Invalid wifi radio."})
+
+    pcat_logger.logger.info("User {} saving WAN priority: {} (wifi_radio={})".format(
+        request.remote_addr,
+        " > ".join("{}{}".format(i, "" if (item or {}).get("enabled") else "(off)")
+                   for i, item in zip(ids, priority)),
+        wifi_radio or "unchanged"))
+
+    try:
+        wan_manager.apply(priority, wifi_radio)
+    except Exception as e:
+        pcat_logger.logger.error("WAN priority apply failed: {}".format(e))
+        return jsonify({"status": "failed",
+                        "message": "Failed to apply priority. / 应用优先级失败。"})
+    # The daemon must not down modem interfaces behind the table's back.
+    try:
+        pc_app.socket_client.set_auto_wan(0)
+    except Exception as e:
+        pcat_logger.logger.warning("WAN priority: modem auto-stop sync failed: {}".format(e))
+
+    data = wan_manager.status()
+    data["status"] = "ok"
+    data["active_slot"] = _EGRESS_TO_SLOT.get(pc_app.get_active_egress(), "")
+    return jsonify(data)
+
+
+@flask_app.route("/api/v1/wan_portal_login.json", methods=['POST'])
+@api_auth_required
+def wan_portal_login_api():
+    """Open (or cancel) a captive-portal login window on one priority slot.
+
+    A portal-locked uplink is demoted, which is what makes its login page
+    unreachable: every request leaves via the working uplink. This holds the
+    slot up as the primary uplink for a bounded time so the user can sign in;
+    see wan_manager.start_portal_login for how it ends itself."""
+    if not _wifi_wan_auth_ok():
+        return jsonify({"status": "failed", "message": "Login required"}), 401
+    p_data = request.get_json() or {}
+    action = str(p_data.get("action", "start")).strip()
+    slot = str(p_data.get("slot", "")).strip()
+
+    if action == "cancel":
+        pcat_logger.logger.info("User {} cancelling portal login window".format(
+            request.remote_addr))
+        wan_manager.end_portal_login("cancelled by user")
+        return jsonify({"status": "ok",
+                        "portal_login": wan_manager.portal_login_state()})
+
+    pcat_logger.logger.info("User {} starting portal login window on {}".format(
+        request.remote_addr, slot or "?"))
+    try:
+        state = wan_manager.start_portal_login(slot, p_data.get("duration"))
+    except ValueError as e:
+        return jsonify({"status": "failed", "message": str(e)})
+    except Exception as e:
+        pcat_logger.logger.error("Portal login window failed: {}".format(e))
+        return jsonify({"status": "failed",
+                        "message": "Failed to start the login window. / 无法开始登录。"})
+    return jsonify({"status": "ok", "portal_login": state})
+
+
+# ── Modem log viewer (daemon's in-memory dial log, chrome-devtools style) ────
+
+@flask_app.route("/modem_log")
+def modem_log_action():
+    if 'username' not in session:
+        return redirect(f"/login?next={request.path}")
+    c_locale = current_locale()
+    locales = _locales.get_locales("modem_log", c_locale)
+    locales.update(base_locales())
+    return render_template(nt.modem_log_file_name, locales=locales)
+
+
+@flask_app.route("/api/v1/modem/log.json", methods=['GET'])
+@api_auth_required
+def modem_log_api():
+    """Chunked reads of the pcat-manager daemon's in-memory modem dial log
+    (fm350-mm / quectel-cm output, up to 16MB retained). Absolute offsets:
+    pass none for the tail, then poll with offset=next_offset for increments."""
+    if not _wifi_wan_auth_ok():
+        return jsonify({"status": "failed", "message": "Login required"}), 401
+    offset = request.args.get("offset", None, type=int)
+    max_size = request.args.get("max_size", 65536, type=int)
+    max_size = min(max(max_size, 4096), 262144)
+
+    sc = pc_app.socket_client
+    seq = sc.modem_log_seq
+    sc.modem_log_get(offset, max_size)
+    for _ in range(40):  # wait up to ~2s for the daemon reply
+        if sc.modem_log_seq != seq:
+            break
+        time.sleep(0.05)
+    resp = sc.modem_log_response if sc.modem_log_seq != seq else None
+    if not resp or resp.get("code") != 0:
+        return jsonify({"status": "failed",
+                        "message": "Modem log not available (pcat-manager too old?) / 守护进程不支持调制解调器日志。"})
+
+    dev_paths = sorted(glob.glob("/dev/ttyUSB*")) + sorted(glob.glob("/dev/ttyACM*")) \
+        + sorted(glob.glob("/dev/wwan*"))
+    netdevs = [d for d in ("eth2", "usb0", "wwan0")
+               if os.path.exists("/sys/class/net/" + d)]
+    return jsonify({
+        "status": "ok",
+        "log": resp.get("log", ""),
+        "offset": resp.get("offset", 0),
+        "next_offset": resp.get("next-offset", 0),
+        "total_offset": resp.get("total-offset", 0),
+        "tail_offset": resp.get("tail-offset", 0),
+        # Source descriptor: one entry today (the cellular modem); shaped so
+        # more sources (GPS, MCU, hostapd...) can join later dev-tools style.
+        "source": {
+            "id": "modem",
+            "exec": resp.get("exec", ""),
+            "usb_id": resp.get("usb-id", ""),
+            "dev_paths": dev_paths,
+            "netdevs": netdevs,
+        },
+    })
+
+
+# ── SOC gauge diagnostic log (MCU RAM ring, drained by the daemon) ───────────
+
+# Event codes mirror SOC_LOG_EVT_* in the MCU firmware
+# (photonicat_v2/freertos_ek_ra2e1_ep/src/soc_log.h). Anything not listed here
+# renders as its raw number, so a newer MCU adding events degrades readably.
+_SOC_LOG_EVENTS = {
+    0:  "periodic",      1:  "mcu-boot",       2:  "rk-on",
+    3:  "rk-off",        6:  "full-anchor",    7:  "low-voltage-anchor",
+    8:  "empty-learn",   9:  "ocv-calibrate", 10:  "gross-mismatch-fix",
+    11: "nv-restore",   12:  "sleep-discharge", 13: "boot-ocv-reseed",
+    14: "gauge-init",
+}
+# Events that move SoC are written as a before/after pair; these are the ones
+# worth highlighting in the UI because they are what makes SoC jump.
+_SOC_LOG_ANCHOR_EVENTS = {6, 7, 8, 9, 10, 11, 12, 13, 14}
+
+
+@flask_app.route("/api/v1/soc_log.json", methods=['GET'])
+@api_auth_required
+def soc_log_api():
+    """SOC gauge diagnostic records from the pcat-manager daemon.
+
+    The MCU keeps a 32-slot RAM ring covering the window nothing else can see
+    (RK powered down, MCU awake or in standby), writing a before/after pair at
+    every anchor that moves SoC. The daemon drains it over com=173 and stitches
+    it into a longer RAM history. Poll with from_seq=next_seq for increments."""
+    if not _wifi_wan_auth_ok():
+        return jsonify({"status": "failed", "message": "Login required"}), 401
+    from_seq = request.args.get("from_seq", None, type=int)
+    max_records = request.args.get("max_records", 256, type=int)
+    max_records = min(max(max_records, 1), 1024)
+
+    sc = pc_app.socket_client
+    # Guards the mock socket client used by app/test, not an old daemon: this
+    # only sees our own Python object, so it says nothing about what
+    # pcat-manager on the other end of the socket supports.
+    if not hasattr(sc, "soc_log_get"):
+        return jsonify({"status": "failed",
+                        "message": "SOC log not available: this socket client has no soc_log_get. / 当前 socket 客户端不支持 soc_log_get。"})
+    seq = sc.soc_log_seq
+    sc.soc_log_get(from_seq, max_records)
+    for _ in range(40):  # wait up to ~2s for the daemon reply
+        if sc.soc_log_seq != seq:
+            break
+        time.sleep(0.05)
+    resp = sc.soc_log_response if sc.soc_log_seq != seq else None
+
+    # Three different failures used to share one message that blamed the MCU,
+    # which sent people to reflash firmware that was already new enough. Keep
+    # them apart:
+    #   no reply      the daemon does not implement soc-log-get and dropped an
+    #                 unknown command silently (pcat-manager before the
+    #                 soc-log-get commit). This is the common case.
+    #   supported 0   the daemon asked, the MCU never answered -> MCU firmware
+    #                 really is older than RA2E1260727000.
+    #   code != 0     the daemon tried and failed.
+    if not resp:
+        return jsonify({"status": "failed",
+                        "message": "SOC log not available: pcat-manager did not answer soc-log-get, so it is too old for this feature. Update pcat-manager. / pcat-manager 版本过旧，不支持 soc-log-get，请升级 pcat-manager。"})
+    if resp.get("code") != 0:
+        return jsonify({"status": "failed",
+                        "message": "SOC log request failed in pcat-manager (code %s). / pcat-manager 读取 SOC 日志失败（代码 %s）。" % (
+                            resp.get("code"), resp.get("code"))})
+    if not resp.get("supported"):
+        return jsonify({"status": "failed",
+                        "message": "SOC log not available: this MCU firmware does not keep one (needs RA2E1260727000 or newer). / MCU 固件过旧，无 SOC 诊断日志（需 RA2E1260727000 及以上）。"})
+
+    records = []
+    for r in resp.get("records", []):
+        event = r.get("event", 0)
+        flags = r.get("flags", 0)
+        records.append({
+            "seq": r.get("seq"),
+            # MCU uptime seconds (awake + standby), not wall clock: the MCU has
+            # no calendar the RK can trust across its own power cycles.
+            "t": r.get("t", 0),
+            "v_mv": r.get("v", 0),
+            "i_ma": r.get("i", 0),
+            "vbus_mv": r.get("vbus", 0),
+            "soc_raw": round(r.get("soc-raw-x10", 0) / 10.0, 1),
+            "soc_disp": r.get("soc-disp", 0),
+            "temp_c": r.get("temp", 0),
+            "event": event,
+            "event_name": _SOC_LOG_EVENTS.get(event, "evt-%d" % event),
+            "pre": bool(r.get("pre")),
+            "anchor": event in _SOC_LOG_ANCHOR_EVENTS,
+            "charger": bool(flags & 0x01),
+            "trusted": bool(flags & 0x02),
+            "rk_on": bool(flags & 0x04),
+        })
+
+    seq_next = resp.get("seq-next", 0)
+    return jsonify({
+        "status": "ok",
+        "records": records,
+        "seq_oldest": resp.get("seq-oldest", 0),
+        "seq_next": seq_next,
+        # Cursor for the next incremental poll: one past the last record we got,
+        # or seq_next when this reply was empty.
+        "next_seq": (records[-1]["seq"] + 1) if records else seq_next,
+        "log_version": resp.get("log-version", 0),
+    })
+
+
+# ── Captive portal gateway (OpenNDS) ─────────────────────────────────────────
+
+@flask_app.route("/api/v1/captive_portal.json", methods=['GET'])
+@api_auth_required
+def captive_portal_status_api():
+    if not _wifi_wan_auth_ok():
+        return jsonify({"status": "failed", "message": "Login required"}), 401
+    return jsonify({"status": "ok", "state": captive.get_state()})
+
+
+@flask_app.route("/api/v1/captive_portal.json", methods=['POST'])
+@api_auth_required
+def captive_portal_set_api():
+    if not _wifi_wan_auth_ok():
+        return jsonify({"status": "failed", "message": "Login required"}), 401
+    if not captive.is_installed():
+        return jsonify({"status": "failed",
+                        "message": "Captive portal is not available on this firmware. / 本固件不支持强制门户。"})
+    p_data = request.get_json() or {}
+    enabled = bool(p_data.get("enabled"))
+    pcat_logger.logger.info("User {} {} captive portal".format(
+        request.remote_addr, "enabling" if enabled else "disabling"))
+    state, ok = captive.set_enabled(enabled)
+    if not ok:
+        return jsonify({
+            "status": "failed",
+            "message": "Failed to {} captive portal. / 强制门户{}失败。".format(
+                "enable" if enabled else "disable", "启用" if enabled else "禁用"),
+            "state": state,
+        })
+    return jsonify({"status": "ok", "state": state})
+
+
 _wifi_clients_cache = {'data': None, 'timestamp': 0}
 _WIFI_CLIENTS_CACHE_DURATION = 60  # seconds
 
+@flask_app.route("/api/v1/theme_accent.json", methods=['GET'])
 @api_auth_required
+def api_theme_accent_get():
+    return jsonify({"status": "ok", "color": theme_accent()})
+
+
+@flask_app.route("/api/v1/theme_accent.json", methods=['POST'])
+@api_auth_required
+def api_theme_accent_post():
+    body = request.get_json() or {}
+    color = (body.get("color") or "").strip()
+    if not HEX_COLOR_RE.match(color):
+        return jsonify({"status": "failed", "message": "bad color"}), 400
+    pcat_config.set_user_config_key(THEME_ACCENT_KEY, color.upper())
+    return jsonify({"status": "ok", "color": color.upper()})
+
+
 @flask_app.route("/api/v1/wifi_clients.json", methods=['GET'])
+@api_auth_required
 def wifi_clients_json_action():
     current_time = time.time()
     if (_wifi_clients_cache['data'] is not None and
@@ -5072,8 +6440,54 @@ def wifi_clients_json_action():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
+# /stats device table: every DHCP lease plus the Wi-Fi stations, one row per
+# MAC (see pcat_util/lan_clients.py). Cached briefly: the page polls every 5s
+# and the lease file + hostapd ubus calls are cheap but not free.
+_lan_clients_cache = {'data': None, 'timestamp': 0}
+_LAN_CLIENTS_CACHE_DURATION = 4  # seconds
+
+@flask_app.route("/api/v1/lan_clients.json", methods=['GET'])
 @api_auth_required
+def lan_clients_json_action():
+    now = time.time()
+    if (_lan_clients_cache['data'] is None or
+            now - _lan_clients_cache['timestamp'] >= _LAN_CLIENTS_CACHE_DURATION):
+        _lan_clients_cache['data'] = pc_app.main_app.get_lan_clients()
+        _lan_clients_cache['timestamp'] = now
+    rsp = make_response(_lan_clients_cache['data'])
+    rsp.headers['Content-Type'] = 'application/json'
+    return rsp
+
+# Live throughput for /stats: cumulative egress byte counters, sampled by the
+# browser once a second, which computes the rates itself and keeps the last
+# minute in memory. Deliberately no server-side history and no cache: a 1s
+# poll wants fresh counters, and the read is a handful of sysfs files.
+@flask_app.route("/api/v1/net_rate.json", methods=['GET'])
+@api_auth_required
+def net_rate_json_action():
+    rsp = make_response(pc_app.main_app.get_egress_counters())
+    rsp.headers['Content-Type'] = 'application/json'
+    return rsp
+
+# System badges on /stats (CPU, memory, disks, TCP connections). Cheap
+# /proc reads; a short cache still collapses several open tabs into one read.
+_sys_stats_cache = {'data': None, 'timestamp': 0}
+_SYS_STATS_CACHE_DURATION = 2  # seconds
+
+@flask_app.route("/api/v1/sys_stats.json", methods=['GET'])
+@api_auth_required
+def sys_stats_json_action():
+    now = time.time()
+    if (_sys_stats_cache['data'] is None or
+            now - _sys_stats_cache['timestamp'] >= _SYS_STATS_CACHE_DURATION):
+        _sys_stats_cache['data'] = pc_app.main_app.get_sys_stats()
+        _sys_stats_cache['timestamp'] = now
+    rsp = make_response(_sys_stats_cache['data'])
+    rsp.headers['Content-Type'] = 'application/json'
+    return rsp
+
 @flask_app.route("/api/v1/time.json", methods=['GET'])
+@api_auth_required
 def get_time_json_action():
     response_json = {}
 
@@ -5094,8 +6508,8 @@ def get_time_json_action():
 #  ubus call system info
 #  ubus call system reboot
 
-@api_auth_required
 @flask_app.route("/api/v1/timers.json", methods=['GET'])
+@api_auth_required
 def get_timers_json_action():
     list_data = pc_app.socket_client.schedule_power_events()
     rsp = make_response(list_data)
@@ -5145,13 +6559,13 @@ def get_timers_json_action():
 #     }
 # ]
 # Cancel all timers with POST /api/v1/timers.json with payload []
-@api_auth_required
 @flask_app.route("/api/v1/timers.json", methods=['POST'])
+@api_auth_required
 def save_timers_json_action():
     json_data = request.get_json()
     # [{'hour': 0, 'minute': 0, 'actiont': 'shutdown', 'days': [3, 5]}, 
     #  {'hour': 5, 'minute': 0, 'actiont': 'startup', 'days': [1, 2, 3, 4, 5, 6, 7]}] <class 'list'>
-    pcat_logger.logger.info("Get user {} posted timer info:{}".format(request.remote_addr, str(json_data)))
+    pcat_logger.logger.info("Get user {} posted timer info:{}".format(request.remote_addr, _redact_sensitive(json_data)))
 
     data_valid = True
     event_list = []
@@ -5210,8 +6624,8 @@ def save_timers_json_action():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/carbootmode.json", methods=['POST'])
+@api_auth_required
 def save_carboot_mode_action():
     json_data = request.get_json()
     state = json_data.get("carmode") == 'true'
@@ -5238,9 +6652,16 @@ def save_carboot_mode_action():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/forcepowermode.json", methods=['POST'])
+@api_auth_required
 def save_force_power_mode_action():
+    if not is_photonicat2:
+        rsp = make_response({
+            "status": "error",
+            "message": "Direct power mode is only supported on Photonicat 2",
+        }, 400)
+        rsp.headers['Content-Type'] = 'application/json'
+        return rsp
     json_data = request.get_json()
     state = json_data.get("forcemode") == 'true'
 
@@ -5266,8 +6687,8 @@ def save_force_power_mode_action():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/idle_shutdown.json", methods=['GET'])
+@api_auth_required
 def get_idle_shutdown_settings():
     """Get idle shutdown configuration"""
     enabled = pcat_config.get_user_config_key("idle_shutdown_enabled", False)
@@ -5283,8 +6704,8 @@ def get_idle_shutdown_settings():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/idle_shutdown.json", methods=['POST'])
+@api_auth_required
 def save_idle_shutdown_settings():
     """Save idle shutdown configuration"""
     json_data = request.get_json()
@@ -5318,6 +6739,7 @@ def save_idle_shutdown_settings():
     return rsp
 
 @flask_app.route("/api/v1/low_battery_shutdown.json", methods=['GET'])
+@api_auth_required
 def get_low_battery_shutdown_settings():
     """Get low battery shutdown configuration"""
     enabled = pcat_config.get_user_config_key("low_battery_shutdown_enabled", False)
@@ -5331,8 +6753,8 @@ def get_low_battery_shutdown_settings():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/low_battery_shutdown.json", methods=['POST'])
+@api_auth_required
 def save_low_battery_shutdown_settings():
     """Save low battery shutdown configuration"""
     json_data = request.get_json()
@@ -5363,8 +6785,8 @@ def save_low_battery_shutdown_settings():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/power_events.json", methods=['GET'])
+@api_auth_required
 def get_power_events():
     """Get power event log entries"""
     limit = request.args.get('limit', 50, type=int)
@@ -5384,8 +6806,8 @@ def get_power_events():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/power_events.json", methods=['DELETE'])
+@api_auth_required
 def clear_power_events():
     """Clear all power event log entries"""
     power_event_log.clear_events()
@@ -5394,13 +6816,20 @@ def clear_power_events():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/battery_history.json", methods=['GET'])
+@api_auth_required
 def get_battery_history():
     """Get battery history data for charting"""
     hours = request.args.get('hours', 24, type=int)
     hours = min(hours, 720)  # Max 30 days
     data = battery_history.get_history(hours=hours)
+    if not is_photonicat2:
+        # A Photonicat 1 measures neither battery current nor temperature;
+        # rows recorded before the recorder learned that carry a literal 0.
+        # Never hand those to the chart -- they draw as flat fake lines.
+        for row in data:
+            row["current"] = None
+            row["temperature"] = None
 
     # Include power on/off events for chart markers
     now_ts = int(time.time())
@@ -5428,8 +6857,8 @@ def get_battery_history():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/network_interfaces.json", methods=['GET'])
+@api_auth_required
 def network_interfaces_api():
     response_json = get_network_interfaces_data()
     
@@ -5437,12 +6866,12 @@ def network_interfaces_api():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/network_interfaces.json", methods=['POST'])
+@api_auth_required
 def save_network_interfaces_api():
     
     json_data = request.get_json()
-    pcat_logger.logger.info("Get user {} posted network interfaces toggle info:{}".format(request.remote_addr, str(json_data)))
+    pcat_logger.logger.info("Get user {} posted network interfaces toggle info:{}".format(request.remote_addr, _redact_sensitive(json_data)))
 
     # Handle new network_mode parameter
     network_mode = json_data.get("network_mode", "auto")
@@ -5451,12 +6880,26 @@ def save_network_interfaces_api():
     pcat_config.set_network_mode(network_mode)
     
     wan_flag = json_data.get("wan", False)
+    wan_mode = json_data.get("wan_mode")
+    if wan_mode in pc_app.LAN_MODES:
+        pc_app.set_wan_mode(wan_mode)
     sim_flag = json_data.get("sim", False)
-    lan_flag = json_data.get("lan", False)
+    lan_mode = json_data.get("lan_mode")
+    if lan_mode in pc_app.LAN_MODES:
+        pc_app.set_lan_mode(lan_mode, restart=False)
+        lan_flag = lan_mode != "off"
+    else:
+        lan_flag = json_data.get("lan", False)
     onboard_wifi_flag = json_data.get("onboard_wifi", False)
     pcie_wifi_flag = json_data.get("pcie_wifi", False)
     
     pc_app.config_network_toggle(network_mode, wan_flag, sim_flag, lan_flag, onboard_wifi_flag, pcie_wifi_flag)
+
+    # The page re-fetches a few seconds after this POST, inside the 15s cache
+    # window; without this it reads the pre-toggle snapshot and the switches
+    # visibly snap back even though the change applied.
+    with network_interfaces_cache['lock']:
+        network_interfaces_cache['timestamp'] = 0
 
     response_json = {}
     response_json["status"] = "ok"
@@ -5464,14 +6907,14 @@ def save_network_interfaces_api():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/wwan_power.json", methods=['GET'])
+@api_auth_required
 def wwan_power_status_api():
     powered = pc_app.is_wwan_powered()
     return jsonify({"status": "ok", "wwan_powered": powered})
 
-@api_auth_required
 @flask_app.route("/api/v1/wwan_power.json", methods=['POST'])
+@api_auth_required
 def wwan_power_set_api():
     json_data = request.get_json()
     powered = json_data.get("powered", True)
@@ -5488,8 +6931,8 @@ def wwan_power_set_api():
         pcat_logger.logger.error("Failed to set rfkill wwan: %s", e)
         return jsonify({"status": "error", "message": str(e)})
 
-@api_auth_required
 @flask_app.route("/api/v1/apn_settings.json", methods=['GET'])
+@api_auth_required
 def apn_settings_api():
     # pc_app.socket_client.modem_apn_get()
     modem_apn = pc_app.socket_client.modem_apn
@@ -5509,11 +6952,11 @@ def apn_settings_api():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/apn_settings.json", methods=['POST'])
+@api_auth_required
 def save_apn_settings_api():
     p_data = request.get_json()
-    pcat_logger.logger.info("Get user {} posted APN info:{}".format(request.remote_addr, str(p_data)))
+    pcat_logger.logger.info("Get user {} posted APN info:{}".format(request.remote_addr, _redact_sensitive(p_data)))
 
     apn_addr = str(p_data.get("apn_addr", ""))
     apn_user  = str(p_data.get("user", ""))
@@ -5529,11 +6972,11 @@ def save_apn_settings_api():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp  
 
-@api_auth_required
 @flask_app.route("/api/v1/settings.json", methods=['POST'])
+@api_auth_required
 def save_settings_api():
     p_data = request.get_json()
-    pcat_logger.logger.info("Get user {} posted settings info:{}".format(request.remote_addr, str(p_data)))
+    pcat_logger.logger.info("Get user {} posted settings info:{}".format(request.remote_addr, _redact_sensitive(p_data)))
 
     energy_saving_mode = p_data.get("energy_saving_mode", False)
     if pcat_config.config.has_section('device'):
@@ -5549,8 +6992,8 @@ def save_settings_api():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp    
 
-@api_auth_required
 @flask_app.route("/api/v1/power_led_settings.json", methods=['GET'])
+@api_auth_required
 def power_led_settings_api():
     """Get Power LED settings"""
     mode = pc_app.timer_manager.get_power_led_mode()
@@ -5565,12 +7008,12 @@ def power_led_settings_api():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/power_led_settings.json", methods=['POST'])
+@api_auth_required
 def save_power_led_settings_api():
     """Save Power LED settings"""
     p_data = request.get_json()
-    pcat_logger.logger.info("Get user {} posted Power LED settings info:{}".format(request.remote_addr, str(p_data)))
+    pcat_logger.logger.info("Get user {} posted Power LED settings info:{}".format(request.remote_addr, _redact_sensitive(p_data)))
     
     mode = p_data.get('mode', 'on')  # off, on, timed
     start_time = p_data.get('start_time', '08:00')
@@ -5596,8 +7039,8 @@ def save_power_led_settings_api():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/beeper_settings.json", methods=['GET'])
+@api_auth_required
 def beeper_settings_api():
     """Get Beeper settings"""
     mode = pc_app.timer_manager.get_beeper_mode()
@@ -5612,12 +7055,12 @@ def beeper_settings_api():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/beeper_settings.json", methods=['POST'])
+@api_auth_required
 def save_beeper_settings_api():
     """Save Beeper settings"""
     p_data = request.get_json()
-    pcat_logger.logger.info("Get user {} posted Beeper settings info:{}".format(request.remote_addr, str(p_data)))
+    pcat_logger.logger.info("Get user {} posted Beeper settings info:{}".format(request.remote_addr, _redact_sensitive(p_data)))
     
     mode = p_data.get('mode', 'on')  # off, on, timed
     start_time = p_data.get('start_time', '08:00')
@@ -5643,32 +7086,50 @@ def save_beeper_settings_api():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/power_led_status.json", methods=['GET'])
+@api_auth_required
 def power_led_status_api():
     """Get current Power LED runtime status"""
     settings = pc_app.timer_manager.settings.get('power_led', {})
-    current_status = pc_app.socket_client.status_led_v2_enabled
     mode = settings.get('mode', 'on')
-    
-    # If current status is None, determine based on mode
+    schedule_owner = pc_app.timer_manager.schedule_owner()
+
+    # Prefer MCU schedule get when the MCU owns the schedule; else re-query
+    # the immediate mask. max_age shares the read with beeper_status. On a
+    # daemon proven to drop the named commands (delivery raw/host-reassert),
+    # the schedule get would just burn its timeout -- ask for the mask.
+    try:
+        if (schedule_owner == "mcu"
+                and pc_app.timer_manager.schedule_delivery() in (None, "named")):
+            pc_app.socket_client.pmu_io_schedule_get(wait=True, timeout=0.8)
+        else:
+            pc_app.socket_client.pmu_io_get(wait=True, timeout=0.8, max_age=2.0)
+    except Exception as e:
+        pcat_logger.logger.warning(f"power_led_status refresh failed: {e}")
+
+    current_status = pc_app.socket_client.status_led_v2_enabled
+    # If current status is still None, fall back to schedule desired state
     if current_status is None:
         if mode == 'off':
             current_status = False
         elif mode == 'on':
             current_status = True
         elif mode == 'timed':
-            # For timed mode, check if we're in the scheduled time range
             start_time = settings.get('start_time', '08:00')
             end_time = settings.get('end_time', '22:00')
             current_status = pc_app.timer_manager.is_time_in_range(start_time, end_time)
-    
+    else:
+        # PMU returns 0/1; normalize so the Alpine badge treats it as a bool
+        current_status = bool(current_status)
+
     json_dict = {
         "status": "ok",
         "current_enabled": current_status,
         "mode": mode,
         "start_time": settings.get('start_time', '08:00'),
         "end_time": settings.get('end_time', '22:00'),
+        "schedule_owner": schedule_owner,
+        "schedule_delivery": pc_app.timer_manager.schedule_delivery(),
         # Legacy fields for backward compatibility
         "enabled": settings.get('enabled', True),
         "all_day": settings.get('all_day', True)
@@ -5678,32 +7139,46 @@ def power_led_status_api():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/beeper_status.json", methods=['GET'])
+@api_auth_required
 def beeper_status_api():
     """Get current Beeper runtime status"""
     settings = pc_app.timer_manager.settings.get('beeper', {})
-    current_status = pc_app.socket_client.beeper_enabled
     mode = settings.get('mode', 'on')
-    
-    # If current status is None, determine based on mode
+    schedule_owner = pc_app.timer_manager.schedule_owner()
+
+    # LED status already re-queries; schedule get / max_age keep this cheap.
+    # Same named-delivery gate as power_led_status above.
+    try:
+        if (schedule_owner == "mcu"
+                and pc_app.timer_manager.schedule_delivery() in (None, "named")):
+            pc_app.socket_client.pmu_io_schedule_get(wait=True, timeout=0.8)
+        else:
+            pc_app.socket_client.pmu_io_get(wait=True, timeout=0.8, max_age=2.0)
+    except Exception as e:
+        pcat_logger.logger.warning(f"beeper_status refresh failed: {e}")
+
+    current_status = pc_app.socket_client.beeper_enabled
     if current_status is None:
         if mode == 'off':
             current_status = False
         elif mode == 'on':
             current_status = True
         elif mode == 'timed':
-            # For timed mode, check if we're in the scheduled time range
             start_time = settings.get('start_time', '08:00')
             end_time = settings.get('end_time', '22:00')
             current_status = pc_app.timer_manager.is_time_in_range(start_time, end_time)
-    
+    else:
+        current_status = bool(current_status)
+
     json_dict = {
         "status": "ok",
         "current_enabled": current_status,
         "mode": mode,
         "start_time": settings.get('start_time', '08:00'),
         "end_time": settings.get('end_time', '22:00'),
+        "schedule_owner": schedule_owner,
+        "schedule_delivery": pc_app.timer_manager.schedule_delivery(),
         # Legacy fields for backward compatibility
         "enabled": settings.get('enabled', True),
         "all_day": settings.get('all_day', True)
@@ -5713,8 +7188,372 @@ def beeper_status_api():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
+@flask_app.route("/api/v1/battery_info.json", methods=['GET'])
 @api_auth_required
+def battery_info_get_api():
+    """Get battery health: learned capacity, cycle count and aging.
+
+    The MCU measures the pack's real capacity over a full discharge and keeps it
+    (with the cycle count) in its data flash. "supported" is false on MCU
+    firmware older than RA2E1260715004, which does not implement the query --
+    the UI shows that rather than pretending the values are zero.
+    """
+    client = pc_app.socket_client
+    supported = bool(client.battery_info_supported)
+
+    json_dict = {
+        "status": "ok",
+        "supported": supported,
+    }
+
+    if supported:
+        full_capacity = client.battery_full_capacity
+        nominal_capacity = client.battery_nominal_capacity
+        # Aging: how much of the rated capacity the pack still holds. MCU fw
+        # >= RA2E1260719003 computes this itself (EMA-smoothed learned
+        # capacity, capped at 100 like Apple) -- prefer that; fall back to
+        # deriving it from full/nominal on older firmware.
+        health_pct = client.battery_health_pct_mcu
+        # MCU fw >= RA2E1261016000 also reports whether the pack has ever been
+        # charged to a real 100%. If not (e.g. a charge limit below 100% is
+        # set), the full->empty capacity measurement never ran, so the MCU
+        # withholds health and the derived fallback below must not fill it in.
+        # The fallback is also limited to firmware that predates MCU-computed
+        # health (battery-info proto < 6): from proto 6 on, an absent health is
+        # the MCU's own verdict, even when the daemon is too old to forward
+        # full-charge-seen.
+        full_charge_seen = getattr(client, "battery_full_charge_seen", None)
+        proto_ver = client.battery_proto_ver
+        mcu_computes_health = isinstance(proto_ver, int) and proto_ver >= 6
+        if full_charge_seen is False:
+            health_pct = None
+        elif (health_pct is None and not mcu_computes_health and
+                client.battery_capacity_learned and
+                full_capacity and nominal_capacity):
+            try:
+                health_pct = round(
+                    (int(full_capacity) / int(nominal_capacity)) * 100.0, 1)
+            except (TypeError, ValueError, ZeroDivisionError):
+                health_pct = None
+        # Extended fields (MCU fw >= RA2E1260717006): learned pack internal
+        # resistance and cumulative machine-on time. None on older firmware;
+        # the page shows the rows only when present.
+        runtime_hours = None
+        if client.battery_runtime_seconds is not None:
+            try:
+                runtime_hours = round(int(client.battery_runtime_seconds) / 3600.0, 1)
+            except (TypeError, ValueError):
+                runtime_hours = None
+        # Middle-point tap voltage (MCU fw >= RA2E1260718001): the 2P2S pack
+        # center-tap in volts (measured on P015 via a 180K/100K divider). None
+        # on older firmware; the page shows the row only when present.
+        mid_voltage_v = None
+        if client.battery_mid_voltage is not None:
+            try:
+                mid_voltage_v = round(int(client.battery_mid_voltage) / 1000.0, 3)
+            except (TypeError, ValueError):
+                mid_voltage_v = None
+
+        # SOC display-factor diagnostics (MCU fw >= RA2E1260719001): the MCU
+        # auto-learns the per-unit "display empty point" (raw SoC at which the
+        # machine actually died from an empty battery) and remaps displayed SoC
+        # so that point reads 0%, plus a Tesla-style curve (real 4%->1%,
+        # 96%->100%). All ax+b; scaled ints from the MCU are converted to
+        # plain numbers here. None on older firmware.
+        def _scaled(v, div, digits=3):
+            try:
+                return round(int(v) / div, digits)
+            except (TypeError, ValueError):
+                return None
+        soc_raw_pct = _scaled(client.battery_soc_raw_x10, 10.0, 1)
+        soc_disp_a = _scaled(client.battery_soc_disp_a_x1000, 1000.0)
+        soc_disp_b = _scaled(client.battery_soc_disp_b_x100, 100.0, 2)
+        chg_gain = _scaled(client.battery_chg_gain_x1000, 1000.0)
+        cur_trim_a = _scaled(client.battery_cur_trim_a_x1000, 1000.0)
+
+        # Measured capacity looks low (e.g. 5825mAh vs 6800 nominal) because
+        # the current meter gain is off; suggest the ax+b pump-up factor to
+        # compile into the MCU once verified with the bench multimeter.
+        suggested_capacity_factor = None
+        if (client.battery_capacity_learned and full_capacity and
+                nominal_capacity):
+            try:
+                suggested_capacity_factor = round(
+                    int(nominal_capacity) / int(full_capacity), 3)
+            except (TypeError, ValueError, ZeroDivisionError):
+                suggested_capacity_factor = None
+
+        # Remaining capacity / energy counters (MCU fw >= RA2E1260719002):
+        # raw coulomb-counter values (not display-factor adjusted). Energy
+        # accumulators reset at RK boot re-anchor and full-charge anchor.
+        consumed_wh = _scaled(client.battery_consumed_mwh, 1000.0, 2)
+        charged_wh = _scaled(client.battery_charged_mwh, 1000.0, 2)
+
+        # Gauge temperature (MCU fw >= RA2E1260719009, proto ver >= 7): the
+        # on-board NTC reading the gauge runs its compensation on. The derived
+        # cold-empty uplift and R_int temperature multiplier are computed by
+        # the MCU from this and are no longer surfaced on the page.
+        # None on older firmware; the row shows only when present.
+
+        # Awake-on-battery time for the current session (since DC was last
+        # unplugged), with powered-off gaps excluded. Read from the persisted
+        # power event log rather than an in-memory timer so it survives a
+        # reboot in the middle of a battery run.
+        on_battery = None
+        try:
+            on_battery = power_event_log.get_on_battery_session(
+                charger_connected=bool(client.charger_connected))
+        except Exception:
+            on_battery = None
+
+        json_dict.update({
+            "full_capacity": full_capacity,
+            "nominal_capacity": nominal_capacity,
+            "cycle_count": client.battery_cycle_count,
+            "capacity_learned": bool(client.battery_capacity_learned),
+            "learning_active": bool(client.battery_learning_active),
+            "health_pct": health_pct,
+            # None = unknown (MCU fw < RA2E1261016000); False = never charged
+            # to 100%, so health_pct is withheld.
+            "full_charge_seen": full_charge_seen,
+            # Whole-loop measured resistance (cells + wiring/connector + MOSFET).
+            "internal_resistance_mohm": client.battery_internal_resistance,
+            # Resistance split (MCU fw >= RA2E1260721001): fixed board parasitic
+            # and the cell-only value (total - parasitic). None on older
+            # firmware; the page shows the battery-only row only when present.
+            "internal_resistance_parasitic_mohm": client.battery_internal_resistance_parasitic,
+            "internal_resistance_battery_mohm": client.battery_internal_resistance_battery,
+            "runtime_hours": runtime_hours,
+            "mid_voltage_v": mid_voltage_v,
+            "soc_raw_pct": soc_raw_pct,
+            "soc_empty_learned_pct": client.battery_soc_empty_pct,
+            "soc_disp_a": soc_disp_a,
+            "soc_disp_b": soc_disp_b,
+            "chg_gain": chg_gain,
+            "cur_trim_a": cur_trim_a,
+            "cur_trim_b_ma": client.battery_cur_trim_b_ma,
+            "suggested_capacity_factor": suggested_capacity_factor,
+            "remain_mah": client.battery_remain_mah,
+            "consumed_wh": consumed_wh,
+            "charged_wh": charged_wh,
+            "protocol_ver": client.battery_proto_ver,
+            "minutes_to_empty": client.battery_minutes_to_empty,
+            "minutes_to_full": client.battery_minutes_to_full,
+            "gauge_temp_c": client.battery_gauge_temp_c,
+            # Current on-battery run: seconds awake since DC was unplugged,
+            # whether that run is still going (False = on DC, value is the last
+            # completed run), and the unplug timestamp. None when the log has
+            # no unplug event to measure from.
+            "on_battery_seconds": on_battery["seconds"] if on_battery else None,
+            "on_battery_active": on_battery["active"] if on_battery else None,
+            "on_battery_since": on_battery["since"] if on_battery else None,
+            # MCU uptime diagnostics (MCU fw >= RA2E1260721006, proto ver >=
+            # 9): seconds since the MCU last reset (awake + standby time,
+            # survives RK reboots -- "how long without a reset"), seconds
+            # since the MCU last woke from standby, and the standby-entry
+            # count. None on older firmware; the page shows the rows only
+            # when present. Raw seconds -- the page formats days/hours.
+            "mcu_uptime_seconds": client.mcu_uptime_seconds,
+            "mcu_since_sleep_seconds": client.mcu_since_sleep_seconds,
+            "mcu_sleep_count": client.mcu_sleep_count,
+        })
+
+        # Gauge self-calibration state -> /tmp/guage_learning.log. Written
+        # here, on demand, rather than from a periodic tick: the numbers are
+        # bench diagnostics nobody reads unless they are on /dev, so a device
+        # that never serves this endpoint spends nothing on it. The writer
+        # skips unchanged state, so the 5s poll behind /dev appends only when
+        # the MCU actually re-learns something.
+        gauge_learning_log.record(client)
+
+    rsp = make_response(json.dumps(json_dict))
+    rsp.headers['Content-Type'] = 'application/json'
+    return rsp
+
+
+# G-sensor (accelerometer) exposed by the photonicat-pm kernel driver as three
+# signed axis files in units of 1/16384 g (so 16384 == 1g). movement_trigger is
+# the driver's lift-to-wake flag (0/1). Present on photonicat2; absent on the
+# Home model, where "supported" comes back false and the UI hides the section.
+_GSENSOR_DIR = "/sys/kernel/photonicat-pm"
+_GSENSOR_LSB_PER_G = 16384.0
+
+
+def _read_gsensor_axis(name):
+    """Read one signed integer axis file; None if the driver/file is absent."""
+    try:
+        with open("{}/{}".format(_GSENSOR_DIR, name), "r") as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
+@flask_app.route("/api/v1/gsensor.json", methods=['GET'])
+@api_auth_required
+def gsensor_api():
+    """Live 3-axis accelerometer reading for the orientation view on /dev.
+
+    Returns raw counts, the same values in g, and derived pitch/roll (degrees)
+    so the browser can tilt the device model without re-deriving the geometry.
+    supported=false when the photonicat-pm g-sensor nodes are not present (e.g.
+    the Home model), so the page shows a "no sensor" note instead of zeros."""
+    x = _read_gsensor_axis("gs_x")
+    y = _read_gsensor_axis("gs_y")
+    z = _read_gsensor_axis("gs_z")
+    if x is None or y is None or z is None:
+        return jsonify({"status": "ok", "supported": False})
+
+    gx, gy, gz = x / _GSENSOR_LSB_PER_G, y / _GSENSOR_LSB_PER_G, z / _GSENSOR_LSB_PER_G
+    # Pitch/roll from the gravity vector. atan2 keeps full range and avoids the
+    # divide-by-zero a plain asin/atan would hit when an axis is 0.
+    pitch = math.degrees(math.atan2(-gx, math.sqrt(gy * gy + gz * gz)))
+    roll = math.degrees(math.atan2(gy, gz))
+    magnitude = math.sqrt(gx * gx + gy * gy + gz * gz)
+
+    mv = _read_gsensor_axis("movement_trigger")
+
+    return jsonify({
+        "status": "ok",
+        "supported": True,
+        "raw": {"x": x, "y": y, "z": z},
+        "g": {"x": round(gx, 3), "y": round(gy, 3), "z": round(gz, 3)},
+        "pitch": round(pitch, 1),
+        "roll": round(roll, 1),
+        "magnitude": round(magnitude, 3),
+        "movement": bool(mv) if mv is not None else None,
+        # Persisted device→model orientation offset as a unit quaternion
+        # [w,x,y,z]; the page renders model = calibration · sensor_orientation.
+        # null (identity) until the user calibrates on /dev.
+        "calibration": _get_gsensor_calibration(),
+    })
+
+
+@flask_app.route("/api/v1/bluetooth/status.json", methods=['GET'])
+@api_auth_required
+def bluetooth_status_api():
+    """Bluetooth radio state for the /dev page.
+
+    Always 200 with a diagnosis: an absent adapter is a fact about the device,
+    not a request error, and returning 5xx would make the page show a network
+    failure for a board whose radio is simply not up."""
+    return jsonify({"status": "ok", "bluetooth": bt_util.status()})
+
+
+@flask_app.route("/api/v1/bluetooth/scan.json", methods=['POST'])
+@api_session_strict
+def bluetooth_scan_api():
+    """Scan for nearby Bluetooth devices, first trying to bring the radio up.
+
+    POST (not GET) because it drives the radio and can unblock rfkill; and
+    @api_session_strict rather than @api_auth_required so the mini display's
+    localhost bypass cannot start a scan."""
+    body = request.get_json(silent=True) or {}
+    seconds = body.get("seconds", 10)
+    try:
+        seconds = int(seconds)
+    except (TypeError, ValueError):
+        seconds = 10
+
+    recovery = None
+    if not bt_util.adapters():
+        ok, steps = bt_util.recover()
+        recovery = {"attempted": True, "ok": ok, "steps": steps}
+
+    result = bt_util.scan(seconds)
+    if recovery:
+        result["recovery"] = recovery
+    return jsonify(result)
+
+
+def _get_gsensor_calibration():
+    """Stored calibration quaternion [w,x,y,z], or None if unset/invalid."""
+    q = pcat_config.get_user_config_key("gsensor_calibration", None)
+    if (isinstance(q, list) and len(q) == 4 and
+            all(isinstance(v, (int, float)) for v in q)):
+        return q
+    return None
+
+
+@flask_app.route("/api/v1/gsensor_calibration.json", methods=['GET', 'POST'])
+@api_auth_required
+def gsensor_calibration_api():
+    """Get or save the device→model orientation calibration (unit quaternion
+    [w,x,y,z]). POST body {"quaternion":[w,x,y,z]} persists it; {"reset":true}
+    clears it. Set by the calibration tool on /dev."""
+    if request.method == 'GET':
+        return jsonify({"status": "ok", "calibration": _get_gsensor_calibration()})
+
+    data = request.get_json(silent=True) or {}
+    if data.get("reset"):
+        pcat_config.set_user_config_key("gsensor_calibration", None)
+        return jsonify({"status": "ok", "calibration": None})
+
+    q = data.get("quaternion")
+    if (not isinstance(q, list) or len(q) != 4 or
+            not all(isinstance(v, (int, float)) for v in q)):
+        return jsonify({"status": "failed",
+                        "message": "quaternion must be [w,x,y,z]"}), 400
+    # Normalize to a unit quaternion before storing so the client can send raw
+    # values; a zero-norm quaternion is meaningless, reject it.
+    norm = math.sqrt(sum(v * v for v in q))
+    if norm < 1e-6:
+        return jsonify({"status": "failed", "message": "degenerate quaternion"}), 400
+    q = [round(v / norm, 6) for v in q]
+    pcat_config.set_user_config_key("gsensor_calibration", q)
+    return jsonify({"status": "ok", "calibration": q})
+
+
+@flask_app.route("/api/v1/buzzer_play.json", methods=['POST'])
+@api_auth_required
+def buzzer_play_api():
+    """Play a tone sequence on the MCU buzzer.
+
+    Body: {"tones": [{"hz": 2700, "ms": 300}, ...], "loop": 0}. hz 0 is a rest.
+    The MCU accepts at most 20 steps per command, so the page chunks longer
+    sequences (MIDI playback) and paces the chunks itself; a new sequence
+    interrupts the current one, which also makes {"tones":[{"hz":0,"ms":1}]}
+    the stop command. Requires pcat-manager with pmu-beep-play support.
+    """
+    def error(message):
+        rsp = make_response(json.dumps({"status": "error", "message": message}))
+        rsp.headers['Content-Type'] = 'application/json'
+        return rsp
+
+    client = pc_app.socket_client
+    if not client.stm32_firmware_exist():
+        return error("no MCU on this model")
+
+    p_data = request.get_json(silent=True) or {}
+    tones = p_data.get('tones')
+    loop = bool(p_data.get('loop'))
+
+    if not isinstance(tones, list) or not 1 <= len(tones) <= 20:
+        return error("tones must be a list of 1 to 20 steps")
+
+    tones_clean = []
+    for tone in tones:
+        if not isinstance(tone, dict):
+            return error("each tone must be an object with hz and ms")
+        try:
+            hz = int(tone.get('hz', 0))
+            ms = int(tone.get('ms', 0))
+        except (TypeError, ValueError):
+            return error("hz and ms must be integers")
+        if not 0 <= hz <= 20000:
+            return error("hz must be 0 (rest) to 20000")
+        if not 1 <= ms <= 65535:
+            return error("ms must be 1 to 65535")
+        tones_clean.append({"hz": hz, "ms": ms})
+
+    client.beep_play(tones_clean, loop)
+
+    rsp = make_response(json.dumps({"status": "ok"}))
+    rsp.headers['Content-Type'] = 'application/json'
+    return rsp
+
+
 @flask_app.route("/api/v1/charge_threshold.json", methods=['GET'])
+@api_auth_required
 def charge_threshold_get_api():
     """Get battery charge threshold.
 
@@ -5722,8 +7561,18 @@ def charge_threshold_get_api():
     set before. The daemon reports an unset limit as None or 0 (ChargerLimitVoltage=0
     in /etc/pcat-manager.conf), and any value outside the valid 80-100 range is
     treated as unset too, so the UI always starts at 100%.
+
+    Every read also fires an async refresh chain toward the MCU (web client ->
+    daemon -> CHARGE_THRESHOLD_GET), so the value converges on the MCU's
+    actual limit: the fresh answer lands in the caches for the next poll.
+    The page polls this endpoint periodically, which keeps it synced.
     """
-    value = pc_app.socket_client.charge_threshold
+    client = pc_app.socket_client
+    try:
+        client.charge_threshold_get()
+    except Exception as e:
+        pcat_logger.logger.warning(f"charge_threshold refresh failed: {e}")
+    value = client.charge_threshold
     try:
         value = int(value)
     except (TypeError, ValueError):
@@ -5739,8 +7588,8 @@ def charge_threshold_get_api():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/charge_threshold.json", methods=['POST'])
+@api_auth_required
 def charge_threshold_set_api():
     """Set battery charge threshold"""
     try:
@@ -5761,8 +7610,9 @@ def charge_threshold_set_api():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/timer_debug.json", methods=['POST'])
+@dev_only
+@api_auth_required
 def timer_debug_api():
     """Debug API to force apply timer settings"""
     pcat_logger.logger.info("Timer debug API called by user {}".format(request.remote_addr))
@@ -5794,8 +7644,15 @@ def timer_debug_api():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
+# data_stats.json runs 4 sqlite SUM aggregations per hit (~60ms) and is polled
+# by the mini display every 10s. The underlying data is only written every 30s
+# (network_stats.log_stats), so cache results per network_type just under that.
+_data_stats_cache = {}  # network_type -> {'data': dict, 'timestamp': float}
+_data_stats_cache_lock = threading.Lock()
+DATA_STATS_CACHE_DURATION = 25  # seconds
+
 @flask_app.route("/api/v1/data_stats.json", methods=['GET'])
+@api_auth_required
 def data_stats_api():
     network_type = request.args.get("network_type")
     if network_type != "mobile" and network_type != "wired":
@@ -5808,6 +7665,13 @@ def data_stats_api():
         rsp.headers['Content-Type'] = 'application/json'
         return rsp
 
+    with _data_stats_cache_lock:
+        cached = _data_stats_cache.get(network_type)
+        if cached and time.time() - cached['timestamp'] < DATA_STATS_CACHE_DURATION:
+            rsp = make_response(cached['data'])
+            rsp.headers['Content-Type'] = 'application/json'
+            return rsp
+
     response_json = {}
     response_json["today_used"] = pc_app.main_app.network_stats.today_bytes(network_type) or 0
     response_json["week_used"]  = pc_app.main_app.network_stats.this_week_bytes(network_type) or 0
@@ -5817,18 +7681,26 @@ def data_stats_api():
     first = today.replace(day=1)
     last_month = first - timedelta(days=1)
     response_json["last_month_used"] = pc_app.main_app.network_stats.month_bytes(last_month, network_type) or 0
+
+    with _data_stats_cache_lock:
+        _data_stats_cache[network_type] = {'data': response_json, 'timestamp': time.time()}
+
     rsp = make_response(response_json)
     rsp.headers['Content-Type'] = 'application/json'
-    return rsp  
+    return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/modem/basic.json", methods=['GET'])
+@api_auth_required
 def api_model_basic():
+    # The modem page polls this while open; that's the demand signal that
+    # enables the heavy routine AT queries (serving cell, CA, band prefs).
+    pc_app.modem_client.note_ui_activity()
     response_json = {}
     # Thread-safe access to modem_valid
     with pc_app.modem_client.mutex:
         response_json["modem_valid"] = pc_app.modem_client.modem_valid
     response_json["wwan_powered"] = pc_app.is_wwan_powered()
+    response_json["modem_installed"] = modem_hw_present()
     # Check for custom user-set SIM number first, then fall back to detected number
     custom_sim_number = pcat_config.get_user_config_key("custom_sim_number", None)
     response_json["sim_number"] = format_phone_number(custom_sim_number if custom_sim_number else pc_app.modem_client.basic.get("sim_number", ""))
@@ -5881,7 +7753,12 @@ def api_model_basic():
 
     response_json["modem_usbnet_mode"] = usb_display
     response_json["cell_carrier_info"] = pc_app.modem_client.basic.get("cell_carrier_info", "")
-    response_json["modem_tech_pref"] = pc_app.modem_client.basic.get("modem_tech_pref", "")
+    # Prefer the user's saved RAT intent over the live AT+GTACT? readback: the
+    # FM350 dialer temporarily switches the modem's actual RAT (e.g. drops to
+    # LTE to keep data up when 5G rejects it), so the live register would show
+    # "4G only" even when the user picked AUTO. The intent file is what the user
+    # chose; show that. Falls back to the readback when no intent is saved yet.
+    response_json["modem_tech_pref"] = pc_app.modem_client.get_saved_tech_pref()
     response_json["modem_roam_pref"] = pc_app.modem_client.basic.get("roam_pref", "")
     response_json["policy_lte_bands"] = pc_app.modem_client.basic.get("policy_lte_bands", [])
     response_json["policy_nr5g_bands"] = pc_app.modem_client.basic.get("policy_nr5g_bands", [])
@@ -5892,9 +7769,10 @@ def api_model_basic():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp  
 
-@api_auth_required
 @flask_app.route("/api/v1/modem/basic.json", methods=['POST'])
+@api_auth_required
 def api_modem_refresh():
+    pc_app.modem_client.note_ui_activity()
     if pc_app.modem_client.querying:
         pass
     else:
@@ -5907,8 +7785,8 @@ def api_modem_refresh():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v2/modem_advanced.json", methods=['POST'])
+@api_auth_required
 def api_modem_advanced():
     """
     Receive advanced modem settings (tech, roaming, LTE/NR band lists),
@@ -5922,18 +7800,19 @@ def api_modem_advanced():
     "desired_nr5g_bands": "1:2:3:5:7:8:12:13:14:18:20:25:26:28:29:30:38:40:41:48:66:70:71:75:76:77:78:79"
     }
     """
-    # if the modem client is already busy, skip issuing a new command
-    if not pc_app.modem_client.querying:
-        data = request.get_json() or {}
-
-        # kick off the async config call on your modem client
-        pc_app.modem_client.start_set_modem_config(
-            tech_pref   = data.get("modem_tech_pref"),
-            roam_pref   = data.get("modem_roam_pref"),
-            lte_bands   = data.get("desired_lte_bands"),
-            nr5g_bands  = data.get("desired_nr5g_bands"),
-            usb_speed   = data.get("modem_usb_speed"),
-        )
+    # start_set_modem_config only queues AT commands (mutex-protected) and
+    # writes the FM350 preference file, so it is safe while the modem thread
+    # is mid-query. It used to be skipped whenever that thread was busy
+    # (several seconds out of every 30 while the page polls) while this
+    # route still answered "ok": that is how band saves silently vanished.
+    data = request.get_json() or {}
+    pc_app.modem_client.start_set_modem_config(
+        tech_pref   = data.get("modem_tech_pref"),
+        roam_pref   = data.get("modem_roam_pref"),
+        lte_bands   = data.get("desired_lte_bands"),
+        nr5g_bands  = data.get("desired_nr5g_bands"),
+        usb_speed   = data.get("modem_usb_speed"),
+    )
     try:
         pcat_config.set_cpin(data.get("modem_cpin"))
             
@@ -5946,8 +7825,8 @@ def api_modem_advanced():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/modem/sim_number.json", methods=['POST'])
+@api_auth_required
 def api_modem_update_sim_number():
     """Update the SIM card number displayed in the modem page"""
     try:
@@ -5997,8 +7876,8 @@ def api_modem_update_sim_number():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v2/modem/reset.json", methods=['POST'])
+@api_auth_required
 def api_modem_reset():
     pcat_logger.logger.info("User {} request modem factory reset with SMS clear".format(request.remote_addr))
     try:
@@ -6019,8 +7898,8 @@ def api_modem_reset():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/modem/config.json", methods=['GET'])
+@api_auth_required
 def api_model_config():
     response_json = {}
     response_json["sms_check_interval"] = pcat_config.config.getint('modem', 'sms_check_interval', fallback = 30)
@@ -6030,13 +7909,13 @@ def api_model_config():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp  
 
-@api_auth_required
 @flask_app.route("/api/v1/modem/config.json", methods=['POST'])
+@api_auth_required
 def api_modem_save_config():
     response_json = {}
     p_data = request.get_json()
     print("p_data", p_data)
-    pcat_logger.logger.info("Get config data: {}".format(p_data))
+    pcat_logger.logger.info("Get config data: {}".format(_redact_sensitive(p_data)))
 
     params_valid = True
     if int(p_data.get('sms_check_interval', 30)) < 5:
@@ -6063,9 +7942,9 @@ def api_modem_save_config():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp    
 
-# curl -X POST http://172.16.0.1/api/v1/modem/sms/send.json -H 'Content-Type: application/json' -d '{"send_to":"19151790085","msg":"Test from API"}'  
-@api_auth_required
+# curl -X POST http://172.16.0.1/api/v1/modem/sms/send.json -H 'Content-Type: application/json' -d '{"send_to":"13800138001","msg":"Test from API"}'  
 @flask_app.route("/api/v1/modem/sms/send.json", methods=['POST'])
+@api_auth_required
 def api_model_sms_send():
     p_data = request.get_json()
     send_to_number = p_data.get("send_to", "")
@@ -6083,9 +7962,9 @@ def api_model_sms_send():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-# curl -X POST http://172.16.0.1/api/v1/modem/sms/send.json -H 'Content-Type: application/json' -d '{"send_to":"19151790085","msg":"Test from API"}'  
-@api_auth_required
+# curl -X POST http://172.16.0.1/api/v1/modem/sms/send.json -H 'Content-Type: application/json' -d '{"send_to":"13800138001","msg":"Test from API"}'  
 @flask_app.route("/api/v2/modem/sms/send.json", methods=['POST'])
+@api_auth_required
 def api_model_sms_send_v2():
     p_data = request.get_json()
     send_to_number = p_data.get("send_to", "")
@@ -6104,8 +7983,8 @@ def api_model_sms_send_v2():
     return rsp
 
 #need to fix to new api
-@api_auth_required
 @flask_app.route("/api/v1/modem/sms/read.json", methods=['POST'])
+@api_auth_required
 def api_model_sms_read():
     p_data = request.get_json()
     pc_app.modem_client.read_sms(p_data.get("hash_id", None))
@@ -6117,11 +7996,11 @@ def api_model_sms_read():
     return rsp 
 
 #need to fix to new api
-@api_auth_required
 @flask_app.route("/api/v1/sms/delete.json", methods=['POST'])
+@api_auth_required
 def api_model_sms_delete():
     p_data = request.get_json()
-    pcat_logger.logger.info("User {} request delete message:{}".format(request.remote_addr, str(p_data)))
+    pcat_logger.logger.info("User {} request delete message:{}".format(request.remote_addr, _redact_sensitive(p_data)))
     
     response_json = {}
     try:
@@ -6150,8 +8029,8 @@ def api_model_sms_delete():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp  
 
-@api_auth_required
 @flask_app.route("/api/v2/sms/list.json", methods=['GET'])
+@api_auth_required
 def api_sms_list():
     current_time = time.time()
     force_refresh = request.args.get('force') == 'true'
@@ -6178,7 +8057,9 @@ def api_sms_list():
             # If cache is valid (less than 15 seconds old), use cached data
             if (sms_cache['data'] is not None and
                 current_time - sms_cache['timestamp'] < SMS_CACHE_DURATION):
-                print(f"SMS list served from cache (age: {current_time - sms_cache['timestamp']:.1f}s)")
+                # debug: the modem page polls this every 5s; printing per hit
+                # is constant stdout/log churn
+                pcat_logger.logger.debug("SMS list served from cache (age: %.1fs)", current_time - sms_cache['timestamp'])
                 cached_result = sms_cache['data']
 
             # Cache expired - check if we should fetch or serve old cache
@@ -6187,7 +8068,7 @@ def api_sms_list():
                   (sms_cache['data'] is not None and
                    current_time - sms_cache['last_fetch_time'] < SMS_FETCH_THROTTLE)):
                 if sms_cache['data'] is not None:
-                    print(f"SMS list served from old cache due to throttle (last fetch: {current_time - sms_cache['last_fetch_time']:.1f}s ago)")
+                    pcat_logger.logger.debug("SMS list served from old cache due to throttle (last fetch: %.1fs ago)", current_time - sms_cache['last_fetch_time'])
                     cached_result = sms_cache['data']
 
     if cached_result:
@@ -6196,7 +8077,7 @@ def api_sms_list():
             limited_result = dict(cached_result)  # Create a copy
             if len(limited_result["msg"]) > requested_limit:
                 limited_result["msg"] = limited_result["msg"][:requested_limit]
-                print(f"SMS list limited to {requested_limit} messages from cache")
+                pcat_logger.logger.debug("SMS list limited to %s messages from cache", requested_limit)
             rsp = make_response(limited_result)
         else:
             rsp = make_response(cached_result)
@@ -6263,8 +8144,8 @@ def api_sms_list():
         with sms_cache['lock']:
             sms_cache['fetch_in_progress'] = False
 
-@api_auth_required
 @flask_app.route("/api/v2/sms/clear_all.json", methods=['POST'])
+@api_auth_required
 def api_sms_clear_all():
     pcat_logger.logger.info("User {} request clear all SMS messages".format(request.remote_addr))
     try:
@@ -6285,19 +8166,166 @@ def api_sms_clear_all():
 
 
 # MCU Update Management APIs
-@api_auth_required  
+
+# latest_img.json (dev + prod are the same schema, produced by upload_pcat2_ota.php)
+# has keys: version, url, date, changelog-md, sha256sum, message, upload_timestamp.
+# It has no "sha256" or "build_date" key -- reading those silently yielded "".
+def _mcu_remote_sha256(remote_data):
+    return remote_data.get("sha256sum") or remote_data.get("sha256", "")
+
+
+def _mcu_format_yymmdd(yymmdd):
+    """"260715" -> "2026-07-15". Returns "" if it isn't a 6-digit date."""
+    if len(yymmdd) == 6 and yymmdd.isdigit():
+        return f"20{yymmdd[0:2]}-{yymmdd[2:4]}-{yymmdd[4:6]}"
+    return ""
+
+
+def _mcu_remote_build_date(remote_data):
+    """Build date of the remote firmware, as YYYY-MM-DD.
+
+    Prefer "date" (YYMMDD, matches the date embedded in the version string) over
+    "upload_timestamp", which is UTC and would read ~8h off in CN local time.
+    """
+    formatted = _mcu_format_yymmdd(remote_data.get("date", ""))
+    if formatted:
+        return formatted
+    timestamp = remote_data.get("upload_timestamp", "")
+    if timestamp:
+        return timestamp.split(" ")[0]
+    return remote_data.get("build_date", "")
+
+
+def _mcu_local_build_date(version):
+    """Build date of the running MCU firmware, derived from its version string.
+
+    Format is <prefix>YYMMDD<3-digit seq>, 14 chars -- "RA2E1260715002" for the
+    app, "AA2E1250903000" for the bootloader (which answers the same version
+    command when the app image is invalid and it sits in forced-OTA recovery).
+    """
+    if not version or len(version) != 14:
+        return ""
+    return _mcu_format_yymmdd(version[5:11])
+
+
+def _mcu_version_sort_key(version):
+    """Sortable key for an MCU version string.
+
+    Versions are <prefix>YYMMDD<3-digit seq> (14 chars), so the trailing 9 digits
+    (YYMMDDsss) order chronologically. Returns those digits as an int, else None
+    when the string doesn't match the expected shape (caller falls back).
+    """
+    if not version or len(version) != 14:
+        return None
+    digits = version[5:14]
+    if not digits.isdigit():
+        return None
+    return int(digits)
+
+
+def _mcu_remote_is_newer(local_version, remote_version):
+    """True only when the remote MCU firmware is strictly newer than local.
+
+    Compares the date/sequence embedded in the version string. Falls back to a
+    plain string comparison for versions that don't match the expected format.
+    A remote that is older or equal (e.g. local built after the published stable
+    image) is NOT an update.
+    """
+    if not remote_version:
+        return False
+    local_key = _mcu_version_sort_key(local_version)
+    remote_key = _mcu_version_sort_key(remote_version)
+    if local_key is not None and remote_key is not None:
+        return remote_key > local_key
+    return remote_version > local_version
+
+
+# How many versions older than the latest the /update MCU dropdowns offer
+# for downgrades (mirrors the rootfs firmware dropdowns above): stable
+# server keeps it short, dev server goes further back for bisecting.
+MCU_PROD_MAX_BACK = 3
+MCU_DEV_MAX_BACK = 20
+
+
+def _mcu_fetch_versions(base_url, max_back):
+    """Fetch the versions.json manifest published next to latest_img.json
+    (maintained by upload_pcat2_ota.php / rebuild_versions_json.py on the
+    server) and return up to 1 + max_back entries, newest first, for the
+    /update MCU version dropdowns. Each entry carries its upload "message"
+    (changelog). Returns [] when the manifest is unavailable so callers fall
+    back to the single latest_img.json entry.
+    """
+    try:
+        with urllib.request.urlopen(f"{base_url}/versions.json", timeout=10) as response:
+            manifest = json.loads(response.read().decode('utf-8'))
+    except Exception as e:
+        pcat_logger.logger.info(f"MCU versions manifest unavailable at {base_url}: {e}")
+        return []
+    entries = manifest.get("versions") if isinstance(manifest, dict) else None
+    versions = []
+    seen = set()
+    for entry in entries or []:
+        if not isinstance(entry, dict):
+            continue
+        version = entry.get("version", "")
+        firmware_url = entry.get("url", "")
+        if not version or not firmware_url or version in seen:
+            continue
+        seen.add(version)
+        if not firmware_url.startswith("http"):
+            firmware_url = f"{base_url}/{firmware_url}"
+        versions.append({
+            "version": version,
+            "firmware_url": firmware_url,
+            "sha256": _mcu_remote_sha256(entry),
+            "build_date": _mcu_remote_build_date(entry),
+            "message": entry.get("message", "") or "",
+        })
+    versions.sort(key=lambda v: _mcu_version_sort_key(v["version"]) or 0, reverse=True)
+    return versions[:max_back + 1]
+
+
+def _mcu_versions_with_latest(versions, latest_entry, max_back):
+    """Put the official latest (from latest_img.json) at entry 0, drop
+    anything newer than it (not released yet), and cap the list length."""
+    latest_key = _mcu_version_sort_key(latest_entry["version"])
+    if latest_key is not None:
+        versions = [v for v in versions
+                    if (_mcu_version_sort_key(v["version"]) or 0) <= latest_key]
+    versions = [v for v in versions if v["version"] != latest_entry["version"]]
+    versions.insert(0, latest_entry)
+    return versions[:max_back + 1]
+
+
+def _mcu_unsupported_response(http_status=200):
+    """The MCU firmware images (photonicat2_mcu_firmware / pcat2_mcu) are
+    for the Photonicat 2 controller only; a Photonicat 1 must never be
+    offered one. The check endpoints answer 'unsupported' (not 'ok'), which
+    the page treats as 'nothing to show'; the start endpoint refuses."""
+    rsp = make_response({
+        "status": "unsupported",
+        "reachable": False,
+        "message": "MCU firmware update is only supported on Photonicat 2",
+    }, http_status)
+    rsp.headers['Content-Type'] = 'application/json'
+    return rsp
+
+
 @flask_app.route("/api/v1/mcu_dev_check.json", methods=['GET'])
+@api_auth_required
 def mcu_dev_check():
     """
     Check development server for MCU firmware updates.
     Returns dev server status and MCU firmware information.
     """
+    if not is_photonicat2:
+        return _mcu_unsupported_response()
     try:
         # Get current local MCU version
         local_version = pc_app.socket_client.stm32_firmware_version or "Unknown"
         
         # Dev server URL - should contain JSON with latest firmware info
-        dev_url = "http://192.168.8.28:81/photonicat2_mcu_firmware/latest_img.json"
+        dev_url = f"{pcat_config.dev_server_base}/photonicat2_mcu_firmware/latest_img.json"
         
         with urllib.request.urlopen(dev_url, timeout=20) as response:
             remote_data = json.loads(response.read().decode('utf-8'))
@@ -6306,45 +8334,48 @@ def mcu_dev_check():
         # Expected format: {"version": "1.2.3", "url": "relative/or/absolute/path.bin", "sha256": "hash", "build_date": "2025-01-01"}
         remote_version = remote_data.get("version", "")
         firmware_url = remote_data.get("url", "")
-        sha256_hash = remote_data.get("sha256", "")
-        build_date = remote_data.get("build_date", "")
-        
+        sha256_hash = _mcu_remote_sha256(remote_data)
+        build_date = _mcu_remote_build_date(remote_data)
+
         # Make URL absolute if it's relative
         if firmware_url and not firmware_url.startswith("http"):
-            firmware_url = f"http://192.168.8.28:81/photonicat2_mcu_firmware/{firmware_url}"
-            
-        # Simple version comparison (assuming semantic versioning or string comparison)
-        update_available = local_version != remote_version and remote_version != ""
-        newer_available = False
-        
-        # Try to do numeric comparison if versions are numeric
-        try:
-            local_parts = [int(x) for x in local_version.replace('v', '').split('.')]
-            remote_parts = [int(x) for x in remote_version.replace('v', '').split('.')]
-            
-            # Pad to same length
-            max_len = max(len(local_parts), len(remote_parts))
-            local_parts.extend([0] * (max_len - len(local_parts)))
-            remote_parts.extend([0] * (max_len - len(remote_parts)))
-            
-            newer_available = remote_parts > local_parts
-            update_available = newer_available
-        except (ValueError, AttributeError):
-            # Fall back to string comparison
-            newer_available = remote_version > local_version if remote_version else False
-            update_available = local_version != remote_version and remote_version != ""
+            firmware_url = f"{pcat_config.dev_server_base}/photonicat2_mcu_firmware/{firmware_url}"
+
+        # An update is only offered when the remote firmware is strictly newer.
+        # When local is newer than remote (e.g. a locally-built image ahead of
+        # the published one) this is False, so the UI shows "up to date" instead
+        # of a spurious "update available".
+        newer_available = _mcu_remote_is_newer(local_version, remote_version)
+        update_available = newer_available
+
+        # Version dropdown: latest + older builds testers can downgrade to,
+        # each with its upload changelog message.
+        versions = _mcu_versions_with_latest(
+            _mcu_fetch_versions(f"{pcat_config.dev_server_base}/photonicat2_mcu_firmware",
+                                MCU_DEV_MAX_BACK),
+            {
+                "version": remote_version,
+                "firmware_url": firmware_url,
+                "sha256": sha256_hash,
+                "build_date": build_date,
+                "message": remote_data.get("message", "") or "",
+            },
+            MCU_DEV_MAX_BACK)
 
         response_data = {
             "status": "ok",
             "reachable": True,
+            "versions": versions,
             "local_version": local_version,
+            "local_build_date": _mcu_local_build_date(local_version),
             "dev_version": remote_version,
             "dev_firmware_url": firmware_url,
             "dev_sha256": sha256_hash,
             "dev_build_date": build_date,
             "update_available": update_available,
             "newer_available": newer_available,
-            "same_version": local_version == remote_version
+            "same_version": local_version == remote_version,
+            "local_is_newer": bool(remote_version) and local_version != remote_version and not newer_available
         }
         
     except urllib.error.URLError as e:
@@ -6380,19 +8411,22 @@ def mcu_dev_check():
     return rsp
 
 
-@api_auth_required
 @flask_app.route("/api/v1/mcu_prod_check.json", methods=['GET'])
+@api_auth_required
 def mcu_prod_check():
     """
     Check production server for MCU firmware updates.
     Returns production server status and MCU firmware information.
     """
+    if not is_photonicat2:
+        return _mcu_unsupported_response()
     try:
         # Get current local MCU version
         local_version = pc_app.socket_client.stm32_firmware_version or "Unknown"
         
         # Production server URL
-        prod_url = "https://dl.photonicat.com/firmware/pcat2_mcu/latest_img.json"
+        prod_base = "https://dl.photonicat.com/firmware/pcat2_mcu"
+        prod_url = f"{prod_base}/latest_img.json"
         pcat_logger.logger.info(f"Checking MCU production updates from: {prod_url}")
         
         try:
@@ -6406,45 +8440,47 @@ def mcu_prod_check():
         # Extract information from remote JSON  
         remote_version = remote_data.get("version", "")
         firmware_url = remote_data.get("url", "")
-        sha256_hash = remote_data.get("sha256", "")
-        build_date = remote_data.get("build_date", "")
-        
+        sha256_hash = _mcu_remote_sha256(remote_data)
+        build_date = _mcu_remote_build_date(remote_data)
+
         # Make URL absolute if it's relative
         if firmware_url and not firmware_url.startswith("http"):
-            firmware_url = f"https://dl.photonicat.com/firmware/pcat2_mcu/{firmware_url}"
-            
-        # Simple version comparison
-        update_available = local_version != remote_version and remote_version != ""
-        newer_available = False
-        
-        # Try to do numeric comparison if versions are numeric
-        try:
-            local_parts = [int(x) for x in local_version.replace('v', '').split('.')]
-            remote_parts = [int(x) for x in remote_version.replace('v', '').split('.')]
-            
-            # Pad to same length  
-            max_len = max(len(local_parts), len(remote_parts))
-            local_parts.extend([0] * (max_len - len(local_parts)))
-            remote_parts.extend([0] * (max_len - len(remote_parts)))
-            
-            newer_available = remote_parts > local_parts
-            update_available = newer_available
-        except (ValueError, AttributeError):
-            # Fall back to string comparison
-            newer_available = remote_version > local_version if remote_version else False
-            update_available = local_version != remote_version and remote_version != ""
+            firmware_url = f"{prod_base}/{firmware_url}"
+
+        # An update is only offered when the remote firmware is strictly newer.
+        # When local is newer than remote (e.g. a locally-built image ahead of
+        # the published stable one) this is False, so the UI shows "up to date"
+        # instead of a spurious "update available".
+        newer_available = _mcu_remote_is_newer(local_version, remote_version)
+        update_available = newer_available
+
+        # Version dropdown: latest + a few previous stable releases for
+        # downgrades.
+        versions = _mcu_versions_with_latest(
+            _mcu_fetch_versions(prod_base, MCU_PROD_MAX_BACK),
+            {
+                "version": remote_version,
+                "firmware_url": firmware_url,
+                "sha256": sha256_hash,
+                "build_date": build_date,
+                "message": remote_data.get("message", "") or "",
+            },
+            MCU_PROD_MAX_BACK)
 
         response_data = {
             "status": "ok",
             "reachable": True,
+            "versions": versions,
             "local_version": local_version,
+            "local_build_date": _mcu_local_build_date(local_version),
             "prod_version": remote_version,
             "prod_firmware_url": firmware_url,
             "prod_sha256": sha256_hash,
             "prod_build_date": build_date,
             "update_available": update_available,
             "newer_available": newer_available,
-            "same_version": local_version == remote_version
+            "same_version": local_version == remote_version,
+            "local_is_newer": bool(remote_version) and local_version != remote_version and not newer_available
         }
         
     except urllib.error.URLError as e:
@@ -6492,8 +8528,8 @@ mcu_update_status = {
     "debug_logs": []  # Store debug log messages
 }
 
-@api_auth_required
 @flask_app.route("/api/v1/mcu_update_status.json", methods=['GET'])
+@api_auth_required
 def mcu_update_status_api():
     """Get current MCU update status"""
     response_data = dict(mcu_update_status)
@@ -6504,12 +8540,15 @@ def mcu_update_status_api():
     return rsp
 
 
-@api_auth_required
 @flask_app.route("/api/v1/mcu_update.json", methods=['POST'])
+@api_auth_required
 def mcu_update_start():
     """Start MCU firmware update process"""
     global mcu_update_status
-    
+
+    if not is_photonicat2:
+        return _mcu_unsupported_response(400)
+
     try:
         data = request.get_json()
         if not data:
@@ -6519,6 +8558,13 @@ def mcu_update_start():
         if not firmware_url:
             return jsonify({"status": "error", "message": "Firmware URL required"}), 400
             
+        # A system firmware upgrade and an MCU update must never run at the
+        # same time — both touch the device and would collide. Refuse the MCU
+        # update if a firmware upgrade is being prepared or is already running.
+        if firmware_upgrade_status.get("active") or firmware_upgrade_thread is not None:
+            return jsonify({"status": "error",
+                            "message": "A firmware upgrade is in progress"}), 409
+
         # Check if update is already in progress
         if mcu_update_status["active"]:
             return jsonify({"status": "error", "message": "MCU update already in progress"}), 409
@@ -6623,8 +8669,14 @@ def mcu_update_start():
                 # Determine if we need force flag (for dev server same version reinstalls)
                 use_force_flag = False
                 if firmware_url:
-                    # Check if this is a dev server URL (local network)
-                    is_dev_server = "192.168.8.28" in firmware_url or "localhost" in firmware_url or "127.0.0.1" in firmware_url
+                    # Check if this is a dev server URL (local network). Derive the
+                    # dev host from the configured dev_server_base so this tracks
+                    # --dev-server-base instead of a hardcoded IP.
+                    from urllib.parse import urlparse as _urlparse
+                    _dev_host = _urlparse(pcat_config.dev_server_base).hostname or ""
+                    is_dev_server = ((_dev_host and _dev_host in firmware_url)
+                                     or "localhost" in firmware_url
+                                     or "127.0.0.1" in firmware_url)
                     
                     # For dev server, always use force flag to allow same version reinstalls
                     if is_dev_server:
@@ -6726,252 +8778,7 @@ def screen_action():
         return redirect(f"/login?next={request.path}")
 
     c_locale = current_locale()
-    if c_locale == "CN":
-        locales = {
-            "screen_edit_title": "编辑屏幕",
-            "tab_screen_settings": "屏幕 - 设置",
-            "tab_screen_editor": "屏幕 - 编辑",
-            "save_settings": "保存设置",
-            "load_default": "加载默认",
-            "save_json": "保存JSON",
-            "show_sms_feature": "显示短信功能",
-            "screen_settings_title": "屏幕设置",
-            "screen_off_from": "充电时：屏幕关闭时间：从",
-            "screen_off_to": "充电时：屏幕关闭时间：到",
-            "on_battery_auto_dim_time": "电池模式下自动熄屏时间(秒)",
-            "on_charger_auto_dim_time": "充电模式下自动熄屏时间(秒)",
-            "screen_live_title": "屏幕实时图片",
-            "user_config_json_title": "用户配置JSON",
-            "screen_json_help_text": "屏幕配置JSON文件，用于配置屏幕的显示内容和样式。此处用户JSON配置，会被融合到默认配置中。",
-            "restart_screen": "重启屏幕",
-            "short_click": "短按",
-            "screen_max_brightness": "最大亮度",
-            "screen_min_brightness": "最小亮度",
-            "ping_site0": "Ping 的网站 1",
-            "ping_site1": "Ping 的网站 2",
-            "sms_limit_for_screen": "屏幕显示的短信数量限制",
-            "config_saved": "配置已保存",
-            "reference_config": "参考配置",
-            "reference_config_description": "查看完整的示例配置，包含所有可用选项和数据键。",
-            "programming_guide": "编程指南",
-            "programming_guide_description": "完整的编程指南，包含示例和数据键参考。",
-            "tab_screen_visual": "屏幕 - 可视化编辑",
-            "visual_canvas_title": "页面布局 (172×320)",
-            "visual_page": "页",
-            "visual_page_add": "添加页",
-            "visual_page_remove": "删除此页",
-            "visual_drag_hint": "拖动元素移动，拖动右下角手柄调整大小",
-            "visual_zones_hint": "顶栏与底栏由系统绘制（仅供预览），只能编辑中间区域",
-            "data_sources_title": "数据源",
-            "data_sources_refresh_all": "刷新状态",
-            "data_sources_help": "数据源会获取一个值（来自网址、命令或 UCI），并将其保存在你设定的 data_key 名称下。要显示它，请在画布上添加一个文本元素，并把它的 data_key 设为相同的名称——这样两者就关联起来了。",
-            "data_sources_how_title": "数据源如何显示到屏幕上",
-            "data_sources_flow": "数据源 → data_key（例如 BtcUsd）→ data_key = BtcUsd 的文本元素",
-            "data_sources_casenote": "两处的 data_key 名称必须完全一致（区分大小写）。新增或修改的数据源需“保存并重启”后才生效。",
-            "ds_data_key_tip": "该值保存时使用的名称。把画布上的文本元素的 data_key 设为相同名称即可显示它。",
-            "dk_help_tip": "此处要显示的值的名称。可选择你在下方定义的自定义数据源，或内置的设备指标。留空则只显示静态文字。",
-            "dk_placeholder": "例如 BtcUsd",
-            "dk_now": "当前：",
-            "dk_status_custom": "已关联到你的数据源。",
-            "dk_status_builtin": "内置设备指标。",
-            "dk_status_unknown": "暂无数据源使用此键。请在下方添加一个 data_key 完全相同的数据源，然后“保存并重启”。（区分大小写。）",
-            "dk_status_empty": "留空＝无实时值（仅按标签显示静态文字）。输入或选择一个键以显示实时值。",
-            "ds_type_http_poll": "HTTP/HTTPS",
-            "ds_type_command": "命令",
-            "ds_type_uci": "UCI 值",
-            "ds_type_env": "环境变量",
-            "ds_type_json_file": "JSON 文件",
-            "ds_name": "源名称",
-            "ds_command": "命令",
-            "ds_uci_path": "UCI 路径",
-            "ds_parser": "解析器",
-            "ds_interval": "间隔（秒）",
-            "ds_refresh_now": "立即刷新",
-            "ds_shell_warning": "将以显示进程的权限在设备上执行 Shell 命令，请仅使用可信命令。",
-            "ds_empty": "暂无自定义数据源。",
-            "ds_save_hint": "新增或修改的数据源需点击上方“保存并重启”后才生效（会保存数据源并重启屏幕）。“立即刷新”仅能测试已保存的数据源。",
-            "ds_save_restart": "保存并重启",
-            "ds_saving_restarting": "保存中…",
-            "ds_save_restart_tip": "保存这些数据源并重启屏幕使其生效。",
-            "ds_examples_label": "示例（点击即可添加一个现成的数据源）：",
-            "ds_examples_internet_note": "HTTP/HTTPS 数据源需要设备能访问互联网。若设备离线，显示的值将为 ERROR 或 TIMEOUT。",
-            "ds_local_examples_label": "设备本地示例（无需联网）：",
-            "ds_local_examples_note": "command / uci 会以显示进程的权限从设备读取数据；env 读取一个进程环境变量；json_file 从设备上的文件中读取一个值。",
-            "ds_expand": "展开",
-            "ds_collapse": "收起",
-            "ds_expand_all": "全部展开",
-            "ds_collapse_all": "全部收起",
-            "ds_dup_key": "键重复",
-            "ds_dup_key_tip": "另一个已启用的数据源使用了相同的 data_key，它们会在屏幕上互相覆盖。",
-            "ds_dup_banner": "以下 data_key 被多个已启用的数据源使用，会在屏幕上互相覆盖：",
-            "ds_fetching": "获取中…",
-            "ds_value_error_tip": "获取失败。请检查网址、解析器，并确认设备能访问互联网。",
-            "visual_add_element": "添加元素",
-            "visual_reload": "重新加载",
-            "visual_save": "保存布局",
-            "visual_props_title": "元素属性",
-            "visual_no_selection": "请在画布上选择一个元素进行编辑。",
-            "visual_prop_type": "类型",
-            "visual_prop_label": "标签",
-            "visual_prop_text": "文本",
-            "visual_prop_units": "单位",
-            "visual_prop_font": "字体",
-            "visual_prop_color": "颜色",
-            "visual_prop_position": "位置 (x, y)",
-            "visual_prop_size": "大小 (宽, 高)",
-            "graph_type": "图表类型",
-            "graph_time_frame": "时间范围 (分钟)",
-            "visual_reset_pos": "重置位置",
-            "visual_reset_pos_tip": "重置为加载此布局时该元素所在的位置",
-            "visual_reset_pos_default": "默认位置",
-            "visual_reset_pos_default_tip": "重置为该元素在默认配置中的位置",
-            "visual_center_h": "居中",
-            "visual_center_h_tip": "水平居中",
-            "visual_snap": "对齐",
-            "visual_snap_tip": "将位置对齐到最近的 4 像素网格",
-            "visual_pos_moved": "已从原始位置移动",
-            "visual_size_changed": "已从原始大小调整",
-            "visual_prop_enable": "启用",
-            "visual_delete_element": "删除元素",
-            "visual_reset_default": "重置为默认",
-            "visual_revert_saved": "撤销更改",
-            "visual_reset_confirm": "确定要将所有页面的布局重置为默认配置吗？",
-            "visual_revert_confirm": "确定要放弃所有未保存的更改吗？",
-            "editor_diff_title": "更改对比 (相对已保存)",
-            "editor_no_changes": "无更改",
-            "editor_show_diff": "显示更改",
-            "editor_hide_diff": "隐藏更改",
-            "editor_mode_diff": "差异",
-            "editor_mode_full": "完整",
-            "visual_show_label": "显示标签",
-            "visual_show_key": "显示数据键",
-            "visual_undo": "撤销",
-            "visual_redo": "重做",
-            "visual_shortcuts_hint": "快捷键：方向键微调 · Shift+方向键 ×10 · Ctrl+Z 撤销 · Ctrl+Shift+Z 重做 · Ctrl+D 复制 · Del 删除 · Ctrl+S 保存"
-            }
-    else:
-        locales = {
-            "screen_edit_title": "Edit Screen",
-            "tab_screen_settings": "Screen - Settings",
-            "tab_screen_editor": "Screen - Editor",
-            "save_settings": "Save Settings",
-            "load_default": "Load Default",
-            "save_json": "Save JSON",
-            "show_sms_feature": "Show SMS Feature",
-            "screen_settings_title": "Screen Settings",
-            "screen_off_from": "On Charger: Screen Off: From",
-            "screen_off_to": "On Charger: Screen Off: To",
-            "on_battery_auto_dim_time": "On Battery： Auto Dim Time(seconds)",
-            "on_charger_auto_dim_time": "On Charger： Auto Dim Time(seconds)",
-            "screen_live_title": "Screen Live Image",
-            "user_config_json_title": "User Config JSON",
-            "screen_json_help_text": "Screen configuration JSON file, used to configure the display content and style of the screen. User JSON config will be merged into the default config.",
-            "restart_screen": "Restart Screen",
-            "short_click": "Short Click",
-            "screen_max_brightness": "Max Brightness",
-            "screen_min_brightness": "Min Brightness",
-            "ping_site0": "Ping Site 1",
-            "ping_site1": "Ping Site 2",
-            "sms_limit_for_screen": "SMS Limit for Screen Display",
-            "config_saved": "Config Saved",
-            "reference_config": "Reference Config",
-            "reference_config_description": "View the complete example configuration with all available options and data keys.",
-            "programming_guide": "Programming Guide",
-            "programming_guide_description": "Complete programming guide with examples and data key reference.",
-            "tab_screen_visual": "Screen - Visual Editor",
-            "visual_canvas_title": "Page Layout (172×320)",
-            "visual_page": "Page",
-            "visual_page_add": "Add page",
-            "visual_page_remove": "Remove this page",
-            "visual_drag_hint": "Drag elements to move, drag the corner handle to resize",
-            "visual_zones_hint": "Top & bottom bars are drawn by the system (preview only); you can only edit the middle area",
-            "data_sources_title": "Data Sources",
-            "data_sources_refresh_all": "Refresh status",
-            "data_sources_help": "A source fetches a value (from a URL, command, or UCI) and stores it under a data_key you choose. To show it, add a text element on the canvas and set its data_key to the SAME name — that links them.",
-            "data_sources_how_title": "How a data source reaches the screen",
-            "data_sources_flow": "source → data_key (e.g. BtcUsd) → text element with data_key = BtcUsd",
-            "data_sources_casenote": "The two data_key names must match exactly (case-sensitive). New/edited sources need Save and Restart to take effect.",
-            "ds_data_key_tip": "The name this value is stored under. Set a text element on the canvas to this same data_key to display it.",
-            "dk_help_tip": "The name of the value to display here. Pick a custom source you defined below, or a built-in device metric. Leave empty to show static text only.",
-            "dk_placeholder": "e.g. BtcUsd",
-            "dk_now": "now:",
-            "dk_status_custom": "Linked to your data source.",
-            "dk_status_builtin": "Built-in device metric.",
-            "dk_status_unknown": "No data source has this key yet. Add a source below with this exact data_key, then Save and Restart. (Names are case-sensitive.)",
-            "dk_status_empty": "Empty = no live value (shows the Label as static text). Type or pick a key to show a live value.",
-            "ds_type_http_poll": "HTTP/HTTPS",
-            "ds_type_command": "Command",
-            "ds_type_uci": "UCI value",
-            "ds_type_env": "Env var",
-            "ds_type_json_file": "JSON file",
-            "ds_name": "source name",
-            "ds_command": "Command",
-            "ds_uci_path": "UCI path",
-            "ds_parser": "Parser",
-            "ds_interval": "Interval (s)",
-            "ds_refresh_now": "Refresh now",
-            "ds_shell_warning": "Runs a shell command on the device with the display process's privileges. Only use trusted commands.",
-            "ds_empty": "No custom data sources yet.",
-            "ds_save_hint": "New or edited sources take effect only after you click “Save and Restart” above (this saves them and restarts the screen). “Refresh now” only tests a source that is already saved.",
-            "ds_save_restart": "Save and Restart",
-            "ds_saving_restarting": "Saving…",
-            "ds_save_restart_tip": "Save these sources and restart the screen so they take effect.",
-            "ds_examples_label": "Examples (click to add a ready-made one):",
-            "ds_examples_internet_note": "HTTP/HTTPS sources need the device to have internet access. If it is offline, the value shows ERROR or TIMEOUT.",
-            "ds_local_examples_label": "On-device examples (no internet needed):",
-            "ds_local_examples_note": "command / uci read from the device with the display's privileges. env reads a process variable; json_file reads a value from a file on the device.",
-            "ds_expand": "Expand",
-            "ds_collapse": "Collapse",
-            "ds_expand_all": "Expand all",
-            "ds_collapse_all": "Collapse all",
-            "ds_dup_key": "duplicate key",
-            "ds_dup_key_tip": "Another enabled source uses the same data_key; they will overwrite each other on screen.",
-            "ds_dup_banner": "These data_keys are used by more than one enabled source and will overwrite each other on screen:",
-            "ds_fetching": "fetching…",
-            "ds_value_error_tip": "The fetch failed. Check the URL, the parser, and that the device has internet access.",
-            "visual_add_element": "Add Element",
-            "visual_reload": "Reload",
-            "visual_save": "Save Layout",
-            "visual_props_title": "Element Properties",
-            "visual_no_selection": "Select an element on the canvas to edit it.",
-            "visual_prop_type": "Type",
-            "visual_prop_label": "Label",
-            "visual_prop_text": "Text",
-            "visual_prop_units": "Units",
-            "visual_prop_font": "Font",
-            "visual_prop_color": "Color",
-            "visual_prop_position": "Position (x, y)",
-            "visual_prop_size": "Size (w, h)",
-            "graph_type": "Graph type",
-            "graph_time_frame": "Time frame (min)",
-            "visual_reset_pos": "Reset position",
-            "visual_reset_pos_tip": "Reset to the position it had when this layout was loaded",
-            "visual_reset_pos_default": "Default position",
-            "visual_reset_pos_default_tip": "Reset to this element’s position in the default configuration",
-            "visual_center_h": "Center",
-            "visual_center_h_tip": "Center horizontally",
-            "visual_snap": "Snap",
-            "visual_snap_tip": "Snap position to the nearest 4px grid",
-            "visual_pos_moved": "Moved from its original position",
-            "visual_size_changed": "Resized from its original size",
-            "visual_prop_enable": "Enable",
-            "visual_delete_element": "Delete Element",
-            "visual_reset_default": "Reset to Default",
-            "visual_revert_saved": "Discard Changes",
-            "visual_reset_confirm": "Reset the layout of ALL pages back to the default configuration?",
-            "visual_revert_confirm": "Discard all unsaved layout changes?",
-            "editor_diff_title": "Changes (vs saved)",
-            "editor_no_changes": "No changes",
-            "editor_show_diff": "Show changes",
-            "editor_hide_diff": "Hide changes",
-            "editor_mode_diff": "Diff",
-            "editor_mode_full": "Full",
-            "visual_show_label": "Show Label",
-            "visual_show_key": "Show data_key",
-            "visual_undo": "Undo",
-            "visual_redo": "Redo",
-            "visual_shortcuts_hint": "Shortcuts: arrows nudge · Shift+arrows ×10 · Ctrl+Z undo · Ctrl+Shift+Z redo · Ctrl+D duplicate · Del delete · Ctrl+S save"
-             }
+    locales = _locales.get_locales("screen", c_locale)
     locales.update(base_locales())
 
     return render_template(nt.screen_file_name, locales = locales)
@@ -6983,28 +8790,21 @@ def sms_action():
         return redirect(f"/login?next={request.path}")
 
     c_locale = current_locale()
-    if c_locale == "CN":
-        locales = {
-            "sms_title": "短信"
-            }
-    else:
-        locales = {
-            "sms_title": "SMS"
-             }
+    locales = _locales.get_locales("sms", c_locale)
     locales.update(base_locales())
 
     return render_template(nt.sms_file_name, locales = locales)
 
-@api_auth_required
 @flask_app.route("/api/v1/screen/user_config.json", methods=['GET'])
+@api_auth_required
 def api_screen_user_config():
     screen_config = pc_app.screen_client.get_user_config()
     rsp = make_response(screen_config)
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/screen/user_config.json", methods=['POST'])
+@api_auth_required
 def api_screen_user_config_post():
     p_data = request.get_json()
     pc_app.screen_client.save_user_config(p_data)
@@ -7014,16 +8814,16 @@ def api_screen_user_config_post():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/screen/default_config.json", methods=['GET'])
+@api_auth_required
 def api_screen_default_config():
     screen_config = pc_app.screen_client.get_default_config()
     rsp = make_response(screen_config)
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/screen/custom_metrics/status", methods=['GET'])
+@api_auth_required
 def api_screen_custom_metrics_status():
     status = pc_app.screen_client.get_custom_metrics_status()
     if status is None:
@@ -7032,8 +8832,8 @@ def api_screen_custom_metrics_status():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/screen/custom_metrics/<source_name>/execute", methods=['POST'])
+@api_auth_required
 def api_screen_custom_metrics_execute(source_name):
     result = pc_app.screen_client.execute_custom_metrics_source(source_name)
     if result is None:
@@ -7042,8 +8842,8 @@ def api_screen_custom_metrics_execute(source_name):
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/screen/data.json", methods=['GET'])
+@api_auth_required
 def api_screen_data():
     """Live globalData values (data_key -> current value) from the display."""
     data = pc_app.screen_client.get_data()
@@ -7053,17 +8853,26 @@ def api_screen_data():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/screen/frame.png", methods=['GET'])
+@api_auth_required
 def api_screen_frame():
     screen_frame = pc_app.screen_client.get_frame()
+    # make_response(None) raises, so a display service that is down used to
+    # turn into a 500 with an empty body. Say 503 instead: the preview treats
+    # any failed load as "no frame yet" and keeps its spinner up.
+    if not screen_frame:
+        return jsonify({"status": "error", "message": "Screen frame unavailable"}), 503
     rsp = make_response(screen_frame)
     rsp.headers['Content-Type'] = 'image/png'
+    # Every poll uses a fresh ?ts=, so this never serves a stale frame — it
+    # only lets the four consumers of one frameSrc (two <img>, two CSS slices)
+    # share a single fetch instead of hitting the device four times.
+    rsp.headers['Cache-Control'] = 'private, max-age=10'
     return rsp
 
 
-@api_auth_required
 @flask_app.route("/api/v1/modem/hook_script.json", methods=['GET'])
+@api_auth_required
 def api_modem_hook_script():
     script = pcat_config.load_sms_hook_script()
     response_json = {}
@@ -7074,8 +8883,8 @@ def api_modem_hook_script():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/modem/hook_script.json", methods=['POST'])
+@api_auth_required
 def api_modem_hook_script_post():
     p_data = request.get_json()
     script = p_data.get("script", "")
@@ -7089,8 +8898,9 @@ def api_modem_hook_script_post():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/modem/hook_history_insert_test.json", methods=['POST'])
+@dev_only
+@api_auth_required
 def api_modem_hook_history_insert_test():
     """Insert a test hook history record to verify database insertion works"""
     try:
@@ -7133,8 +8943,9 @@ def api_modem_hook_history_insert_test():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/modem/hook_history_create_table.json", methods=['POST'])
+@dev_only
+@api_auth_required
 def api_modem_hook_history_create_table():
     """Manually create the hook history table"""
     try:
@@ -7189,8 +9000,9 @@ CREATE INDEX IF NOT EXISTS idx_sms_hook_history_success ON sms_hook_history(succ
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/modem/hook_history_test.json", methods=['GET'])
+@dev_only
+@api_auth_required
 def api_modem_hook_history_test():
     """Test endpoint to check hook history table existence and basic data"""
     try:
@@ -7245,8 +9057,8 @@ def api_modem_hook_history_test():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/modem/hook_history.json", methods=['GET'])
+@api_auth_required
 def api_modem_hook_history():
     """Get hook execution history with pagination and filtering"""
     try:
@@ -7389,8 +9201,8 @@ def api_modem_hook_history():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/modem/hook_history/<int:history_id>.json", methods=['GET'])
+@api_auth_required
 def api_modem_hook_history_detail(history_id):
     """Get detailed information for a specific hook execution"""
     try:
@@ -7444,8 +9256,8 @@ def api_modem_hook_history_detail(history_id):
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required  
 @flask_app.route("/api/v1/modem/hook_history.json", methods=['DELETE'])
+@api_auth_required  
 def api_modem_hook_history_cleanup():
     """Cleanup old hook history records"""
     try:
@@ -7480,18 +9292,23 @@ def api_modem_hook_history_cleanup():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/cpu_scheduling.json", methods=['GET'])
+@api_auth_required
 def api_cpu_scheduling():
     response_json = {}
     response_json["status"] = "ok"
-    response_json["cpu_scheduling_enabled"] = pcat_config.get_cpu_scheduling_enabled()
+    # The toggle reflects the saved preference, not the live core state: with
+    # the preference on and DC connected the big cores are deliberately back
+    # online, and reporting hardware here would flip the switch off by itself.
+    # cpu_scheduling_active is the live state, for the "currently on/off" hint.
+    response_json["cpu_scheduling_enabled"] = pcat_config.get_saved_cpu_scheduling_enabled()
+    response_json["cpu_scheduling_active"] = pcat_config.get_cpu_scheduling_enabled()
     rsp = make_response(response_json)
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/cpu_scheduling.json", methods=['POST'])
+@api_auth_required
 def api_cpu_scheduling_post():
     p_data = request.get_json()
     cpu_scheduling_enabled = p_data.get("cpu_scheduling_enabled", False)
@@ -7502,8 +9319,8 @@ def api_cpu_scheduling_post():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/fan_speed.json", methods=['GET'])
+@api_auth_required
 def api_fan_speed():
     response_json = {}
     response_json["status"] = "ok"
@@ -7512,8 +9329,8 @@ def api_fan_speed():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/fan_speed_actual.json", methods=['GET'])
+@api_auth_required
 def api_fan_speed_actual():
     response_json = {}
     response_json["status"] = "ok"
@@ -7522,8 +9339,8 @@ def api_fan_speed_actual():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/sms_limit_for_screen.json", methods=['GET'])
+@api_auth_required
 def api_sms_limit_for_screen():
     response_json = {}
     response_json["status"] = "ok"
@@ -7532,8 +9349,8 @@ def api_sms_limit_for_screen():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/sms_limit_for_screen.json", methods=['POST'])
+@api_auth_required
 def api_sms_limit_for_screen_post():
     p_data = request.get_json()
     limit = p_data.get("sms_limit_for_screen", 10)
@@ -7544,22 +9361,65 @@ def api_sms_limit_for_screen_post():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
+def _sanitize_ip_sources(raw):
+    """Coerce request data into a clean list of {url, parser}, dropping blanks."""
+    sources = []
+    if not isinstance(raw, list):
+        return sources
+    for item in raw:
+        if isinstance(item, dict):
+            url = str(item.get("url", "")).strip()
+            parser = str(item.get("parser", "stdout")).strip() or "stdout"
+        else:
+            url = str(item).strip()
+            parser = "stdout"
+        if url:
+            sources.append({"url": url, "parser": parser})
+    return sources
+
+@flask_app.route("/api/v1/public_ip_lookup.json", methods=['GET'])
 @api_auth_required
+def api_public_ip_lookup_get():
+    cfg = pcat_config.get_user_config_key("public_ip_lookup", {}) or {}
+    rsp = make_response(cfg if isinstance(cfg, dict) else {})
+    rsp.headers['Content-Type'] = 'application/json'
+    return rsp
+
+@flask_app.route("/api/v1/public_ip_lookup.json", methods=['POST'])
+@api_auth_required
+def api_public_ip_lookup_post():
+    p_data = request.get_json() or {}
+    cfg = {
+        "user_agent": str(p_data.get("user_agent", "")).strip(),
+        "ipv4": _sanitize_ip_sources(p_data.get("ipv4")),
+        "ipv6": _sanitize_ip_sources(p_data.get("ipv6")),
+    }
+    pcat_config.set_user_config_key("public_ip_lookup", cfg)
+    response_json = {"status": "ok"}
+    rsp = make_response(response_json)
+    rsp.headers['Content-Type'] = 'application/json'
+    return rsp
+
 @flask_app.route("/api/v1/fan_speed.json", methods=['POST'])
+@api_auth_required
 def api_fan_speed_post():
-    p_data = request.get_json()
+    p_data = request.get_json(silent=True) or {}
     user_max_speed = p_data.get("fan_speed", 5)
 
-    # Save user's max speed preference
+    # Persist preference (and apply direct hardware write). set_fan_speed
+    # saves the JSON first so a later smart-mode recalculation or a sysfs
+    # glitch cannot leave the preference at the default 5 (issue #107).
     pcat_config.set_fan_speed(user_max_speed)
+    # Re-read the clamped value that was actually saved
+    user_max_speed = pcat_config.get_fan_speed()
 
     # Get current fan mode
     fan_mode = pcat_config.get_fan_mode()
 
-    # If in manual mode, directly set fan speed
-    # If in smart mode, apply smart algorithm with user_max_speed as cap
+    # If in manual mode, hardware already has the user speed from set_fan_speed.
+    # If in smart mode, re-apply the smart algorithm with user_max_speed as cap
+    # (overwrites the direct write with the temperature-based speed).
     if fan_mode == "manual":
-        pcat_config.set_fan_speed_direct(user_max_speed)
         pcat_logger.logger.info(f"[Manual Fan] Set fan speed to {user_max_speed}")
     else:
         # Apply smart fan control algorithm using current temperature
@@ -7581,12 +9441,13 @@ def api_fan_speed_post():
 
     response_json = {}
     response_json["status"] = "ok"
+    response_json["fan_speed"] = user_max_speed
     rsp = make_response(response_json)
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/fan_mode.json", methods=['GET'])
+@api_auth_required
 def api_fan_mode():
     response_json = {}
     response_json["status"] = "ok"
@@ -7595,8 +9456,8 @@ def api_fan_mode():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/fan_mode.json", methods=['POST'])
+@api_auth_required
 def api_fan_mode_post():
     try:
         p_data = request.get_json()
@@ -7649,16 +9510,24 @@ def api_fan_mode_post():
         rsp.headers['Content-Type'] = 'application/json'
         return rsp
 
+@flask_app.route("/api/v1/screen/restart", methods=['POST'])
 @api_auth_required
-@flask_app.route("/api/v1/screen/restart", methods=['GET'])
 def api_screen_restart():
     res = pc_app.screen_client.restart_screen()
     rsp = make_response(res)
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
+@flask_app.route("/api/v1/screen/reset", methods=['POST'])
 @api_auth_required
-@flask_app.route("/api/v1/screen/short_click", methods=['GET'])
+def api_screen_reset():
+    res = pc_app.screen_client.reset_config()
+    rsp = make_response(res)
+    rsp.headers['Content-Type'] = 'application/json'
+    return rsp
+
+@flask_app.route("/api/v1/screen/short_click", methods=['POST'])
+@api_auth_required
 def api_screen_short_click():
     res = pc_app.screen_client.short_click()
     rsp = make_response(res)
@@ -7666,8 +9535,8 @@ def api_screen_short_click():
     return rsp
 
 # Voice Call API Endpoints
-@api_auth_required  
 @flask_app.route("/api/v1/voice_call/make", methods=['POST'])
+@api_auth_required  
 def api_voice_call_make():
     try:
         p_data = request.get_json()
@@ -7683,9 +9552,9 @@ def api_voice_call_make():
         success = pc_app.sms_client.make_voice_call(number)
         
         if success:
-            # Log the call attempt
-            pc_app.sms_client.log_call_history("outgoing", number, "initiated")
-            
+            # No history row here: pc_call_log writes one when the call ends,
+            # by which point it knows whether it connected and for how long.
+            # make_voice_call() has already told the tracker the number.
             response_json = {
                 "success": True,
                 "message": f"Call initiated to {number}"
@@ -7707,10 +9576,14 @@ def api_voice_call_make():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/voice_call/answer", methods=['POST'])
+@api_auth_required
 def api_voice_call_answer():
     try:
+        # Silence the ring buzzer before even touching the modem, so pickup
+        # feels instant.
+        import pc_ringer
+        pc_ringer.ringer_service.stop()
         # Use pysms_tool to answer the call
         success = pc_app.sms_client.answer_call()
         
@@ -7736,12 +9609,16 @@ def api_voice_call_answer():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/voice_call/hangup", methods=['POST'])
+@api_auth_required
 def api_voice_call_hangup():
     try:
+        # Declining an incoming call must silence the buzzer immediately.
+        import pc_ringer
+        pc_ringer.ringer_service.stop()
         # Use pysms_tool to hang up the call
         success = pc_app.sms_client.hangup_call()
+        call_audio_bridge.stop()
         
         if success:
             response_json = {
@@ -7765,19 +9642,48 @@ def api_voice_call_hangup():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
+def _sync_auto_record(has_active, calls):
+    """Auto-record every call when the user has opted in (default off).
+    Driven by the phone page's 2s status poll -- calls can only be placed or
+    answered from that page, so it is always polling while a call exists.
+    Also closes any recording (manual or auto) once the call ends."""
+    try:
+        rec = call_audio_bridge.record_status()
+        if has_active:
+            # belt-and-suspenders: a live call means ringing is over
+            import pc_ringer
+            pc_ringer.ringer_service.stop()
+            if not rec["recording"] and \
+                    bool(pcat_config.get_user_config_key("phone_auto_record", False)):
+                number = calls[0].get("number", "") if calls else ""
+                call_audio_bridge.start_record(number)
+        elif rec["recording"]:
+            call_audio_bridge.stop_record()
+    except Exception as e:
+        pcat_logger.logger.error(f"auto-record sync failed: {e}")
+
 @flask_app.route("/api/v1/voice_call/status", methods=['GET'])
+@api_auth_required
 def api_voice_call_status():
     try:
         # Use pysms_tool to get call status
         call_status = pc_app.sms_client.get_call_status()
-        
+        calls = call_status.get("calls", [])
+        _sync_auto_record(len(calls) > 0, calls)
+        import pc_call_log
+        pc_call_log.call_session_tracker.on_status(calls)
+
         response_json = {
             "success": True,
-            "calls": call_status.get("calls", []),
-            "has_active_calls": len(call_status.get("calls", [])) > 0
+            "calls": calls,
+            "has_active_calls": len(calls) > 0,
+            # Seconds since the call actually connected, measured here rather
+            # than from whenever the browser's poll first saw it -- that was
+            # up to a poll interval short, and reset on every page reload.
+            "call_seconds": pc_call_log.call_session_tracker.call_seconds(),
+            "recording": call_audio_bridge.record_status()
         }
-            
+
     except Exception as e:
         pcat_logger.logger.error(f"Error getting voice call status: {str(e)}")
         response_json = {
@@ -7790,8 +9696,8 @@ def api_voice_call_status():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/voice_call/audio_path", methods=['POST'])
+@api_auth_required
 def api_voice_call_audio_path():
     try:
         p_data = request.get_json()
@@ -7822,13 +9728,15 @@ def api_voice_call_audio_path():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/voice_call/history", methods=['GET'])
+@api_auth_required
 def api_voice_call_history():
     try:
         # Get call history from SMS client
         history = pc_app.sms_client.get_call_history()
-        
+        for row in history:
+            row["number"] = intl_phone_number(row.get("number"))
+
         response_json = {
             "success": True,
             "history": history
@@ -7846,8 +9754,8 @@ def api_voice_call_history():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/voice_call/history", methods=['DELETE'])
+@api_auth_required
 def api_voice_call_history_clear():
     try:
         # Clear call history
@@ -7875,8 +9783,8 @@ def api_voice_call_history_clear():
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
-@api_auth_required
 @flask_app.route("/api/v1/voice_call/history/<call_id>", methods=['DELETE'])
+@api_auth_required
 def api_voice_call_history_delete(call_id):
     try:
         # Delete specific call record
@@ -7904,14 +9812,741 @@ def api_voice_call_history_delete(call_id):
     rsp.headers['Content-Type'] = 'application/json'
     return rsp
 
+# --- Phone address book ---------------------------------------------------
+
+@flask_app.route("/api/v1/voice_call/contacts", methods=['GET'])
 @api_auth_required
+def api_voice_call_contacts():
+    try:
+        response_json = {
+            "success": True,
+            "contacts": pc_app.sms_client.get_contacts()
+        }
+    except Exception as e:
+        pcat_logger.logger.error(f"Error getting contacts: {str(e)}")
+        response_json = {"success": False, "error": str(e), "contacts": []}
+
+    rsp = make_response(response_json)
+    rsp.headers['Content-Type'] = 'application/json'
+    return rsp
+
+def _validate_contact_fields(name, number):
+    """Shared add/update validation. Returns an error string or None."""
+    if not name or not number:
+        return "Name and number are required"
+    if len(name) > 64 or len(number) > 32:
+        return "Name or number too long"
+    if not re.match(r'^\+?[0-9\s\-\(\)\*#]{2,32}$', number):
+        return "Invalid phone number format"
+    return None
+
+@flask_app.route("/api/v1/voice_call/contacts", methods=['POST'])
+@api_auth_required
+def api_voice_call_contacts_add():
+    try:
+        p_data = request.get_json()
+        name = (p_data.get("name") or "").strip()
+        number = (p_data.get("number") or "").strip()
+
+        error = _validate_contact_fields(name, number)
+        if error:
+            return make_response({"success": False, "error": error}), 400
+
+        success = pc_app.sms_client.add_contact(name, number)
+        if success:
+            response_json = {"success": True, "message": "Contact added"}
+        else:
+            response_json = {"success": False, "error": "Failed to add contact"}
+    except Exception as e:
+        pcat_logger.logger.error(f"Error adding contact: {str(e)}")
+        response_json = {"success": False, "error": str(e)}
+
+    rsp = make_response(response_json)
+    rsp.headers['Content-Type'] = 'application/json'
+    return rsp
+
+@flask_app.route("/api/v1/voice_call/contacts/<contact_id>", methods=['PUT'])
+@api_auth_required
+def api_voice_call_contacts_update(contact_id):
+    try:
+        p_data = request.get_json()
+        name = (p_data.get("name") or "").strip()
+        number = (p_data.get("number") or "").strip()
+
+        error = _validate_contact_fields(name, number)
+        if error:
+            return make_response({"success": False, "error": error}), 400
+
+        success = pc_app.sms_client.update_contact(contact_id, name, number)
+        if success:
+            response_json = {"success": True, "message": "Contact updated"}
+        else:
+            response_json = {"success": False, "error": "Failed to update contact"}
+    except Exception as e:
+        pcat_logger.logger.error(f"Error updating contact: {str(e)}")
+        response_json = {"success": False, "error": str(e)}
+
+    rsp = make_response(response_json)
+    rsp.headers['Content-Type'] = 'application/json'
+    return rsp
+
+@flask_app.route("/api/v1/voice_call/contacts/<contact_id>", methods=['DELETE'])
+@api_auth_required
+def api_voice_call_contacts_delete(contact_id):
+    try:
+        success = pc_app.sms_client.delete_contact(contact_id)
+        if success:
+            response_json = {"success": True, "message": "Contact deleted"}
+        else:
+            response_json = {"success": False, "error": "Failed to delete contact"}
+    except Exception as e:
+        pcat_logger.logger.error(f"Error deleting contact: {str(e)}")
+        response_json = {"success": False, "error": str(e)}
+
+    rsp = make_response(response_json)
+    rsp.headers['Content-Type'] = 'application/json'
+    return rsp
+
+# --- Call recording -------------------------------------------------------
+# Recordings live in pc_call_audio.RECORD_DIR as call_<stamp>[_<number>].wav
+# (in-flight) or .opus (compressed after the call); voicemail messages use a
+# vm_ prefix. The name pattern below is the only thing ever joined to the
+# directory, so no path traversal.
+
+RECORDING_NAME_RE = re.compile(
+    r'^(?P<kind>call|vm)_(?P<stamp>[0-9]{8}-[0-9]{6})'
+    r'(_(?P<num>[0-9+]{1,20}))?\.(wav|opus)$')
+
+@flask_app.route("/api/v1/voice_call/record/config", methods=['GET'])
+@api_auth_required
+def api_voice_call_record_config():
+    rsp = make_response({
+        "success": True,
+        "auto_record": bool(pcat_config.get_user_config_key("phone_auto_record", False))
+    })
+    rsp.headers['Content-Type'] = 'application/json'
+    return rsp
+
+@flask_app.route("/api/v1/voice_call/record/config", methods=['POST'])
+@api_auth_required
+def api_voice_call_record_config_set():
+    try:
+        p_data = request.get_json() or {}
+        enabled = bool(p_data.get("auto_record", False))
+        pcat_config.set_user_config_key("phone_auto_record", enabled)
+        response_json = {"success": True, "auto_record": enabled}
+    except Exception as e:
+        pcat_logger.logger.error(f"Error saving record config: {str(e)}")
+        response_json = {"success": False, "error": str(e)}
+
+    rsp = make_response(response_json)
+    rsp.headers['Content-Type'] = 'application/json'
+    return rsp
+
+@flask_app.route("/api/v1/voice_call/record/start", methods=['POST'])
+@api_auth_required
+def api_voice_call_record_start():
+    number = ""
+    try:
+        call_status = pc_app.sms_client.get_call_status()
+        calls = call_status.get("calls", [])
+        if calls:
+            number = calls[0].get("number", "") or ""
+    except Exception:
+        pass
+    name = call_audio_bridge.start_record(number)
+    if name:
+        response_json = {"success": True, "file": name}
+    else:
+        response_json = {"success": False, "error": "Failed to start recording"}
+
+    rsp = make_response(response_json)
+    rsp.headers['Content-Type'] = 'application/json'
+    return rsp
+
+@flask_app.route("/api/v1/voice_call/record/stop", methods=['POST'])
+@api_auth_required
+def api_voice_call_record_stop():
+    call_audio_bridge.stop_record()
+    rsp = make_response({"success": True})
+    rsp.headers['Content-Type'] = 'application/json'
+    return rsp
+
+@flask_app.route("/api/v1/voice_call/recordings", methods=['GET'])
+@api_auth_required
+def api_voice_call_recordings():
+    import pc_call_audio
+    import pc_voicemail
+    recordings = []
+    try:
+        rec_now = call_audio_bridge.record_status()
+        in_flight = rec_now.get("file") if rec_now.get("recording") else None
+        vm_in_flight = pc_voicemail.voicemail_service.active_file
+        rec_dir = pc_call_audio.RECORD_DIR
+        for name in os.listdir(rec_dir):
+            m = RECORDING_NAME_RE.match(name)
+            if not m or name == in_flight or name == vm_in_flight:
+                continue
+            st = os.stat(os.path.join(rec_dir, name))
+            try:
+                nice_time = datetime.strptime(
+                    m.group("stamp"), "%Y%m%d-%H%M%S").strftime("%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                nice_time = ""
+            if name.endswith(".wav"):
+                seconds = max(0, st.st_size - 44) / (16000 * 2.0)
+            else:
+                seconds = st.st_size / 3000.0   # ~24kbps opus
+            import pc_transcribe
+            recordings.append({
+                "name": name,
+                "kind": m.group("kind"),
+                "number": m.group("num") or "",
+                "time": nice_time,
+                "size": st.st_size,
+                "seconds": round(seconds, 1),
+                "transcript": pc_transcribe.read_transcript(name),
+                "transcribing": pc_transcribe.transcribe_service.is_pending(name)
+            })
+        # newest first regardless of call/vm prefix
+        recordings.sort(key=lambda r: r["name"].split("_", 1)[1], reverse=True)
+    except OSError:
+        pass
+
+    rsp = make_response({"success": True, "recordings": recordings})
+    rsp.headers['Content-Type'] = 'application/json'
+    return rsp
+
+@flask_app.route("/api/v1/voice_call/recordings/<name>", methods=['GET'])
+@api_auth_required
+def api_voice_call_recording_get(name):
+    import pc_call_audio
+    if not RECORDING_NAME_RE.match(name):
+        return make_response({"success": False, "error": "Invalid name"}), 400
+    from flask import send_from_directory
+    mimetype = "audio/ogg" if name.endswith(".opus") else "audio/wav"
+    return send_from_directory(
+        pc_call_audio.RECORD_DIR, name, mimetype=mimetype,
+        as_attachment=(request.args.get("download") == "1"), conditional=True)
+
+@flask_app.route("/api/v1/voice_call/recordings/<name>", methods=['DELETE'])
+@api_auth_required
+def api_voice_call_recording_delete(name):
+    import pc_call_audio
+    if not RECORDING_NAME_RE.match(name):
+        return make_response({"success": False, "error": "Invalid name"}), 400
+    try:
+        os.unlink(os.path.join(pc_call_audio.RECORD_DIR, name))
+        # transcript (if any) goes with the audio
+        try:
+            os.unlink(os.path.join(pc_call_audio.RECORD_DIR, name + ".txt"))
+        except OSError:
+            pass
+        response_json = {"success": True}
+    except OSError as e:
+        response_json = {"success": False, "error": str(e)}
+
+    rsp = make_response(response_json)
+    rsp.headers['Content-Type'] = 'application/json'
+    return rsp
+
+# --- Voicemail ------------------------------------------------------------
+# Answering machine: pc_voicemail's monitor thread answers unanswered
+# incoming calls, plays the greeting stored below, and records the caller
+# into the shared recordings directory (vm_ prefix).
+
+import pc_voicemail
+# getattr, not attribute access: both services document their getter as
+# returning None while the modem stack is still coming up, but these clients
+# are only bound onto the app module partway through startup -- a bare
+# pc_app.sms_client raises AttributeError until then, which surfaces as
+# "voicemail: tick failed" instead of the quiet no-op the loops expect.
+pc_voicemail.voicemail_service.start(lambda: getattr(pc_app, "sms_client", None))
+
+# Incoming-call buzzer: event-driven off modem URCs (RING / NO CARRIER), so
+# it starts within ~150ms of the network paging us and stops instantly on
+# answer/decline (those routes call stop() before touching the modem).
+import pc_ringer
+import pc_modem_client as _pc_modem_mod
+pc_ringer.ringer_service.start(lambda: getattr(pc_app, "socket_client", None))
+_pc_modem_mod.register_urc_listener(pc_ringer.ringer_service.on_urc)
+
+# Call history. Also URC-driven, so a call that rings while nobody has the
+# phone page open still ends up in the list as a missed call.
+import pc_call_log
+pc_call_log.call_session_tracker.start(lambda: getattr(pc_app, "sms_client", None))
+_pc_modem_mod.register_urc_listener(pc_call_log.call_session_tracker.on_urc)
+
+@flask_app.route("/api/v1/voice_call/ringer/config", methods=['GET'])
+@api_auth_required
+def api_ringer_config():
+    rsp = make_response({
+        "success": True,
+        "enabled": pc_ringer.ringer_service.enabled(),
+        "melody": pc_ringer.ringer_service.melody(),
+        "melodies": list(pc_ringer.RING_MELODIES.keys())
+    })
+    rsp.headers['Content-Type'] = 'application/json'
+    return rsp
+
+@flask_app.route("/api/v1/voice_call/ringer/config", methods=['POST'])
+@api_auth_required
+def api_ringer_config_set():
+    try:
+        p_data = request.get_json() or {}
+        if "enabled" in p_data:
+            pcat_config.set_user_config_key(
+                "phone_ring_buzzer_enabled", bool(p_data.get("enabled")))
+            if not p_data.get("enabled"):
+                pc_ringer.ringer_service.stop()
+        melody = p_data.get("melody")
+        if melody is not None:
+            if melody not in pc_ringer.RING_MELODIES:
+                return make_response({"success": False,
+                                      "error": "Unknown melody"}), 400
+            pcat_config.set_user_config_key("phone_ring_melody", melody)
+        response_json = {
+            "success": True,
+            "enabled": pc_ringer.ringer_service.enabled(),
+            "melody": pc_ringer.ringer_service.melody()
+        }
+    except Exception as e:
+        pcat_logger.logger.error(f"Error saving ringer config: {str(e)}")
+        response_json = {"success": False, "error": str(e)}
+
+    rsp = make_response(response_json)
+    rsp.headers['Content-Type'] = 'application/json'
+    return rsp
+
+@flask_app.route("/api/v1/voice_call/ringer/silence", methods=['POST'])
+@api_auth_required
+def api_ringer_silence():
+    """Silence the buzzer for the call that is ringing, without touching the
+    call itself -- the caller keeps hearing ringback and voicemail still picks
+    up on schedule. Distinct from declining, which hangs up on them."""
+    pc_ringer.ringer_service.silence()
+    rsp = make_response({"success": True})
+    rsp.headers['Content-Type'] = 'application/json'
+    return rsp
+
+@flask_app.route("/api/v1/voice_call/ringer/preview", methods=['POST'])
+@api_auth_required
+def api_ringer_preview():
+    p_data = request.get_json() or {}
+    melody = p_data.get("melody", pc_ringer.ringer_service.melody())
+    if pc_ringer.ringer_service.preview(melody):
+        response_json = {"success": True}
+    else:
+        response_json = {"success": False, "error": "Preview unavailable"}
+    rsp = make_response(response_json)
+    rsp.headers['Content-Type'] = 'application/json'
+    return rsp
+
+# --- Transcription (whisper.cpp on CPU) -----------------------------------
+
+import pc_transcribe
+
+@flask_app.route("/api/v1/voice_call/transcribe/status", methods=['GET'])
+@api_auth_required
+def api_transcribe_status():
+    st = pc_transcribe.transcribe_service.status()
+    st["success"] = True
+    rsp = make_response(st)
+    rsp.headers['Content-Type'] = 'application/json'
+    return rsp
+
+@flask_app.route("/api/v1/voice_call/transcribe/config", methods=['POST'])
+@api_auth_required
+def api_transcribe_config_set():
+    try:
+        p_data = request.get_json() or {}
+        model = p_data.get("model")
+        if model is not None:
+            if model not in pc_transcribe.MODELS:
+                return make_response({"success": False,
+                                      "error": "Unknown model"}), 400
+            pcat_config.set_user_config_key("phone_transcribe_model", model)
+        lang = p_data.get("lang")
+        if lang is not None:
+            if lang not in pc_transcribe.LANGS:
+                return make_response({"success": False,
+                                      "error": "Unknown language"}), 400
+            pcat_config.set_user_config_key("phone_transcribe_lang", lang)
+        if "auto_vm" in p_data:
+            pcat_config.set_user_config_key(
+                "phone_vm_transcribe", bool(p_data.get("auto_vm")))
+        response_json = {"success": True}
+    except Exception as e:
+        pcat_logger.logger.error(f"Error saving transcribe config: {str(e)}")
+        response_json = {"success": False, "error": str(e)}
+
+    rsp = make_response(response_json)
+    rsp.headers['Content-Type'] = 'application/json'
+    return rsp
+
+@flask_app.route("/api/v1/voice_call/transcribe/download", methods=['POST'])
+@api_auth_required
+def api_transcribe_download():
+    p_data = request.get_json() or {}
+    model = p_data.get("model", pc_transcribe.transcribe_service.model())
+    ok, msg = pc_transcribe.transcribe_service.start_download(model)
+    rsp = make_response({"success": ok,
+                         "message" if ok else "error": msg})
+    rsp.headers['Content-Type'] = 'application/json'
+    return rsp
+
+@flask_app.route("/api/v1/voice_call/transcribe/engine", methods=['POST'])
+@api_auth_required
+def api_transcribe_engine_install():
+    ok, msg = pc_transcribe.transcribe_service.start_engine_download()
+    rsp = make_response({"success": ok,
+                         "message" if ok else "error": msg})
+    rsp.headers['Content-Type'] = 'application/json'
+    return rsp
+
+@flask_app.route("/api/v1/voice_call/transcribe/run", methods=['POST'])
+@api_auth_required
+def api_transcribe_run():
+    p_data = request.get_json() or {}
+    name = p_data.get("name", "")
+    if not RECORDING_NAME_RE.match(name):
+        return make_response({"success": False, "error": "Invalid name"}), 400
+    ok, msg = pc_transcribe.transcribe_service.enqueue(name)
+    rsp = make_response({"success": ok,
+                         "message" if ok else "error": msg})
+    rsp.headers['Content-Type'] = 'application/json'
+    return rsp
+
+# --- Text to speech (espeak-ng) -------------------------------------------
+
+import pc_tts
+
+@flask_app.route("/api/v1/voice_call/tts/status", methods=['GET'])
+@api_auth_required
+def api_tts_status():
+    st = pc_tts.tts_service.status()
+    st["success"] = True
+    rsp = make_response(st)
+    rsp.headers['Content-Type'] = 'application/json'
+    return rsp
+
+@flask_app.route("/api/v1/voice_call/tts/engine", methods=['POST'])
+@api_auth_required
+def api_tts_engine_install():
+    """Install a synthesizer. kind=espeak (3MB robotic), kokoro-engine +
+    kokoro-model (neural, natural Chinese)."""
+    p_data = request.get_json(silent=True) or {}
+    kind = p_data.get("kind", "espeak")
+    if kind == "kokoro-engine":
+        ok, msg = pc_tts.tts_service.start_kokoro_engine_download()
+    elif kind == "kokoro-model":
+        ok, msg = pc_tts.tts_service.start_kokoro_model_download(
+            p_data.get("model") or pc_tts.tts_service.kokoro_model())
+    else:
+        ok, msg = pc_tts.tts_service.start_download()
+    rsp = make_response({"success": ok,
+                         "message" if ok else "error": msg})
+    rsp.headers['Content-Type'] = 'application/json'
+    return rsp
+
+@flask_app.route("/api/v1/voice_call/tts/config", methods=['POST'])
+@api_auth_required
+def api_tts_config_set():
+    try:
+        p_data = request.get_json() or {}
+        engine = p_data.get("engine")
+        if engine in ("espeak", "kokoro"):
+            pcat_config.set_user_config_key("phone_tts_engine", engine)
+        model = p_data.get("kokoro_model")
+        if model in pc_tts.KOKORO_MODELS:
+            pcat_config.set_user_config_key("phone_tts_kokoro_model", model)
+        kvoice = p_data.get("kokoro_voice")
+        if kvoice is not None and any(v["id"] == str(kvoice)
+                                      for v in pc_tts.KOKORO_VOICES):
+            pcat_config.set_user_config_key("phone_tts_kokoro_voice", str(kvoice))
+        response_json = {"success": True}
+    except Exception as e:
+        pcat_logger.logger.error(f"Error saving tts config: {str(e)}")
+        response_json = {"success": False, "error": str(e)}
+
+    rsp = make_response(response_json)
+    rsp.headers['Content-Type'] = 'application/json'
+    return rsp
+
+def _tts_engine_and_voice(p_data):
+    """Resolve which synthesizer and voice a synth request wants, remembering
+    the choice. The two engines have unrelated voice namespaces (espeak uses
+    language codes, kokoro numeric speaker ids), so they are stored apart."""
+    engine = p_data.get("engine") or pc_tts.tts_service.engine()
+    if engine not in ("espeak", "kokoro"):
+        engine = "espeak"
+    voice = p_data.get("voice")
+    if engine == "kokoro":
+        voice = str(voice) if voice is not None else pc_tts.tts_service.kokoro_voice()
+        if any(v["id"] == voice for v in pc_tts.KOKORO_VOICES):
+            pcat_config.set_user_config_key("phone_tts_kokoro_voice", voice)
+    else:
+        voice = voice or pc_tts.tts_service.voice()
+        if any(v["id"] == voice for v in pc_tts.VOICES):
+            pcat_config.set_user_config_key("phone_tts_voice", voice)
+    return engine, voice
+
+@flask_app.route("/api/v1/voice_call/tts/greeting", methods=['POST'])
+@api_auth_required
+def api_tts_greeting():
+    """Synthesize typed text into the voicemail greeting -- the no-microphone
+    (and no-HTTPS) way to set one up."""
+    try:
+        p_data = request.get_json() or {}
+        text = p_data.get("text", "")
+        engine, voice = _tts_engine_and_voice(p_data)
+
+        os.makedirs(pc_voicemail.RECORD_DIR, exist_ok=True)
+        tmp = pc_voicemail.GREETING_WAV + ".tts"
+        ok, err = pc_tts.tts_service.synth(text, voice, tmp, engine=engine)
+        if not ok:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            return make_response({"success": False, "error": err}), 400
+        os.replace(tmp, pc_voicemail.GREETING_WAV)
+        response_json = {"success": True}
+    except Exception as e:
+        pcat_logger.logger.error(f"Error synthesizing greeting: {str(e)}")
+        response_json = {"success": False, "error": str(e)}
+
+    rsp = make_response(response_json)
+    rsp.headers['Content-Type'] = 'application/json'
+    return rsp
+
+@flask_app.route("/api/v1/voice_call/tts/preview", methods=['POST'])
+@api_auth_required
+def api_tts_preview():
+    """Synthesize text and stream the WAV straight back for the browser to
+    play, without touching the stored greeting."""
+    p_data = request.get_json() or {}
+    text = p_data.get("text", "")
+    engine, voice = _tts_engine_and_voice(p_data)
+    # Per-request name: a shared /tmp/tts-preview.wav lets two overlapping
+    # previews (or an impatient double-click) clobber and unlink each other's
+    # file, so one of them 500s on a file that is no longer there.
+    tmp = os.path.join("/tmp", "tts-preview-%d.wav" % threading.get_ident())
+    ok, err = pc_tts.tts_service.synth(text, voice, tmp, engine=engine)
+    if not ok:
+        return make_response({"success": False, "error": err}), 400
+    try:
+        with open(tmp, "rb") as fh:
+            data = fh.read()
+    except OSError as e:
+        return make_response({"success": False, "error": str(e)}), 500
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+    rsp = make_response(data)
+    rsp.headers['Content-Type'] = 'audio/wav'
+    rsp.headers['Cache-Control'] = 'no-store'
+    return rsp
+
+@flask_app.route("/api/v1/voice_call/voicemail/config", methods=['GET'])
+@api_auth_required
+def api_voicemail_config():
+    rsp = make_response({
+        "success": True,
+        "enabled": pc_voicemail.voicemail_service.enabled(),
+        "answer_secs": pc_voicemail.voicemail_service.answer_secs(),
+        "greeting": os.path.exists(pc_voicemail.GREETING_WAV)
+    })
+    rsp.headers['Content-Type'] = 'application/json'
+    return rsp
+
+@flask_app.route("/api/v1/voice_call/voicemail/config", methods=['POST'])
+@api_auth_required
+def api_voicemail_config_set():
+    try:
+        p_data = request.get_json() or {}
+        if "enabled" in p_data:
+            pcat_config.set_user_config_key(
+                "phone_voicemail_enabled", bool(p_data.get("enabled")))
+        if "answer_secs" in p_data:
+            secs = min(max(int(p_data.get("answer_secs")), 3), 60)
+            pcat_config.set_user_config_key("phone_voicemail_answer_secs", secs)
+        response_json = {
+            "success": True,
+            "enabled": pc_voicemail.voicemail_service.enabled(),
+            "answer_secs": pc_voicemail.voicemail_service.answer_secs()
+        }
+    except Exception as e:
+        pcat_logger.logger.error(f"Error saving voicemail config: {str(e)}")
+        response_json = {"success": False, "error": str(e)}
+
+    rsp = make_response(response_json)
+    rsp.headers['Content-Type'] = 'application/json'
+    return rsp
+
+@flask_app.route("/api/v1/voice_call/voicemail/greeting", methods=['POST'])
+@api_auth_required
+def api_voicemail_greeting_upload():
+    """Accepts whatever the browser's MediaRecorder produced (webm/opus,
+    ogg, wav, ...) and lets the device's ffmpeg turn it into the 16k mono
+    WAV that gets played into the call."""
+    try:
+        data = request.get_data()
+        if not data:
+            return make_response({"success": False, "error": "Empty upload"}), 400
+        if len(data) > 8 * 1024 * 1024:
+            return make_response({"success": False, "error": "Too large"}), 400
+        os.makedirs(pc_voicemail.RECORD_DIR, exist_ok=True)
+        tmp_path = pc_voicemail.GREETING_WAV + ".upload"
+        with open(tmp_path, "wb") as f:
+            f.write(data)
+        import subprocess
+        r = subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-i", tmp_path,
+             "-ar", "16000", "-ac", "1", "-t", str(pc_voicemail.GREETING_MAX_SECS),
+             "-c:a", "pcm_s16le", pc_voicemail.GREETING_WAV],
+            timeout=60, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        if r.returncode != 0:
+            err = r.stderr.decode(errors="replace")[:200]
+            pcat_logger.logger.error(f"greeting convert failed: {err}")
+            return make_response({"success": False,
+                                  "error": "Audio conversion failed"}), 400
+        response_json = {"success": True}
+    except Exception as e:
+        pcat_logger.logger.error(f"Error saving greeting: {str(e)}")
+        response_json = {"success": False, "error": str(e)}
+
+    rsp = make_response(response_json)
+    rsp.headers['Content-Type'] = 'application/json'
+    return rsp
+
+@flask_app.route("/api/v1/voice_call/voicemail/greeting", methods=['GET'])
+@api_auth_required
+def api_voicemail_greeting_get():
+    if not os.path.exists(pc_voicemail.GREETING_WAV):
+        return make_response({"success": False, "error": "No greeting"}), 404
+    from flask import send_from_directory
+    return send_from_directory(
+        pc_voicemail.RECORD_DIR, "greeting.wav",
+        mimetype="audio/wav", conditional=True)
+
+@flask_app.route("/api/v1/voice_call/voicemail/greeting", methods=['DELETE'])
+@api_auth_required
+def api_voicemail_greeting_delete():
+    try:
+        os.unlink(pc_voicemail.GREETING_WAV)
+        response_json = {"success": True}
+    except FileNotFoundError:
+        response_json = {"success": True}
+    except OSError as e:
+        response_json = {"success": False, "error": str(e)}
+
+    rsp = make_response(response_json)
+    rsp.headers['Content-Type'] = 'application/json'
+    return rsp
+
+
+# --- In-call audio bridge -------------------------------------------------
+# Raw 16kHz mono S16_LE PCM between the browser and the modem. The sample
+# path itself now lives in the pcat-call-audio daemon on :9444 (src/callaudio)
+# rather than here: it drives ALSA directly, which removes the arecord/aplay
+# subprocesses, their 64KB pipes and the interpreter from between the modem
+# and the socket. See pc_call_audio.py for the design notes and the fallback.
+#
+# Flask keeps everything else about a call, and mints the token the daemon
+# checks -- it is Flask that knows the user is authenticated. See
+# pc_audio_token.py.
+
+@flask_app.route("/api/v1/voice_call/audio/token.json", methods=['GET'])
+@api_auth_required
+def api_voice_call_audio_token():
+    """Hands the phone page a short-lived credential for the audio daemon,
+    plus where to reach it. `port` is reported so the page does not have to
+    hard-code it, and `available` lets the page fall back to the in-process
+    bridge when the daemon is not running."""
+    import pc_audio_token
+    token = pc_audio_token.mint()
+    return make_response({
+        "success": True,
+        "token": token,
+        "port": AUDIO_DAEMON_PORT,
+        "available": bool(token) and _audio_daemon_running(),
+    })
+
+
+AUDIO_DAEMON_PORT = 9444
+
+
+def _audio_daemon_running():
+    """True when something is listening on the daemon's port.
+
+    Checked rather than assumed so a device where the daemon failed to start
+    (no cert, no ALSA card, an old package) still gets working audio through
+    the Python bridge instead of a silent failure on the phone page.
+    """
+    import socket
+    s = socket.socket()
+    s.settimeout(0.2)
+    try:
+        return s.connect_ex(("127.0.0.1", AUDIO_DAEMON_PORT)) == 0
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+@flask_app.route("/api/v1/voice_call/audio/status", methods=['GET'])
+@api_auth_required
+def api_voice_call_audio_status():
+    st = call_audio_bridge.status()
+    st["success"] = True
+    rsp = make_response(st)
+    rsp.headers['Content-Type'] = 'application/json'
+    return rsp
+
+@flask_app.route("/api/v1/voice_call/audio/stream", methods=['GET'])
+@api_auth_required
+def api_voice_call_audio_stream():
+    if not call_audio_bridge.card_present():
+        return make_response({"success": False,
+                              "error": "no modem audio card"}, 503)
+    rsp = Response(stream_with_context(call_audio_bridge.rx_stream()),
+                   mimetype="application/octet-stream", direct_passthrough=True)
+    rsp.headers['Cache-Control'] = 'no-store'
+    rsp.headers['X-Accel-Buffering'] = 'no'
+    return rsp
+
+@flask_app.route("/api/v1/voice_call/audio/tx", methods=['POST'])
+@api_auth_required
+def api_voice_call_audio_tx():
+    if not call_audio_bridge.card_present():
+        return make_response({"success": False,
+                              "error": "no modem audio card"}, 503)
+    ok = call_audio_bridge.tx_write(request.get_data())
+    return make_response({"success": ok})
+
+@flask_app.route("/api/v1/voice_call/audio/stop", methods=['POST'])
+@api_auth_required
+def api_voice_call_audio_stop():
+    call_audio_bridge.stop()
+    return make_response({"success": True})
+
 @flask_app.route("/api/v1/voice_call/incoming", methods=['GET'])
+@api_auth_required
 def api_voice_call_incoming():
     try:
         # Get incoming call status using pysms_tool
         incoming_call = pc_app.sms_client.get_incoming_call_status()
-        
+
         if incoming_call:
+            incoming_call = dict(incoming_call)
+            incoming_call["number"] = intl_phone_number(incoming_call.get("number"))
             response_json = {
                 "success": True,
                 "incoming_call": incoming_call
@@ -7955,30 +10590,20 @@ def terminal_action():
         return redirect("/")
 
     c_locale = current_locale()
-    if c_locale == "CN":
-        locales = {
-            "terminal_title": "终端",
-            "terminal_reconnect": "重新连接",
-            "terminal_disconnect": "断开",
-            "terminal_connected": "已连接",
-            "terminal_connecting": "连接中...",
-            "terminal_disconnected": "已断开",
-        }
-    else:
-        locales = {
-            "terminal_title": "Terminal",
-            "terminal_reconnect": "Reconnect",
-            "terminal_disconnect": "Disconnect",
-            "terminal_connected": "Connected",
-            "terminal_connecting": "Connecting...",
-            "terminal_disconnected": "Disconnected",
-        }
+    locales = _locales.get_locales("terminal", c_locale)
 
     locales.update(base_locales())
-    return render_template(nt.terminal_file_name, locales=locales)
+    # ?embed=1 (iframe pane) and ?popup=1 (console popup window) both want the
+    # terminal alone: the nav header and footer are pure overhead in a small
+    # window, and the terminal sizes itself off the space they would occupy.
+    chromeless = (request.args.get("embed") == "1"
+                  or request.args.get("popup") == "1")
+    return render_template(nt.terminal_file_name, locales=locales,
+                           chromeless=chromeless)
 
 
-# Terminal: use Socket.IO rooms for broadcasting PTY output.
+# Terminal: PTY output goes to an event-bus room, not to every client, so two
+# open terminals do not read each other's shells.
 # Room name = "terminal:" + session_id
 _terminal_readers = {}       # session_id -> True (reader running)
 _terminal_lock = threading.Lock()
@@ -8006,49 +10631,63 @@ def _terminal_reader_thread(app_context, session_id):
                     break
                 if data:
                     sess.append_scrollback(data)
-                    socketio.emit('terminal_output',
-                                  {'data': data.decode('utf-8', errors='replace')},
-                                  to=room)
+                    publish('terminal_output',
+                            {'data': data.decode('utf-8', errors='replace')},
+                            room=room)
         except Exception as e:
             pcat_logger.logger.error(f"Terminal reader error for {session_id}: {e}")
         finally:
             with _terminal_lock:
                 _terminal_readers.pop(session_id, None)
-            socketio.emit('terminal_exit', {'session_id': session_id}, to=room)
+            publish('terminal_exit', {'session_id': session_id}, room=room)
             pcat_logger.logger.info(f"Terminal reader EXIT for {session_id}")
 
 
-@socketio.event
+@bus_event
 def terminal_open(message):
     """Client requests to open/attach a terminal session."""
     if not pcat_config.skip_auth and 'username' not in session:
-        emit('terminal_exit', {'error': 'Not authenticated'})
+        reply('terminal_exit', {'error': 'Not authenticated'})
         return
 
     session_id = message.get('session_id', 'default')
     cols = message.get('cols', 80)
     rows = message.get('rows', 24)
+    # LXC console: the client may name a container (NOT a command) and the
+    # session becomes `lxc-attach -n <name>` instead of a host shell. The
+    # name gate keeps this from ever widening into an exec API.
+    command = None
+    lxc_name = message.get('lxc_attach', '')
+    if lxc_name:
+        from pcat_util import lxc_manager
+        if not lxc_manager.NAME_RE.match(lxc_name):
+            reply('terminal_exit', {'error': 'Invalid container name'})
+            return
+        command = ['lxc-attach', '-n', lxc_name]
     room = _terminal_room(session_id)
-    pcat_logger.logger.info(f"Terminal open: session_id={session_id}, sid={request.sid}, cols={cols}, rows={rows}")
+    pcat_logger.logger.info(f"Terminal open: session_id={session_id}, cols={cols}, rows={rows}")
 
-    # Join the room so this socket receives PTY output
-    join_room(room)
+    # Subscribe this client to the room, so it receives this PTY's output and
+    # not some other tab's. The room name goes back in the reply and the
+    # client repeats it on every poll.
+    join(room)
 
     is_new = terminal_manager.get(session_id) is None
-    sess = terminal_manager.get_or_create(session_id, cols, rows)
+    sess = terminal_manager.get_or_create(session_id, cols, rows,
+                                          command=command)
     sess.resize(cols, rows)
 
     if not is_new:
         # Replay saved output so client sees previous session content
         scrollback = sess.get_scrollback()
         if scrollback:
-            emit('terminal_output', {'data': scrollback.decode('utf-8', errors='replace')})
+            reply('terminal_output', {'data': scrollback.decode('utf-8', errors='replace')})
 
     # Start reader thread if not already running
     with _terminal_lock:
         if session_id not in _terminal_readers:
             _terminal_readers[session_id] = True
-            socketio.start_background_task(
+            _start_background_task(
                 _terminal_reader_thread,
                 flask_app.app_context(),
                 session_id
@@ -8056,9 +10695,11 @@ def terminal_open(message):
             pcat_logger.logger.info(f"Terminal reader started for {session_id}")
 
 
-@socketio.event
+@bus_event
 def terminal_input(message):
     """Client sends input to the terminal."""
+    if not _socket_authed():
+        return
     session_id = message.get('session_id', 'default')
     data = message.get('data', '')
     sess = terminal_manager.get(session_id)
@@ -8066,9 +10707,11 @@ def terminal_input(message):
         sess.write(data)
 
 
-@socketio.event
+@bus_event
 def terminal_resize(message):
     """Client resizes the terminal."""
+    if not _socket_authed():
+        return
     session_id = message.get('session_id', 'default')
     cols = message.get('cols', 80)
     rows = message.get('rows', 24)
@@ -8077,11 +10720,1158 @@ def terminal_resize(message):
         sess.resize(cols, rows)
 
 
-@socketio.event
+@bus_event
 def terminal_kill(message):
     """Client requests to kill a terminal session (for reconnect with fresh shell)."""
+    if not _socket_authed():
+        return
     session_id = message.get('session_id', 'default')
     pcat_logger.logger.info(f"Terminal kill request: session_id={session_id}")
     terminal_manager.kill(session_id)
     with _terminal_lock:
         _terminal_readers.pop(session_id, None)
+
+
+# ─── NAS: storage / file manager / samba shares ──────────────────────────────
+# Backends: pcat_util/nas_manager (disks, mounts, shares), nas_files (path
+# jail + file ops), nas_jobs (background jobs). Conventions: GET and POST on
+# the same /api/v1/nas/*.json URL, POST returns the fresh GET payload;
+# destructive endpoints use @api_session_strict (no localhost bypass).
+
+from flask import send_file, abort as _flask_abort
+
+
+def _nas_fail(code, message_en, message_cn, http=200):
+    return jsonify({"status": "failed", "code": code,
+                    "message": "{} / {}".format(message_en, message_cn)}), http
+
+
+def _nas_jail(user_path):
+    """Resolve a browser path against the live jail roots, or None."""
+    try:
+        return nas_files.resolve_jailed(user_path,
+                                        nas_manager.managed_mount_roots())
+    except nas_files.PathJailError:
+        return None
+
+
+@flask_app.route("/nas")
+def nas_action():
+    if 'username' not in session:
+        return redirect(f"/login?next={request.path}")
+    c_locale = current_locale()
+    locales = _locales.get_locales("nas", c_locale)
+    locales.update(base_locales())
+    return render_template("nas.html", locales=locales)
+
+
+@flask_app.route("/api/v1/nas/disks.json", methods=['GET'])
+@api_auth_required
+def nas_disks_api():
+    data = {"status": "ok",
+            "tools": nas_manager.tools_available(),
+            "disks": nas_manager.list_disks()}
+    return jsonify(data)
+
+
+@flask_app.route("/api/v1/nas/smart.json", methods=['GET'])
+@api_auth_required
+def nas_smart_api():
+    dev = request.args.get("dev", "")
+    if not re.match(r"^/dev/[a-z0-9]+$", dev):
+        return _nas_fail("bad_dev", "Invalid device", "无效设备")
+    data = nas_manager.smart_summary(dev)
+    if data is None:
+        return _nas_fail("no_smart", "SMART not available", "SMART 不可用")
+    data = dict(data)
+    data["status"] = "ok"
+    data["dev"] = dev
+    return jsonify(data)
+
+
+@flask_app.route("/api/v1/nas/mount.json", methods=['POST'])
+@api_auth_required
+def nas_mount_api():
+    p = request.get_json() or {}
+    dev = p.get("dev", "")
+    action = p.get("action")
+    if not re.match(r"^/dev/[a-z0-9]+$", dev):
+        return _nas_fail("bad_dev", "Invalid device", "无效设备")
+    if action == "mount":
+        out = nas_manager.mount_now(dev)
+    elif action == "unmount":
+        _disk, part = nas_manager._part_info(dev)
+        if part is None or not part.get("mounted"):
+            return _nas_fail("bad_dev", "Not mounted", "未挂载")
+        out = nas_manager.unmount(part["mountpoint"],
+                                  force=bool(p.get("force")))
+    else:
+        return _nas_fail("bad_action", "Invalid action", "无效操作")
+    if not out.get("ok"):
+        rsp = {"status": "failed", "code": out.get("code", "error"),
+               "message": out.get("message", "operation failed")}
+        if out.get("pids"):
+            rsp["pids"] = out["pids"]
+        return jsonify(rsp)
+    pcat_logger.logger.info("NAS: %s %s by %s", action, dev,
+                            request.remote_addr)
+    return nas_disks_api()
+
+
+@flask_app.route("/api/v1/nas/automount.json", methods=['POST'])
+@api_auth_required
+def nas_automount_api():
+    p = request.get_json() or {}
+    dev = p.get("dev", "")
+    if not re.match(r"^/dev/[a-z0-9]+$", dev):
+        return _nas_fail("bad_dev", "Invalid device", "无效设备")
+    if p.get("enabled"):
+        out = nas_manager.enable_automount(dev)
+    else:
+        out = nas_manager.disable_automount(dev)
+    if not out.get("ok"):
+        return _nas_fail(out.get("code", "error"),
+                         out.get("message", "failed"), "操作失败")
+    pcat_logger.logger.info("NAS: automount %s -> %s by %s", dev,
+                            bool(p.get("enabled")), request.remote_addr)
+    return nas_disks_api()
+
+
+@flask_app.route("/api/v1/nas/files/list.json", methods=['GET'])
+@api_auth_required
+def nas_files_list_api():
+    user_path = request.args.get("path", "")
+    if not user_path:
+        roots = nas_manager.managed_mount_roots()
+        volumes = []
+        for root in roots:
+            try:
+                vol = nas_files.volume_of(root)
+            except OSError:
+                continue
+            vol["mountpoint"] = root
+            vol["name"] = os.path.basename(root) or root
+            volumes.append(vol)
+        return jsonify({"status": "ok", "volumes": volumes})
+    path = _nas_jail(user_path)
+    if path is None:
+        return _nas_fail("bad_path", "Path not allowed", "路径不允许")
+    try:
+        offset = max(0, int(request.args.get("offset", 0)))
+        listing = nas_files.list_dir(path, offset=offset)
+    except nas_files.FileOpError as e:
+        return _nas_fail(e.code, str(e), "读取目录失败")
+    except ValueError:
+        return _nas_fail("bad_path", "Bad offset", "参数错误")
+    listing["status"] = "ok"
+    listing["path"] = path
+    try:
+        listing["volume"] = nas_files.volume_of(path)
+    except OSError:
+        pass
+    return jsonify(listing)
+
+
+@flask_app.route("/api/v1/nas/files/check.json", methods=['POST'])
+@api_auth_required
+def nas_files_check_api():
+    p = request.get_json() or {}
+    dest = _nas_jail(p.get("dest_dir", ""))
+    if dest is None:
+        return _nas_fail("bad_path", "Path not allowed", "路径不允许")
+    existing = []
+    for name in (p.get("names") or [])[:2000]:
+        try:
+            parts = nas_files.safe_relpath(name)
+        except nas_files.PathJailError:
+            continue
+        if os.path.lexists(os.path.join(dest, *parts)):
+            existing.append(name)
+    return jsonify({"status": "ok", "existing": existing})
+
+
+@flask_app.route("/api/v1/nas/files/mkdir.json", methods=['POST'])
+@api_auth_required
+def nas_files_mkdir_api():
+    p = request.get_json() or {}
+    parent = _nas_jail(p.get("path", ""))
+    if parent is None:
+        return _nas_fail("bad_path", "Path not allowed", "路径不允许")
+    try:
+        nas_files.make_dir(parent, p.get("name", ""))
+    except nas_files.FileOpError as e:
+        return _nas_fail(e.code, str(e), "创建文件夹失败")
+    return jsonify({"status": "ok"})
+
+
+@flask_app.route("/api/v1/nas/files/rename.json", methods=['POST'])
+@api_auth_required
+def nas_files_rename_api():
+    p = request.get_json() or {}
+    path = _nas_jail(p.get("path", ""))
+    if path is None or path in nas_manager.managed_mount_roots():
+        return _nas_fail("bad_path", "Path not allowed", "路径不允许")
+    try:
+        nas_files.rename(path, p.get("new_name", ""))
+    except nas_files.FileOpError as e:
+        return _nas_fail(e.code, str(e), "重命名失败")
+    return jsonify({"status": "ok"})
+
+
+def _nas_collect_sources(p):
+    """Jail every source path in a move/copy/delete request; None on any
+    violation (all-or-nothing — partial batches surprise users)."""
+    sources = []
+    for raw in (p.get("sources") or p.get("paths") or [])[:500]:
+        path = _nas_jail(raw)
+        if path is None or path in nas_manager.managed_mount_roots():
+            return None
+        sources.append(path)
+    return sources or None
+
+
+@flask_app.route("/api/v1/nas/files/move.json", methods=['POST'])
+@api_auth_required
+def nas_files_move_api():
+    p = request.get_json() or {}
+    sources = _nas_collect_sources(p)
+    dest = _nas_jail(p.get("dest_dir", ""))
+    if sources is None or dest is None:
+        return _nas_fail("bad_path", "Path not allowed", "路径不允许")
+    cross = [s for s in sources if not nas_files.same_filesystem(s, dest)]
+    if not cross:
+        try:
+            for src in sources:
+                nas_files.move_entry(src, dest)
+        except nas_files.FileOpError as e:
+            return _nas_fail(e.code, str(e), "移动失败")
+        return jsonify({"status": "ok"})
+    job_id, err = nas_jobs.submit(
+        "move", "Move {} item(s)".format(len(sources)),
+        "移动 {} 项".format(len(sources)),
+        lambda h: nas_files.copy_tree_runner(h, sources, dest,
+                                             delete_src=True),
+        meta={"dest": dest})
+    if err:
+        return _nas_fail(err["code"], "Another job is running", "已有任务在运行")
+    return jsonify({"status": "ok", "job_id": job_id})
+
+
+@flask_app.route("/api/v1/nas/files/copy.json", methods=['POST'])
+@api_auth_required
+def nas_files_copy_api():
+    p = request.get_json() or {}
+    sources = _nas_collect_sources(p)
+    dest = _nas_jail(p.get("dest_dir", ""))
+    if sources is None or dest is None:
+        return _nas_fail("bad_path", "Path not allowed", "路径不允许")
+    job_id, err = nas_jobs.submit(
+        "copy", "Copy {} item(s)".format(len(sources)),
+        "复制 {} 项".format(len(sources)),
+        lambda h: nas_files.copy_tree_runner(h, sources, dest),
+        meta={"dest": dest})
+    if err:
+        return _nas_fail(err["code"], "Another job is running", "已有任务在运行")
+    return jsonify({"status": "ok", "job_id": job_id})
+
+
+@flask_app.route("/api/v1/nas/files/delete.json", methods=['POST'])
+@api_session_strict
+def nas_files_delete_api():
+    p = request.get_json() or {}
+    sources = _nas_collect_sources(p)
+    if sources is None:
+        return _nas_fail("bad_path", "Path not allowed", "路径不允许")
+    total_items = 0
+    for src in sources:
+        items, _size = nas_files.tree_measure(src)
+        total_items += items
+        if total_items > nas_files.INLINE_DELETE_LIMIT:
+            break
+    if total_items <= nas_files.INLINE_DELETE_LIMIT:
+        try:
+            for src in sources:
+                nas_files.delete_tree(src)
+        except OSError as e:
+            return _nas_fail("io_error", str(e), "删除失败")
+        pcat_logger.logger.info("NAS: deleted %s item(s) by %s",
+                                len(sources), request.remote_addr)
+        return jsonify({"status": "ok"})
+
+    def _runner(h):
+        h.set_progress(items_total=total_items, message="deleting")
+        done = [0]
+
+        def _cb(count):
+            done[0] = count
+            h.set_progress(items_done=count)
+            h.check_cancel()
+        for src in sources:
+            nas_files.delete_tree(src, progress_cb=_cb)
+    job_id, err = nas_jobs.submit(
+        "delete", "Delete {} item(s)".format(len(sources)),
+        "删除 {} 项".format(len(sources)), _runner)
+    if err:
+        return _nas_fail(err["code"], "Another job is running", "已有任务在运行")
+    pcat_logger.logger.info("NAS: delete job %s (%s sources) by %s", job_id,
+                            len(sources), request.remote_addr)
+    return jsonify({"status": "ok", "job_id": job_id})
+
+
+@flask_app.route("/api/v1/nas/files/upload", methods=['POST'])
+@api_auth_required
+def nas_files_upload_api():
+    """Streaming upload: metadata rides the QUERY STRING and the file is the
+    RAW request body (not multipart). Deliberate: werkzeug's multipart parser
+    spools large parts to /tmp, which is RAM on this device — the raw body
+    streams straight into a .part file on the destination filesystem."""
+    dest = _nas_jail(request.args.get("dest", ""))
+    if dest is None:
+        return _nas_fail("bad_path", "Path not allowed", "路径不允许")
+    try:
+        parts = nas_files.safe_relpath(request.args.get("relpath", ""))
+    except nas_files.PathJailError:
+        return _nas_fail("bad_path", "Invalid file path", "无效文件路径")
+    conflict = request.args.get("conflict", "fail")
+    if conflict not in ("fail", "overwrite", "rename"):
+        return _nas_fail("bad_action", "Invalid conflict mode", "无效参数")
+    directory = dest
+    if len(parts) > 1:
+        directory = os.path.join(dest, *parts[:-1])
+        # Jail BEFORE makedirs: realpath resolves any existing symlink in the
+        # middle of the relpath, so a link pointing out of the jail fails
+        # here and never causes directory creation outside it.
+        directory = _nas_jail(directory)
+        if directory is None:
+            return _nas_fail("bad_path", "Path not allowed", "路径不允许")
+        try:
+            os.makedirs(directory, exist_ok=True)
+        except OSError as e:
+            return _nas_fail("io_error", str(e), "创建目录失败")
+    max_bytes = int(pcat_config.get_user_config_key(
+        "nas_upload_max_bytes", 16 * 1024 * 1024 * 1024))
+    try:
+        out = nas_files.write_stream(
+            directory, parts[-1], request.stream, max_bytes,
+            declared_size=request.content_length, conflict=conflict)
+    except nas_files.FileOpError as e:
+        return _nas_fail(e.code, str(e), "上传失败")
+    except OSError as e:
+        return _nas_fail("io_error", str(e), "上传失败")
+    out["status"] = "ok"
+    return jsonify(out)
+
+
+@flask_app.route("/api/v1/nas/files/download", methods=['GET'])
+@api_auth_required
+def nas_files_download_api():
+    path = _nas_jail(request.args.get("path", ""))
+    if path is None or not os.path.isfile(path):
+        return _nas_fail("bad_path", "Path not allowed", "路径不允许", 404)
+    # inline=1: browser can render the body (image/video/pdf preview). Default
+    # is attachment so a bare link still downloads. conditional=True gives
+    # Range support (video scrubbing over SMB-less HTTP).
+    inline = str(request.args.get("inline", "")).lower() in ("1", "true", "yes")
+    return send_file(path, as_attachment=not inline,
+                     download_name=os.path.basename(path), conditional=True)
+
+
+@flask_app.route("/api/v1/nas/files/archive", methods=['GET'])
+@api_auth_required
+def nas_files_archive_api():
+    paths = []
+    for raw in request.args.getlist("path")[:200]:
+        p = _nas_jail(raw)
+        if p is None:
+            return _nas_fail("bad_path", "Path not allowed", "路径不允许", 404)
+        paths.append(p)
+    if not paths:
+        return _nas_fail("bad_path", "No paths", "缺少路径", 404)
+    name = request.args.get("name") or \
+        os.path.basename(paths[0].rstrip("/")) or "download"
+    name = re.sub(r"[^A-Za-z0-9 ._一-鿿-]", "_", name)[:64]
+    rsp = Response(stream_with_context(nas_files.zip_stream(paths)),
+                   mimetype="application/zip", direct_passthrough=True)
+    rsp.headers['Content-Disposition'] = \
+        "attachment; filename*=UTF-8''{}.zip".format(
+            urllib.parse.quote(name))
+    rsp.headers['Cache-Control'] = 'no-store'
+    return rsp
+
+
+@flask_app.route("/api/v1/nas/jobs.json", methods=['GET'])
+@api_auth_required
+def nas_jobs_api():
+    return jsonify({"status": "ok", "jobs": nas_jobs.list_jobs()})
+
+
+@flask_app.route("/api/v1/nas/jobs.json", methods=['POST'])
+@api_auth_required
+def nas_jobs_action_api():
+    p = request.get_json() or {}
+    action, job_id = p.get("action"), p.get("id", "")
+    if action == "cancel":
+        out = nas_jobs.cancel(job_id)
+    elif action == "dismiss":
+        out = nas_jobs.dismiss(job_id)
+    else:
+        return _nas_fail("bad_action", "Invalid action", "无效操作")
+    if out["code"] != "ok":
+        return _nas_fail(out["code"], "Job operation failed", "任务操作失败")
+    return nas_jobs_api()
+
+
+@flask_app.route("/api/v1/nas/shares.json", methods=['GET'])
+@api_auth_required
+def nas_shares_api():
+    return jsonify({"status": "ok",
+                    "samba": nas_manager.samba_state(),
+                    "users": nas_manager.list_smb_users(),
+                    "shares": nas_manager.list_shares()})
+
+
+@flask_app.route("/api/v1/nas/shares.json", methods=['POST'])
+@api_auth_required
+def nas_shares_save_api():
+    p = request.get_json() or {}
+    action = p.get("action")
+    if action == "delete":
+        # Deletion is strict-tier: enforce a real session inline (this route
+        # is std so the create/update path stays mini-display-compatible).
+        if 'username' not in session:
+            return jsonify({"status": "failed",
+                            "message": "Login required"}), 401
+        out = nas_manager.delete_share(p.get("id", ""))
+    elif action in ("create", "update"):
+        out = nas_manager.upsert_share(
+            p.get("id") if action == "update" else None,
+            p.get("name", ""), p.get("path", ""),
+            mode=p.get("mode", "guest"),
+            users=[u for u in (p.get("users") or []) if isinstance(u, str)],
+            read_only=bool(p.get("read_only")),
+            http_browse=bool(p.get("http_browse")))
+    else:
+        return _nas_fail("bad_action", "Invalid action", "无效操作")
+    if not out.get("ok"):
+        return _nas_fail(out.get("code", "error"),
+                         out.get("message", "failed"), "共享配置失败")
+    pcat_logger.logger.info("NAS: share %s by %s", action,
+                            request.remote_addr)
+    return nas_shares_api()
+
+
+@flask_app.route("/api/v1/nas/share_users.json", methods=['POST'])
+@api_session_strict
+def nas_share_users_api():
+    p = request.get_json() or {}
+    action = p.get("action")
+    name = p.get("name", "")
+    if action in ("add", "password"):
+        out = nas_manager.set_smb_user(name, p.get("password", ""))
+    elif action == "remove":
+        out = nas_manager.delete_smb_user(name)
+    else:
+        return _nas_fail("bad_action", "Invalid action", "无效操作")
+    if not out.get("ok"):
+        return _nas_fail(out.get("code", "error"),
+                         out.get("message", "failed"), "用户操作失败")
+    pcat_logger.logger.info("NAS: smb user %s %s by %s", action, name,
+                            request.remote_addr)
+    return nas_shares_api()
+
+
+@flask_app.route("/api/v1/nas/samba.json", methods=['POST'])
+@api_auth_required
+def nas_samba_api():
+    p = request.get_json() or {}
+    out = nas_manager.samba_service(p.get("action", ""))
+    if not out.get("ok"):
+        return _nas_fail(out.get("code", "error"),
+                         out.get("message", "failed"), "服务操作失败")
+    return nas_shares_api()
+
+
+@flask_app.route("/public/share/<share_name>/", defaults={"subpath": ""})
+@flask_app.route("/public/share/<share_name>/<path:subpath>")
+def public_share_action(share_name, subpath):
+    """Read-only, no-login browse/download of shares the user explicitly
+    flagged public (pcat_http_public). GET-only; 404 for everything that is
+    not an opted-in share; realpath-jailed to the share root so neither
+    "..%2f" nor an in-share symlink can leave it. No zip here — an
+    unauthenticated tar-pit would be a CPU DoS surface."""
+    roots = nas_manager.public_http_roots()
+    root = roots.get(share_name)
+    if root is None:
+        _flask_abort(404)
+    try:
+        path = nas_files.resolve_jailed(os.path.join(root, subpath), [root])
+    except nas_files.PathJailError:
+        _flask_abort(404)
+    if os.path.isfile(path):
+        rsp = send_file(path, as_attachment=False,
+                        download_name=os.path.basename(path),
+                        conditional=True)
+        rsp.headers['Cache-Control'] = 'no-store'
+        return rsp
+    if not os.path.isdir(path):
+        _flask_abort(404)
+    try:
+        listing = nas_files.list_dir(path)
+    except nas_files.FileOpError:
+        _flask_abort(404)
+    rel = os.path.relpath(path, root)
+    crumbs = [] if rel == "." else rel.split(os.sep)
+    rsp = make_response(render_template(
+        "public_share.html", share_name=share_name, crumbs=crumbs,
+        entries=listing["entries"], truncated=listing["truncated"]))
+    rsp.headers['Cache-Control'] = 'no-store'
+    return rsp
+
+
+# ─── NAS phase 2/3: partitions, backup, sync, remotes, share links ───────────
+
+@flask_app.route("/api/v1/nas/partitions.json", methods=['GET'])
+@api_auth_required
+def nas_partitions_api():
+    dev = request.args.get("dev", "")
+    if not re.match(r"^/dev/[a-z0-9]+$", dev):
+        return _nas_fail("bad_dev", "Invalid device", "无效设备")
+    table = nas_manager.partition_table(dev)
+    if table is None:
+        return _nas_fail("read_failed", "Could not read partition table",
+                         "读取分区表失败")
+    table["status"] = "ok"
+    table["dev"] = dev
+    # Whole-disk protected (eMMC) still true; annotate each partition so the
+    # UI can format/delete data partitions while locking boot/root.
+    table["protected"] = nas_manager.is_protected(os.path.basename(dev))
+    for part in table.get("parts") or []:
+        pdev = nas_manager.part_device_path(dev, part["num"])
+        part["protected"] = nas_manager.is_protected(os.path.basename(pdev))
+        part["dev"] = pdev
+    return jsonify(table)
+
+
+@flask_app.route("/api/v1/nas/partitions.json", methods=['POST'])
+@api_session_strict
+def nas_partitions_save_api():
+    p = request.get_json() or {}
+    action = p.get("action")
+    dev = p.get("dev", "")
+    confirm = p.get("confirm", "")
+    if not re.match(r"^/dev/[a-z0-9]+$", dev):
+        return _nas_fail("bad_dev", "Invalid device", "无效设备")
+    try:
+        if action == "use_free":
+            disk_path = nas_manager.partition_guard(dev, "create_free",
+                                                    confirm=confirm)
+            table = nas_manager.partition_table(disk_path)
+            steps, part_dev = nas_manager.build_use_free_plan(disk_path, table)
+            steps += nas_manager.build_format(part_dev, "ext4",
+                                              nas_manager.DATA_PART_LABEL)
+            runner = lambda h: nas_manager.run_partition_job(
+                h, steps, part_dev=part_dev, automount_after=True)
+            label, label_cn = "Create data volume on " + disk_path, \
+                "在 " + disk_path + " 上创建数据卷"
+        elif action == "format":
+            disk_path = nas_manager.partition_guard(dev, "format",
+                                                    confirm=confirm)
+            steps = nas_manager.build_format(dev, p.get("fs", "ext4"),
+                                             p.get("label") or None)
+            # Automount after format so eMMC data partitions (and USB/NVMe)
+            # become usable without a second click.
+            runner = lambda h: nas_manager.run_partition_job(
+                h, steps, part_dev=dev, automount_after=True)
+            label, label_cn = "Format " + dev, "格式化 " + dev
+        elif action == "delete":
+            disk_path = nas_manager.partition_guard(dev, "delete",
+                                                    confirm=confirm)
+            num = int(p.get("num", 0))
+            nas_manager.disable_automount(dev, unmount_now=False)
+            steps = nas_manager.build_delete(disk_path, num)
+            runner = lambda h: nas_manager.run_partition_job(h, steps)
+            label, label_cn = "Delete partition " + dev, "删除分区 " + dev
+        elif action == "create":
+            disk_path = nas_manager.partition_guard(dev, "create",
+                                                    confirm=confirm)
+            table = nas_manager.partition_table(disk_path)
+            steps = nas_manager.build_create(
+                disk_path, int(p.get("start_b", 0)), int(p.get("end_b", 0)),
+                table)
+            runner = lambda h: nas_manager.run_partition_job(h, steps)
+            label, label_cn = "Create partition on " + disk_path, \
+                "在 " + disk_path + " 上创建分区"
+        elif action == "mklabel":
+            # Wipes the whole disk: guarded as a whole-disk op (nothing
+            # mounted, never a protected disk) and gated behind the typed
+            # device name like every other destructive action.
+            disk_path = nas_manager.partition_guard(dev, "create",
+                                                    confirm=confirm)
+            steps = nas_manager.build_mklabel(disk_path,
+                                              p.get("table", "gpt"))
+            runner = lambda h: nas_manager.run_partition_job(h, steps)
+            label = "New {} partition table on {}".format(
+                p.get("table", "gpt").upper(), disk_path)
+            label_cn = "在 {} 上新建 {} 分区表".format(
+                disk_path, p.get("table", "gpt").upper())
+        elif action == "resize":
+            disk_path = nas_manager.partition_guard(dev, "resize",
+                                                    confirm=confirm)
+            table = nas_manager.partition_table(disk_path)
+            num = int(p.get("num", 0))
+            part = next((x for x in table["parts"] if x["num"] == num), None)
+            if part is None:
+                return _nas_fail("bad_dev", "Unknown partition", "未知分区")
+            if part["fs"] not in ("ext4", None, ""):
+                return _nas_fail("bad_fs",
+                                 "Only ext4 can be resized", "仅支持调整 ext4")
+            new_end = int(p.get("new_end_b", 0))
+            grow = new_end > part["end"]
+            if grow:
+                region_ok = any(r["start"] <= part["end"] + 1 and
+                                new_end <= r["end"] for r in table["free"])
+                if not region_ok:
+                    return _nas_fail("overlap", "No free space after partition",
+                                     "分区后无可用空间")
+                steps, stdin = nas_manager.build_resize(
+                    disk_path, dev, num, new_end, grow=True)
+            else:
+                new_size = new_end - part["start"]
+                if new_size < nas_manager.MIN_PART_BYTES:
+                    return _nas_fail("too_small", "Too small", "太小")
+                steps, stdin = nas_manager.build_resize(
+                    disk_path, dev, num, new_end, grow=False)
+                steps[1][2] = "{}K".format(max(1, new_size // 1024))
+            runner = lambda h: nas_manager.run_partition_job(
+                h, steps, stdin_for_parted=stdin, part_dev=dev)
+            label, label_cn = "Resize " + dev, "调整 " + dev
+        else:
+            return _nas_fail("bad_action", "Invalid action", "无效操作")
+    except nas_manager.GuardError as e:
+        return _nas_fail(e.code, str(e), "已被安全检查拒绝")
+    except (ValueError, TypeError):
+        return _nas_fail("bad_args", "Invalid arguments", "参数错误")
+    job_id, err = nas_jobs.submit(
+        "partition" if action in ("use_free", "create", "delete") else action,
+        label, label_cn, runner, meta={"dev": dev},
+        exclusive_key="disk:" + os.path.basename(
+            nas_manager.parent_disk(os.path.basename(dev))))
+    if err:
+        return _nas_fail(err["code"], "Another disk job is running",
+                         "已有磁盘任务在运行")
+    pcat_logger.logger.info("NAS: partition %s %s job=%s by %s", action, dev,
+                            job_id, request.remote_addr)
+    return jsonify({"status": "ok", "job_id": job_id})
+
+
+@flask_app.route("/api/v1/nas/backup.json", methods=['GET'])
+@api_auth_required
+def nas_backup_api():
+    data = nas_manager.backup_status()
+    data["status"] = "ok"
+    return jsonify(data)
+
+
+@flask_app.route("/api/v1/nas/backup.json", methods=['POST'])
+@api_session_strict
+def nas_backup_run_api():
+    st = nas_manager.backup_status()
+    if not st["ready"]:
+        return _nas_fail("not_ready", "Need a mounted SD card and NVMe",
+                         "需要已挂载的 SD 卡和 NVMe")
+    src, dst = st["sd"]["mountpoint"], st["dest"]
+    try:
+        os.makedirs(dst, exist_ok=True)
+    except OSError as e:
+        return _nas_fail("io_error", str(e), "创建目录失败")
+    job = {"id": "sbackup00", "src": src, "dst": dst, "delete": False}
+    job_id, err = nas_jobs.submit(
+        "backup", "SD card → NVMe backup", "SD 卡 → NVMe 备份",
+        lambda h: nas_manager.run_rsync_now(h, job),
+        meta={"dest": dst})
+    if err:
+        return _nas_fail(err["code"], "Another job is running", "已有任务在运行")
+    return jsonify({"status": "ok", "job_id": job_id})
+
+
+@flask_app.route("/api/v1/nas/sync.json", methods=['GET'])
+@api_auth_required
+def nas_sync_api():
+    return jsonify({"status": "ok", "jobs": nas_manager.list_sync_jobs()})
+
+
+@flask_app.route("/api/v1/nas/sync.json", methods=['POST'])
+@api_auth_required
+def nas_sync_save_api():
+    p = request.get_json() or {}
+    action = p.get("action")
+    if action == "delete":
+        if 'username' not in session:
+            return jsonify({"status": "failed",
+                            "message": "Login required"}), 401
+        out = nas_manager.delete_sync_job(p.get("id", ""))
+    elif action in ("create", "update"):
+        out = nas_manager.save_sync_job(
+            p.get("id") if action == "update" else None, p)
+    elif action in ("enable", "disable"):
+        out = nas_manager.save_sync_job(p.get("id", ""), dict(
+            next((j for j in nas_manager.list_sync_jobs()
+                  if j.get("id") == p.get("id")), {}),
+            enabled=(action == "enable")))
+    elif action == "run_now":
+        job = next((j for j in nas_manager.list_sync_jobs()
+                    if j.get("id") == p.get("id")), None)
+        if job is None:
+            return _nas_fail("not_found", "Unknown job", "未知任务")
+        job_id, err = nas_jobs.submit(
+            "rsync", "Sync: " + job.get("name", job["id"]),
+            "同步: " + job.get("name", job["id"]),
+            lambda h: nas_manager.run_rsync_now(h, job),
+            meta={"dest": job["dst"]}, exclusive_key="rsync:" + job["id"])
+        if err:
+            return _nas_fail(err["code"], "Already running", "任务已在运行")
+        return jsonify({"status": "ok", "job_id": job_id,
+                        "jobs": nas_manager.list_sync_jobs()})
+    else:
+        return _nas_fail("bad_action", "Invalid action", "无效操作")
+    if not out.get("ok"):
+        return _nas_fail(out.get("code", "error"),
+                         out.get("message", "failed"), "同步任务配置失败")
+    return nas_sync_api()
+
+
+@flask_app.route("/api/v1/nas/sync_log.json", methods=['GET'])
+@api_auth_required
+def nas_sync_log_api():
+    return jsonify({"status": "ok",
+                    "log": nas_manager.sync_log_tail(
+                        request.args.get("id", ""))})
+
+
+@flask_app.route("/api/v1/nas/remotes.json", methods=['GET'])
+@api_auth_required
+def nas_remotes_api():
+    return jsonify({"status": "ok",
+                    "remotes": [nas_manager._remote_public(r)
+                                for r in nas_manager.list_remotes()]})
+
+
+@flask_app.route("/api/v1/nas/remotes.json", methods=['POST'])
+@api_session_strict
+def nas_remotes_save_api():
+    p = request.get_json() or {}
+    action = p.get("action")
+    if action in ("create", "update"):
+        out = nas_manager.save_remote(
+            p.get("id") if action == "update" else None, p)
+    elif action == "delete":
+        out = nas_manager.delete_remote(p.get("id", ""))
+    elif action in ("mount", "unmount", "test"):
+        remote = next((r for r in nas_manager.list_remotes()
+                       if r.get("id") == p.get("id")), None)
+        if remote is None:
+            return _nas_fail("not_found", "Unknown remote", "未知远程")
+        if action == "unmount":
+            out = nas_manager.unmount_remote(remote)
+        else:
+            out = nas_manager.mount_remote(remote)
+            if action == "test" and out.get("ok"):
+                try:
+                    os.listdir(remote["mountpoint"])
+                except OSError as e:
+                    out = {"ok": False, "code": "io_error", "message": str(e)}
+    else:
+        return _nas_fail("bad_action", "Invalid action", "无效操作")
+    if not out.get("ok"):
+        return _nas_fail(out.get("code", "error"),
+                         out.get("message", "failed"), "远程挂载操作失败")
+    pcat_logger.logger.info("NAS: remote %s by %s", action,
+                            request.remote_addr)
+    return nas_remotes_api()
+
+
+@flask_app.route("/api/v1/nas/links.json", methods=['GET'])
+@api_auth_required
+def nas_links_api():
+    return jsonify({"status": "ok",
+                    "links": [nas_manager.link_public(l)
+                              for l in nas_manager.list_links()]})
+
+
+@flask_app.route("/api/v1/nas/links.json", methods=['POST'])
+@api_session_strict
+def nas_links_save_api():
+    p = request.get_json() or {}
+    action = p.get("action")
+    if action == "create":
+        path = _nas_jail(p.get("path", ""))
+        if path is None:
+            return _nas_fail("bad_path", "Path not allowed", "路径不允许")
+        out = nas_manager.create_link(path, p.get("password") or None)
+        if not out.get("ok"):
+            return _nas_fail(out.get("code", "error"),
+                             out.get("message", "failed"), "创建链接失败")
+        pcat_logger.logger.info("NAS: share link created for %s by %s",
+                                path, request.remote_addr)
+        return jsonify({"status": "ok", "link": out["link"],
+                        "links": [nas_manager.link_public(l)
+                                  for l in nas_manager.list_links()]})
+    if action == "delete":
+        nas_manager.delete_link(p.get("token", ""))
+        return nas_links_api()
+    return _nas_fail("bad_action", "Invalid action", "无效操作")
+
+
+def _link_session_ok(token):
+    return token in (session.get("nas_link_ok") or [])
+
+
+@flask_app.route("/s/<token>", defaults={"subpath": ""},
+                 methods=['GET', 'POST'])
+@flask_app.route("/s/<token>/", defaults={"subpath": ""},
+                 methods=['GET', 'POST'])
+@flask_app.route("/s/<token>/<path:subpath>", methods=['GET'])
+def public_link_action(token, subpath):
+    """Nextcloud-style public share link: /s/<token> serves a file directly
+    or browses a folder (reusing the public_share template — its links are
+    all relative). Optional password: POST unlocks it into the visitor's
+    (anonymous) session. Read-only, jailed to the linked path."""
+    link = nas_manager.find_link(token)
+    if link is None:
+        _flask_abort(404)
+    root = os.path.realpath(link["path"])
+    if not os.path.exists(root):
+        _flask_abort(404)
+    if link.get("password_hash"):
+        if request.method == 'POST':
+            if nas_manager.check_link_password(link,
+                                               request.form.get("password")):
+                ok = session.get("nas_link_ok") or []
+                session["nas_link_ok"] = ok + [token]
+                return redirect(request.path if request.path.endswith(token)
+                                else "/s/" + token)
+            return render_template("public_link_password.html",
+                                   name=link["name"], error=True), 401
+        if not _link_session_ok(token):
+            return render_template("public_link_password.html",
+                                   name=link["name"], error=False)
+    if link["type"] == "file":
+        rsp = send_file(root, as_attachment=True,
+                        download_name=link["name"], conditional=True)
+        rsp.headers['Cache-Control'] = 'no-store'
+        return rsp
+    try:
+        path = nas_files.resolve_jailed(os.path.join(root, subpath), [root])
+    except nas_files.PathJailError:
+        _flask_abort(404)
+    if os.path.isfile(path):
+        rsp = send_file(path, as_attachment=False,
+                        download_name=os.path.basename(path),
+                        conditional=True)
+        rsp.headers['Cache-Control'] = 'no-store'
+        return rsp
+    if not os.path.isdir(path):
+        _flask_abort(404)
+    try:
+        listing = nas_files.list_dir(path)
+    except nas_files.FileOpError:
+        _flask_abort(404)
+    rel = os.path.relpath(path, root)
+    crumbs = [] if rel == "." else rel.split(os.sep)
+    rsp = make_response(render_template(
+        "public_share.html", share_name=link["name"], crumbs=crumbs,
+        entries=listing["entries"], truncated=listing["truncated"]))
+    rsp.headers['Cache-Control'] = 'no-store'
+    return rsp
+
+
+_PUBLIC_ENDPOINTS = _PUBLIC_ENDPOINTS | {"public_link_action"}
+_CSRF_EXEMPT_ENDPOINTS = _CSRF_EXEMPT_ENDPOINTS | {"public_link_action"}
+
+
+# ─── LXC: containers / setup automation / migration (hidden page) ────────────
+# Backend: pcat_util/lxc_manager. The /lxc page has NO navbar entry by
+# design — it is reachable only by typing the URL. Conventions match NAS:
+# POSTs return the fresh GET payload where cheap; anything that mutates the
+# system uses @api_session_strict (no localhost bypass); long work runs
+# through nas_jobs (kinds lxc_create / lxc_storage / lxc_migrate) so the
+# existing jobs endpoint and socket push serve this page too.
+
+from pcat_util import lxc_manager
+
+
+@flask_app.route("/lxc")
+def lxc_action():
+    if 'username' not in session:
+        return redirect(f"/login?next={request.path}")
+    if not is_photonicat2:
+        return render_error_page(404)
+    c_locale = current_locale()
+    locales = _locales.get_locales("lxc", c_locale)
+    locales.update(base_locales())
+    return render_template("lxc.html", locales=locales)
+
+
+def _lxc_fail(code, detail=""):
+    return jsonify({"status": "failed", "code": code,
+                    "message": detail or code})
+
+
+@flask_app.route("/api/v1/lxc/health.json", methods=['GET'])
+@api_auth_required
+def lxc_health_api():
+    data = lxc_manager.preflight()
+    data["status"] = "ok"
+    return jsonify(data)
+
+
+@flask_app.route("/api/v1/lxc/fix.json", methods=['POST'])
+@api_session_strict
+def lxc_fix_api():
+    what = (request.json or {}).get("what", "")
+    res = lxc_manager.apply_fix(what)
+    if res.get("code") not in ("ok", "partial"):
+        return _lxc_fail(res.get("code", "failed"), res.get("detail", ""))
+    data = lxc_manager.preflight()
+    data["status"] = "ok"
+    data["fix_result"] = res
+    return jsonify(data)
+
+
+@flask_app.route("/api/v1/lxc/containers.json", methods=['GET'])
+@api_auth_required
+def lxc_containers_api():
+    with_sizes = request.args.get("sizes") == "1"
+    return jsonify({"status": "ok",
+                    "containers": lxc_manager.list_containers(with_sizes)})
+
+
+@flask_app.route("/api/v1/lxc/container.json", methods=['POST'])
+@api_session_strict
+def lxc_container_api():
+    body = request.json or {}
+    action = body.get("action", "")
+    name = body.get("name", "")
+    if action == "autostart":
+        res = lxc_manager.set_autostart(name, bool(body.get("enabled")))
+    elif action == "network":
+        res = lxc_manager.set_network(name, body.get("mode", ""))
+    elif action == "ipconfig":
+        res = lxc_manager.set_ip_config(name, body)
+    else:
+        res = lxc_manager.container_action(
+            action, name, {"newname": body.get("newname", "")})
+    if res["code"] != "ok":
+        return _lxc_fail(res["code"], res.get("detail", ""))
+    return jsonify({"status": "ok",
+                    "containers": lxc_manager.list_containers()})
+
+
+@flask_app.route("/api/v1/lxc/create.json", methods=['POST'])
+@api_session_strict
+def lxc_create_api():
+    body = request.json or {}
+    job_id, err = lxc_manager.create_container(
+        body.get("name", ""), body.get("dist", ""),
+        body.get("release", ""), body.get("arch") or None,
+        storage=body.get("storage") or None,
+        vmid=body.get("vmid") or None)
+    if err:
+        return _lxc_fail(err["code"], err.get("detail", ""))
+    return jsonify({"status": "ok", "job_id": job_id})
+
+
+@flask_app.route("/api/v1/lxc/stats.json", methods=['GET'])
+@api_auth_required
+def lxc_stats_api():
+    res = lxc_manager.container_stats(request.args.get("name", ""))
+    if res["code"] != "ok":
+        return _lxc_fail(res["code"])
+    res["status"] = "ok"
+    return jsonify(res)
+
+
+@flask_app.route("/api/v1/lxc/backups.json", methods=['GET'])
+@api_auth_required
+def lxc_backups_api():
+    return jsonify({"status": "ok", "backups": lxc_manager.backup_list()})
+
+
+@flask_app.route("/api/v1/lxc/backups.json", methods=['POST'])
+@api_session_strict
+def lxc_backups_post_api():
+    body = request.json or {}
+    action = body.get("action", "")
+    if action == "backup":
+        # Timestamp is stamped here, not in lxc_manager: the module stays
+        # clock-free so its jobs are reproducible in tests.
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        job_id, err = lxc_manager.backup_container(body.get("name", ""), stamp)
+    elif action == "restore":
+        job_id, err = lxc_manager.restore_backup(
+            body.get("file", ""), body.get("newname") or None)
+    elif action == "delete":
+        res = lxc_manager.backup_delete(body.get("file", ""))
+        if res["code"] != "ok":
+            return _lxc_fail(res["code"], res.get("detail", ""))
+        return jsonify({"status": "ok", "backups": lxc_manager.backup_list()})
+    else:
+        return _lxc_fail("bad_action")
+    if err:
+        return _lxc_fail(err["code"], err.get("detail", ""))
+    return jsonify({"status": "ok", "job_id": job_id})
+
+
+@flask_app.route("/api/v1/lxc/config.json", methods=['GET'])
+@api_auth_required
+def lxc_config_api():
+    res = lxc_manager.get_config(request.args.get("name", ""))
+    if res["code"] != "ok":
+        return _lxc_fail(res["code"])
+    return jsonify({"status": "ok", "text": res["text"]})
+
+
+@flask_app.route("/api/v1/lxc/config.json", methods=['POST'])
+@api_session_strict
+def lxc_config_post_api():
+    body = request.json or {}
+    res = lxc_manager.save_config(body.get("name", ""),
+                                  body.get("text", ""))
+    if res["code"] != "ok":
+        return _lxc_fail(res["code"], res.get("detail", ""))
+    return jsonify({"status": "ok"})
+
+
+@flask_app.route("/api/v1/lxc/limits.json", methods=['POST'])
+@api_session_strict
+def lxc_limits_api():
+    body = request.json or {}
+    res = lxc_manager.set_limits(body.get("name", ""),
+                                 body.get("memory_mb", 0),
+                                 body.get("cpu_cores", 0))
+    if res["code"] != "ok":
+        return _lxc_fail(res["code"], res.get("detail", ""))
+    return jsonify({"status": "ok", "live": res.get("live", False)})
+
+
+@flask_app.route("/api/v1/lxc/clone.json", methods=['POST'])
+@api_session_strict
+def lxc_clone_api():
+    body = request.json or {}
+    job_id, err = lxc_manager.clone_container(
+        body.get("name", ""), body.get("newname", ""))
+    if err:
+        return _lxc_fail(err["code"], err.get("detail", ""))
+    return jsonify({"status": "ok", "job_id": job_id})
+
+
+@flask_app.route("/api/v1/lxc/networks.json", methods=['GET'])
+@api_auth_required
+def lxc_networks_api():
+    return jsonify({"status": "ok",
+                    "networks": lxc_manager.list_networks(),
+                    "ports": lxc_manager.physical_ports()})
+
+
+@flask_app.route("/api/v1/lxc/networks.json", methods=['POST'])
+@api_session_strict
+def lxc_networks_post_api():
+    body = request.json or {}
+    action = body.get("action", "")
+    if action == "create":
+        res = lxc_manager.create_network(
+            body.get("name", ""), port=body.get("port") or None,
+            addressing=body.get("addressing", "l2"),
+            subnet=body.get("subnet", ""))
+    elif action == "delete":
+        res = lxc_manager.delete_network(body.get("name", ""))
+    else:
+        res = {"code": "bad_action"}
+    if res["code"] != "ok":
+        return _lxc_fail(res["code"], res.get("detail", ""))
+    return jsonify({"status": "ok",
+                    "networks": lxc_manager.list_networks(),
+                    "ports": lxc_manager.physical_ports()})
+
+
+@flask_app.route("/api/v1/lxc/move.json", methods=['POST'])
+@api_session_strict
+def lxc_move_api():
+    """Move one container's disk between storage volumes (offline)."""
+    body = request.json or {}
+    dest = body.get("dest") or lxc_manager.lxcpath()
+    job_id, err = lxc_manager.move_container(body.get("name", ""), dest)
+    if err:
+        return _lxc_fail(err["code"], err.get("detail", ""))
+    return jsonify({"status": "ok", "job_id": job_id})
+
+
+@flask_app.route("/api/v1/lxc/storage.json", methods=['GET'])
+@api_auth_required
+def lxc_storage_api():
+    # `volatile` is the list a firmware upgrade would erase (rootfs on the
+    # overlay); `recommended` is where they should go instead, or null on a
+    # device whose only writable filesystem is the one a flash replaces.
+    # lxcpath_durable is the one to warn on even when `volatile` is empty: a
+    # lxcpath on the overlay is the default target for every new container,
+    # so the next one created there is lost at the next flash.
+    path = lxc_manager.lxcpath()
+    volatile = lxc_manager.volatile_containers()
+    return jsonify({"status": "ok",
+                    "lxcpath": path,
+                    "lxcpath_durable": not lxc_manager.on_overlay(path),
+                    "candidates": lxc_manager.storage_candidates(),
+                    "volatile": volatile,
+                    "durable": not volatile,
+                    "recommended": lxc_manager.default_storage()})
+
+
+@flask_app.route("/api/v1/lxc/storage.json", methods=['POST'])
+@api_session_strict
+def lxc_storage_post_api():
+    body = request.json or {}
+    job_id, err = lxc_manager.move_storage(
+        body.get("path", ""), keep_old=bool(body.get("keep_old")))
+    if err:
+        return _lxc_fail(err["code"], err.get("detail", ""))
+    return jsonify({"status": "ok", "job_id": job_id})
+
+
+@flask_app.route("/api/v1/lxc/migrate.json", methods=['GET'])
+@api_auth_required
+def lxc_migrate_info_api():
+    return jsonify({"status": "ok",
+                    "key_ready": lxc_manager.ssh_key_ready(),
+                    "pubkey": lxc_manager.ssh_pubkey()})
+
+
+@flask_app.route("/api/v1/lxc/migrate.json", methods=['POST'])
+@api_session_strict
+def lxc_migrate_api():
+    body = request.json or {}
+    action = body.get("action", "")
+    host = body.get("host", "")
+    port = body.get("port", 22)
+    user = body.get("user", "root")
+    if action == "test":
+        res = lxc_manager.test_target(host, port, user)
+        if res["code"] != "ok":
+            return _lxc_fail(res["code"], res.get("detail", ""))
+        res["status"] = "ok"
+        return jsonify(res)
+    if action == "pushkey":
+        res = lxc_manager.push_key(host, port, user,
+                                   body.get("password", ""))
+        if res["code"] != "ok":
+            return _lxc_fail(res["code"], res.get("detail", ""))
+        return jsonify({"status": "ok"})
+    if action == "go":
+        job_id, err = lxc_manager.migrate(
+            body.get("name", ""), host, port, user,
+            remote_path=body.get("remote_path") or None,
+            mode=body.get("mode", "copy"),
+            start_after=bool(body.get("start_after")))
+        if err:
+            return _lxc_fail(err["code"], err.get("detail", ""))
+        return jsonify({"status": "ok", "job_id": job_id})
+    return _lxc_fail("bad_action")

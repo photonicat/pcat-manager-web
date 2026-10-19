@@ -4,27 +4,96 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <link rel="apple-touch-icon" sizes="180x180" href="{{locales['apple_touch_icon']}}" />
+    {% if locales['favicon_32'].startswith('/oem/image/') %}
+    <!-- This device ships its own OEM icons: leave that branding alone. -->
     <link rel="icon" type="image/png" sizes="32x32" href="{{locales['favicon_32']}}" />
     <link rel="icon" type="image/png" sizes="16x16" href="{{locales['favicon_16']}}" />
     <link rel="shortcut icon" href="{{locales['favicon_ico']}}" />
-    <title>{{locales["oem_name"]}} - {{locales["config_title"]}}</title>
+    {% else %}
+    <!-- The tab icon follows the LCD colour theme (/screen), with the colour
+         in the query string so a theme change busts the cache.
+         The raster icons MUST be `alternate icon`: given a plain `rel="icon"`
+         PNG alongside an SVG, Chrome picks the PNG and the theme colour never
+         shows (verified by watching which URL it requests). `alternate` keeps
+         them as the fallback for browsers with no SVG icon support. -->
+    <link rel="alternate icon" type="image/png" sizes="32x32"
+          href="/favicon-theme.png?c={{theme_accent|replace('#','')}}" />
+    <link rel="alternate icon" type="image/png" sizes="16x16"
+          href="/favicon-theme.png?s=16&amp;c={{theme_accent|replace('#','')}}" />
+    <link rel="alternate icon" href="/favicon-theme.ico?c={{theme_accent|replace('#','')}}" />
+    <link id="favicon-svg" rel="icon" type="image/svg+xml"
+          href="/favicon-theme.svg?c={{theme_accent|replace('#','')}}" />
+    {% endif %}
+    <!-- Every page overrides page_title; the default keeps old pages sane. -->
+    <title>{{locales["oem_name"]}} - {% block page_title %}{{locales["config_title"]}}{% endblock %}</title>
+    <meta name="theme-color" content="#0ed3cf" />
+    <meta name="csrf-token" content="{{ csrf_token() }}" />
+    <!-- Night mode: apply before paint (default = browser auto).
+         The device-wide choice is inlined ahead of theme.js so an explicit
+         light/dark is known before the first paint; fetching it would mean a
+         flash of the wrong theme on every page load. -->
+    <script>
+      window.PCAT_DEVICE_THEME = {{ (device_theme if device_theme in ("light", "dark") else None)|tojson }};
+    </script>
+    <script src="/static/theme.js?v={{ cache_bust_version }}"></script>
+    <script>
+      // Install a global fetch wrapper that attaches the CSRF token to
+      // same-origin state-changing requests, so every existing fetch() call
+      // is covered without per-call edits. Runs before any page script.
+      (function () {
+        var meta = document.querySelector('meta[name="csrf-token"]');
+        var token = meta ? meta.getAttribute('content') : '';
+        var nativeFetch = window.fetch.bind(window);
+        window.fetch = function (input, init) {
+          init = init || {};
+          var method = (init.method || (typeof input !== 'string' && input && input.method) || 'GET').toUpperCase();
+          var mutating = ['POST', 'PUT', 'DELETE', 'PATCH'].indexOf(method) !== -1;
+          // only attach for same-origin requests
+          var url = (typeof input === 'string') ? input : (input && input.url) || '';
+          var sameOrigin = url === '' || url.charAt(0) === '/' || url.indexOf(window.location.origin) === 0;
+          if (mutating && sameOrigin && token) {
+            var headers = new Headers(init.headers || (typeof input !== 'string' && input && input.headers) || {});
+            if (!headers.has('X-CSRF-Token')) headers.set('X-CSRF-Token', token);
+            init.headers = headers;
+          }
+          return nativeFetch(input, init);
+        };
+      })();
+
+      // Logout via POST (the /logout route is POST-only for CSRF safety). The
+      // fetch wrapper above injects the CSRF token; on success we follow the
+      // redirect to /login. Global so the nav <a @click.prevent="logout()">
+      // works without adding a method to the body's inline Alpine x-data.
+      function logout() {
+        fetch('/logout', { method: 'POST', redirect: 'manual' })
+          .then(function () { window.location.href = '/login'; })
+          .catch(function () { window.location.href = '/login'; });
+      }
+    </script>
     {% block html_head0 %}{% endblock %}
     <style type="text/css">
       [x-cloak] {
         display: none !important;
       }
+      /* Reserve the scrollbar gutter permanently: late-loading content (e.g.
+         the /screen live frame) otherwise makes the scrollbar appear and
+         nudges every mx-auto-centered container sideways by a few px. */
+      html {
+        scrollbar-gutter: stable;
+      }
     </style>
-    <script defer src="/static/alpine-3.10.2.js?v={{ cache_bust_version }}"></script>
+    <script defer src="/static/alpine-3.15.12.js?v={{ cache_bust_version }}"></script>
     <link rel="stylesheet" href="/static/app.css?v={{ cache_bust_version }}" />
     {% block html_head %}{% endblock %}
   </head>
 
-  <body class="bg-gray-100 font-sans leading-normal tracking-normal" x-data="{ user_menu_open: false, reboot_dlg_open : false, reboot_reason: '', rebooting: false }">
+  <body class="bg-gray-100 font-sans leading-normal tracking-normal" x-data="{ user_menu_open: false, reboot_dlg_open : false, poweroff_dlg_open: false, reboot_reason: '', rebooting: false, theme_pref: (window.PcatTheme && PcatTheme.getPref()) || 'auto' }">
+    {% if not chromeless %}
     <div class="fixed top-0 z-10 w-full bg-white px-2 shadow sm:px-0">
       <div class="container mx-auto flex flex-wrap justify-between py-0 sm:py-2">
         <div class="flex">
           <a class="flex items-center font-title text-xs font-bold text-pcatgray no-underline hover:no-underline sm:text-xl truncate overflow-hidden" href="/">
-            <img src="{{locales['logo_uri']}}" class="w-4 sm:w-10" /><span class="ml-1 hidden sm:inline sm:ml-2">{{locales["oem_name"]}}</span><span class="ml-1 sm:hidden">2</span>
+            <img src="{{locales['logo_uri']}}" class="w-4 sm:w-10" /><span class="ml-1 hidden sm:inline sm:ml-2">{{locales["oem_name"]}}</span>{% if is_photonicat2 %}<span class="ml-1 sm:hidden">2</span>{% endif %}
           </a>
         </div>
         <div class="flex flex-grow items-center justify-end text-sm text-gray-500">
@@ -34,8 +103,9 @@
                  :title="$store.app.netTip($store.app.modem_mode, $store.app.net_sim_enabled, $store.app.net_route_mode === 'mobile', 'mobile')">
               <span class="font-bold" x-text="$store.app.modem_mode"
                     :style="`color:${$store.app.net_sim_enabled ? '#00274D' : '#CCCCCC'};font-size:15px;line-height:1`"></span>
-              <!-- red cross when the modem/SIM is disabled -->
-              <svg x-show="!$store.app.net_sim_enabled" class="absolute inset-0 w-full h-full pointer-events-none" viewBox="0 0 28 16" preserveAspectRatio="none">
+              <!-- red cross when the modem/SIM is disabled (xMidYMid meet keeps
+                   the same ~35° angle as the LAN/WAN/WiFi crosses) -->
+              <svg x-show="!$store.app.net_sim_enabled" class="absolute inset-0 w-full h-full pointer-events-none" viewBox="0 0 28 16" preserveAspectRatio="xMidYMid meet">
                 <line x1="4" y1="1" x2="24" y2="15" stroke="#DC2626" stroke-width="2" stroke-linecap="round"/>
               </svg>
               <div x-show="$store.app.net_active_egress === 'mobile'" style="position:absolute;bottom:-3px;left:2px;right:2px;height:2px;background:linear-gradient(to bottom, #4ADE80, #16A34A);border-radius:1px"></div>
@@ -68,38 +138,48 @@
               <!-- green underline only on the actual default-route interface -->
               <div x-show="$store.app.net_active_egress === 'wan'" style="position:absolute;bottom:-3px;left:2px;right:2px;height:2px;background:linear-gradient(to bottom, #4ADE80, #16A34A);border-radius:1px"></div>
             </div>
-            <!-- Onboard WiFi (radio0) -->
+            <!-- Onboard WiFi (radio0). The relay/green state is applied only when
+                 the STA is actually on this radio (wifiRelaying('onboard')); when
+                 the upstream is on the PCIe radio this icon shows its own AP
+                 enabled/disabled state instead. -->
             <div class="relative" x-show="$store.app.net_wifi0_exists"
-                 :title="$store.app.net_wifi0_enabled ? 'WiFi: ' + $store.app.t_net_connected : 'WiFi: ' + $store.app.t_net_disabled">
+                 :title="$store.app.wifiRelaying('onboard') ? 'Onboard WiFi: ' + $store.app.t_net_wifi_relay : ($store.app.net_wifi0_enabled ? 'Onboard WiFi: ' + $store.app.t_net_connected : 'Onboard WiFi: ' + $store.app.t_net_disabled)">
               <svg class="w-4 sm:w-6" viewBox="0 0 28 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <!-- Smart WAN: radio is relaying an upstream hotspot (STA uplink),
+                     so show a green body and NO red cross even though its AP is
+                     parked. Otherwise: dark when enabled, gray when disabled. -->
                 <path d="M4 3.5529C6.82855 1.24919 10.3597 -0.00539646 14 1.74488e-05C17.7887 1.74488e-05 21.2679 1.33068 24 3.5529L22.3333 5.62668C19.9761 3.70715 17.0335 2.66192 14 2.66668C10.8435 2.66668 7.94341 3.77601 5.66667 5.62668L4 3.5529ZM6.77719 7.01068C8.82016 5.34668 11.3707 4.44049 14 4.44446C16.7356 4.44446 19.2485 5.40534 21.2228 7.00979L19.5561 9.08445C17.9845 7.80464 16.0225 7.10781 14 7.11112C11.8957 7.11112 9.96286 7.85068 8.44386 9.08445L6.77719 7.00979V7.01068ZM9.55526 10.4685C10.8124 9.44436 12.3819 8.88659 14 8.8889C15.6835 8.8889 17.2299 9.48001 18.4447 10.4676L16.7781 12.5422C15.9922 11.9024 15.0113 11.554 14 11.5556C12.9888 11.554 12.0078 11.9024 11.2219 12.5422L9.55526 10.4676V10.4685ZM12.3333 13.9262C12.8046 13.542 13.3932 13.3326 14 13.3333C14.6313 13.3333 15.2113 13.5556 15.6667 13.9253L14 16L12.3333 13.9262Z"
-                  :fill="!$store.app.net_wifi0_enabled ? '#CCCCCC' : '#00274D'"/>
-                <line x-show="!$store.app.net_wifi0_enabled" x1="4" y1="1" x2="24" y2="15" stroke="#DC2626" stroke-width="2" stroke-linecap="round"/>
+                  :fill="$store.app.wifiRelaying('onboard') ? '#16A34A' : (!$store.app.net_wifi0_enabled ? '#CCCCCC' : '#00274D')"/>
+                <line x-show="!$store.app.net_wifi0_enabled && !$store.app.wifiRelaying('onboard')" x1="4" y1="1" x2="24" y2="15" stroke="#DC2626" stroke-width="2" stroke-linecap="round"/>
               </svg>
+              <!-- green underline when this radio's upstream WiFi carries the default route -->
+              <div x-show="$store.app.net_active_egress === 'wifi' && $store.app.wifiRelaying('onboard')" style="position:absolute;bottom:-3px;left:2px;right:2px;height:2px;background:linear-gradient(to bottom, #4ADE80, #16A34A);border-radius:1px"></div>
             </div>
-            <!-- PCIe WiFi (radio1) -->
+            <!-- PCIe WiFi (radio1) — only when a PCIe radio is present. Same four
+                 visual states as the onboard icon, keyed off its own radio. -->
             <div class="relative" x-show="$store.app.net_wifi1_exists"
-                 :title="$store.app.net_wifi1_enabled ? 'WiFi (PCIe): ' + $store.app.t_net_connected : 'WiFi (PCIe): ' + $store.app.t_net_disabled">
+                 :title="$store.app.wifiRelaying('pcie') ? 'PCIe WiFi: ' + $store.app.t_net_wifi_relay : ($store.app.net_wifi1_enabled ? 'PCIe WiFi: ' + $store.app.t_net_connected : 'PCIe WiFi: ' + $store.app.t_net_disabled)">
               <svg class="w-4 sm:w-6" viewBox="0 0 28 16" fill="none" xmlns="http://www.w3.org/2000/svg">
                 <path d="M4 3.5529C6.82855 1.24919 10.3597 -0.00539646 14 1.74488e-05C17.7887 1.74488e-05 21.2679 1.33068 24 3.5529L22.3333 5.62668C19.9761 3.70715 17.0335 2.66192 14 2.66668C10.8435 2.66668 7.94341 3.77601 5.66667 5.62668L4 3.5529ZM6.77719 7.01068C8.82016 5.34668 11.3707 4.44049 14 4.44446C16.7356 4.44446 19.2485 5.40534 21.2228 7.00979L19.5561 9.08445C17.9845 7.80464 16.0225 7.10781 14 7.11112C11.8957 7.11112 9.96286 7.85068 8.44386 9.08445L6.77719 7.00979V7.01068ZM9.55526 10.4685C10.8124 9.44436 12.3819 8.88659 14 8.8889C15.6835 8.8889 17.2299 9.48001 18.4447 10.4676L16.7781 12.5422C15.9922 11.9024 15.0113 11.554 14 11.5556C12.9888 11.554 12.0078 11.9024 11.2219 12.5422L9.55526 10.4676V10.4685ZM12.3333 13.9262C12.8046 13.542 13.3932 13.3326 14 13.3333C14.6313 13.3333 15.2113 13.5556 15.6667 13.9253L14 16L12.3333 13.9262Z"
-                  :fill="!$store.app.net_wifi1_enabled ? '#CCCCCC' : '#00274D'"/>
-                <line x-show="!$store.app.net_wifi1_enabled" x1="4" y1="1" x2="24" y2="15" stroke="#DC2626" stroke-width="2" stroke-linecap="round"/>
+                  :fill="$store.app.wifiRelaying('pcie') ? '#16A34A' : (!$store.app.net_wifi1_enabled ? '#CCCCCC' : '#00274D')"/>
+                <line x-show="!$store.app.net_wifi1_enabled && !$store.app.wifiRelaying('pcie')" x1="4" y1="1" x2="24" y2="15" stroke="#DC2626" stroke-width="2" stroke-linecap="round"/>
               </svg>
+              <div x-show="$store.app.net_active_egress === 'wifi' && $store.app.wifiRelaying('pcie')" style="position:absolute;bottom:-3px;left:2px;right:2px;height:2px;background:linear-gradient(to bottom, #4ADE80, #16A34A);border-radius:1px"></div>
             </div>
           </div>
 
-          <form method="POST" target="_blank" class="inline" onsubmit="this.action = 'http://' + window.location.hostname + ':8080/cgi-bin/luci'">
-            <input type="hidden" name="luci_username" value="root">
-            <input type="hidden" name="luci_password" value="{{ remembered_password if remembered_password else 'photonicat' }}">
-            <button type="submit" class="ml-1 mr-2 text-base underline hover:no-underline focus:ring-2 focus:ring-blue-600 bg-transparent border-none cursor-pointer" title="{{locales['openwrt_tooltip']}}">
-              OpenWRT
-            </button>
-          </form>
+          <!-- Open LuCI via /advanced_admin, which auto-POSTs root credentials
+               only for authenticated sessions. Password is NOT embedded here
+               (it used to leak in a hidden field on every page). -->
+          <a href="/advanced_admin" target="_blank" rel="noopener"
+             class="ml-1 mr-2 text-base underline hover:no-underline focus:ring-2 focus:ring-blue-600 cursor-pointer" title="{{locales['openwrt_tooltip']}}">
+            OpenWRT
+          </a>
 
           <div class="mr-2 flex items-center" x-cloak x-show="$store.app.network_mode === 'all_off'">
             <img src="/static/airplane.svg" class="w-5 h-5" />
           </div>
-          <div class="mr-2 flex items-center" x-cloak x-show="$store.app.network_route_mode === 'mobile' && $store.app.network_mode !== 'all_off'">
+          <div class="mr-2 flex items-center" x-cloak x-show="$store.app.modem_installed && $store.app.on_mobile_egress && $store.app.network_mode !== 'all_off'">
             <span x-text="$store.app.mobile_signal_name" class="mr-1"></span>
             <img :src="$store.app.mobile_signal_strength_img"/>
           </div>
@@ -124,7 +204,11 @@
                 <svg xmlns="http://www.w3.org/2000/svg" class="mr-0 h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"></path>
                 </svg>
-                <div x-cloak x-show="user_menu_open" @click.outside="user_menu_open = false" class="absolute top-0 right-0 z-30 mt-10 w-48 overflow-auto rounded border bg-white shadow-md sm:w-32">
+              </button>
+              <!-- Dropdown must be a SIBLING of the button, not a child: the
+                   theme-seg <button>s inside would force-close an ancestor
+                   <button> during HTML parsing and wreck the whole header DOM. -->
+              <div x-cloak x-show="user_menu_open" @click.outside="user_menu_open = false" class="absolute top-0 right-0 z-30 mt-10 w-48 overflow-auto rounded border bg-white shadow-md sm:w-40">
                   <ul class="list-reset">
                     <li class="border-b border-gray-100">
                       <a href="#" @click="reboot_reason = ''; reboot_dlg_open = true" class="flex items-center px-2 py-4 text-gray-500 no-underline hover:bg-gray-200 hover:no-underline sm:justify-start sm:py-2">
@@ -133,6 +217,41 @@
                         </svg>
                         {{locales["nav_reboot_device"]}}
                       </a>
+                    </li>
+                    <li class="border-b border-gray-100">
+                      <a href="#" @click="poweroff_dlg_open = true; user_menu_open = false" class="flex items-center px-2 py-4 text-gray-500 no-underline hover:bg-gray-200 hover:no-underline sm:justify-start sm:py-2">
+                        <svg class="mr-2 h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5.636 5.636a9 9 0 1012.728 0M12 3v9"></path>
+                        </svg>
+                        {{locales["nav_poweroff_device"]}}
+                      </a>
+                    </li>
+                    <li class="border-b border-gray-100 px-2 py-2">
+                      <!-- Theme picker: icon-only, tooltips carry the labels.
+                           Default is auto (browser/system) when never set. -->
+                      <div class="theme-seg w-full">
+                        <button type="button" class="flex flex-1 items-center justify-center" :class="{ 'is-active': theme_pref === 'auto' }"
+                                @click="theme_pref = 'auto'; window.PcatTheme && PcatTheme.setPref('auto')"
+                                title="{{locales['theme_auto']}} — {{locales['theme_auto_help']}}">
+                          <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                          </svg>
+                        </button>
+                        <button type="button" class="flex flex-1 items-center justify-center" :class="{ 'is-active': theme_pref === 'light' }"
+                                @click="theme_pref = 'light'; window.PcatTheme && PcatTheme.setPref('light')"
+                                title="{{locales['theme_light']}}">
+                          <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
+                          </svg>
+                        </button>
+                        <button type="button" class="flex flex-1 items-center justify-center" :class="{ 'is-active': theme_pref === 'dark' }"
+                                @click="theme_pref = 'dark'; window.PcatTheme && PcatTheme.setPref('dark')"
+                                title="{{locales['theme_dark']}}">
+                          <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
+                          </svg>
+                        </button>
+                      </div>
                     </li>
                     <li class="border-b border-gray-100">
                       <a href="/switch_locale" title="{{locales['switch_to_locale_tip']}}" class="flex items-center px-2 py-4 text-gray-500 no-underline hover:bg-gray-200 hover:no-underline sm:justify-start sm:py-2">
@@ -152,7 +271,7 @@
                     </li>
                     {% endif %}
                     <li class="border-b border-gray-100">
-                      <a href="/logout" class="flex items-center px-2 py-4 text-gray-500 no-underline hover:bg-gray-200 hover:no-underline sm:justify-start sm:py-2">
+                      <a href="/logout" @click.prevent="logout()" class="flex items-center px-2 py-4 text-gray-500 no-underline hover:bg-gray-200 hover:no-underline sm:justify-start sm:py-2">
                         <svg xmlns="http://www.w3.org/2000/svg" class="mr-2 h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"></path>
                         </svg>
@@ -161,9 +280,8 @@
                     </li>
                   </ul>
                 </div>
-              </button>
 
-              {% include "_reboot_confirm_modal.html" %} {% include "_rebooting_modal.html" %}
+              {% include "_reboot_confirm_modal.html" %} {% include "_poweroff_confirm_modal.html" %} {% include "_rebooting_modal.html" %}
             </div>
             <!-- /relative text-sm -->
           </div>
@@ -186,6 +304,13 @@
               <img src="/static/tower.svg" class="max-w-6 max-h-6 w-auto h-auto" />
             </a>
           </li>
+          {% if phone_enabled %}
+          <li class="w-16 sm:w-24" style="height: 50px;">
+            <a class="nav flex items-center justify-center space-x-2 h-full" :class="$store.app.page == 'phone' ? 'nav-active' : 'nav'" href="/phone">
+              <img src="/static/phone.svg" class="max-w-6 max-h-6 w-auto h-auto" />
+            </a>
+          </li>
+          {% endif %}
           {% if locales["oem_name"] and locales["oem_name"]|length > 2 and "photonicat 2" in locales["oem_name"]|lower %}
           <li class="w-16 sm:w-24" style="height: 50px;">
             <a class="nav flex items-center justify-center space-x-2 h-full" :class="$store.app.page == 'screen' ? 'nav-active' : 'nav'" href="/screen">
@@ -198,6 +323,27 @@
               <img src="/static/stats.svg" class="max-w-6 max-h-6 w-auto h-auto" />
             </a>
           </li>
+          {% if nas_enabled %}
+          <li class="w-16 sm:w-24" style="height: 50px;">
+            <a class="nav flex items-center justify-center space-x-2 h-full" :class="$store.app.page == 'nas' ? 'nav-active' : 'nav'" href="/nas">
+              <img src="/static/nas.svg" class="max-w-6 max-h-6 w-auto h-auto" />
+            </a>
+          </li>
+          {% endif %}
+          {% if lxc_enabled %}
+          <li class="w-16 sm:w-24" style="height: 50px;">
+            <a class="nav flex items-center justify-center space-x-2 h-full" :class="$store.app.page == 'lxc' ? 'nav-active' : 'nav'" href="/lxc">
+              <img src="/static/lxc.svg" class="max-w-6 max-h-6 w-auto h-auto" />
+            </a>
+          </li>
+          {% endif %}
+          {% if gps_enabled %}
+          <li class="w-16 sm:w-24" style="height: 50px;">
+            <a class="nav flex items-center justify-center space-x-2 h-full" :class="$store.app.page == 'gps' ? 'nav-active' : 'nav'" href="/gps">
+              <img src="/static/gps.svg" class="max-w-6 max-h-6 w-auto h-auto" />
+            </a>
+          </li>
+          {% endif %}
           {% if terminal_enabled %}
           <li class="w-16 sm:w-24" style="height: 50px;">
             <a class="nav flex items-center justify-center space-x-2 h-full" :class="$store.app.page == 'terminal' ? 'nav-active' : 'nav'" href="/terminal">
@@ -214,7 +360,9 @@
       </div>
     </div>
     <!-- /end nav header -->
+    {% endif %}
     {% block content %}{% endblock %}
+    {% if not chromeless %}
     <!--bottom nav -->
     <div class="fixed bottom-0 z-20 flex w-full flex-grow items-center border-t border-gray-300 bg-gray-200 sm:hidden" id="bottom-nav-content">
       <ul class="list-reset flex flex-1 items-center justify-between overflow-x-auto">
@@ -233,6 +381,13 @@
             <img src="/static/tower.svg" class="max-w-6 max-h-6 w-auto h-auto" />
           </a>
         </li>
+        {% if phone_enabled %}
+        <li class="w-24">
+          <a class="nav flex items-center justify-center space-x-2 py-2" :class="$store.app.page == 'phone' ? 'nav-active' : 'nav'" href="/phone">
+            <img src="/static/phone.svg" class="max-w-6 max-h-6 w-auto h-auto" />
+          </a>
+        </li>
+        {% endif %}
         {% if locales["oem_name"] and locales["oem_name"]|length > 2 and "photonicat 2" in locales["oem_name"]|lower %}
         <li class="w-24">
           <a class="nav flex items-center justify-center space-x-2 py-2" :class="$store.app.page == 'screen' ? 'nav-active' : 'nav'" href="/screen">
@@ -245,6 +400,27 @@
             <img src="/static/stats.svg" class="max-w-6 max-h-6 w-auto h-auto" />
           </a>
         </li>
+        {% if nas_enabled %}
+        <li class="w-24">
+          <a class="nav flex items-center justify-center space-x-2 py-2" :class="$store.app.page == 'nas' ? 'nav-active' : 'nav'" href="/nas">
+            <img src="/static/nas.svg" class="max-w-6 max-h-6 w-auto h-auto" />
+          </a>
+        </li>
+        {% endif %}
+        {% if lxc_enabled %}
+        <li class="w-24">
+          <a class="nav flex items-center justify-center space-x-2 py-2" :class="$store.app.page == 'lxc' ? 'nav-active' : 'nav'" href="/lxc">
+            <img src="/static/lxc.svg" class="max-w-6 max-h-6 w-auto h-auto" />
+          </a>
+        </li>
+        {% endif %}
+        {% if gps_enabled %}
+        <li class="w-24">
+          <a class="nav flex items-center justify-center space-x-2 py-2" :class="$store.app.page == 'gps' ? 'nav-active' : 'nav'" href="/gps">
+            <img src="/static/gps.svg" class="max-w-6 max-h-6 w-auto h-auto" />
+          </a>
+        </li>
+        {% endif %}
         {% if terminal_enabled %}
         <li class="w-24">
           <a class="nav flex items-center justify-center space-x-2 py-2" :class="$store.app.page == 'terminal' ? 'nav-active' : 'nav'" href="/terminal">
@@ -283,8 +459,9 @@
         </div>
       </div>
     </footer>
+    {% endif %}
     <script type="text/javascript">
-      // Format phone number for display: add space after country code (e.g. +8618602152705 → +86 18602152705)
+      // Format phone number for display: add space after country code (e.g. +8613800138002 → +86 13800138002)
       window.formatPhoneNumber = function(number) {
         if (!number) return '';
         number = number.trim();
@@ -324,7 +501,10 @@
       window.DashboardService = {
         cache: null,
         cacheTime: 0,
-        cacheDuration: 1000, // 1 second - matching server-side cache
+        // Just under the fastest poller (index page: 4s) so the status bar's
+        // 5s poll and the dashboard's 4s poll share one request instead of
+        // each hitting the router separately.
+        cacheDuration: 3500,
         subscribers: new Set(),
         
         async fetchDashboard() {
@@ -423,6 +603,10 @@
                 this.net_wan_carrier = data.wan_carrier === true;
                 this.net_route_mode = data.network_route_mode || "";
                 this.net_active_egress = data.active_egress || "";
+                this.net_wifi_sta_active = data.wifi_sta_active === true;
+                // Which physical radio carries the upstream STA ("onboard"/"pcie"/"")
+                // — the relay/green state must land on that icon, not always onboard.
+                this.net_wifi_sta_radio = data.wifi_sta_radio || "";
                 this.net_icons_loaded = true;
               });
 
@@ -437,9 +621,36 @@
                   }, 1000);
                 }
 
-                this.system_status = data.system_status;
+                // We only get here on a successful fetch, so the device is up.
+                // If it had actually gone down mid-reboot (status 25), coming
+                // back means the restart finished — reload so the user doesn't
+                // have to refresh by hand.
+                if (this.system_status === 25) {
+                  this.system_status = 30;
+                  if (this.reboot_timer) {
+                    clearInterval(this.reboot_timer);
+                    this.reboot_timer = null;
+                  }
+                  setTimeout(() => window.location.reload(), 1500);
+                  return;
+                }
+
+                // A locally-initiated restart (MCU/firmware update, power
+                // off): the server may still report status 0 until it dies,
+                // so hold our client-side 20 until the device actually drops.
+                // The hold expires (begin_restart_watch) so an update that
+                // turns out not to restart cannot pin the overlay forever.
+                if (this.restart_cause && this.system_status === 20 && data.system_status === 0) {
+                  if (Date.now() > this.restart_hold_until) {
+                    this.restart_cause = "";
+                    this.system_status = 0;
+                  }
+                } else {
+                  this.system_status = data.system_status;
+                }
 
                 if (this.system_status === 0) {
+                  this.restart_cause = "";
                   if (this.reboot_timer) {
                     clearInterval(this.reboot_timer);
                     this.reboot_timer = null;
@@ -458,8 +669,15 @@
                   }
                   this.car_mode.timeout = parseInt(data.carmode.timeout / 60);
                 } else {
-                  if (data.carmode.timeout === 0) {
-                    this.car_mode.timeout = 10; // default
+                  // known === false means the daemon has not answered yet, so
+                  // the 0 is a placeholder rather than a setting. Turning it
+                  // into 10 is why a device configured for 5 minutes showed 10
+                  // after a restart while still shutting down at 5. Unknown
+                  // stays null and the form leaves its field alone.
+                  if (data.carmode.known === false) {
+                    this.car_mode.timeout = null;
+                  } else if (data.carmode.timeout === 0) {
+                    this.car_mode.timeout = 10; // never configured
                   } else {
                     this.car_mode.timeout = parseInt(data.carmode.timeout / 60);
                   }
@@ -471,6 +689,7 @@
                 this.network_route_mode = data.network_route_mode;
                 this.network_mode = data.network_mode;
                 this.modem_mode = data.modem_mode;
+                this.modem_installed = data.modem_installed !== false;
                 this.sim_state = data.sim_state;
                 this.isp_name = data.isp_name;
                 this.modem_signal_strength = data.modem_signal_strength;
@@ -485,8 +704,21 @@
             this.fetch_status();
             this.fetchTips();
             setInterval(() => {
+              // Don't poll the router while the tab is hidden; a forgotten
+              // background tab otherwise keeps its CPU (and battery) busy.
+              // A reboot is the exception: keep probing so a tab left in the
+              // background still auto-refreshes once the device is back.
+              if (document.hidden && this.system_status < 20) return;
               this.fetch_status();
             }, 5000);
+            // While the device is down, probe more often than the 5s dashboard
+            // poll so the page comes back promptly once it answers again.
+            setInterval(() => {
+              if (this.system_status === 25) this.fetch_status();
+            }, 2000);
+            document.addEventListener("visibilitychange", () => {
+              if (!document.hidden) this.fetch_status();
+            });
           },
           page: "index",
           on_charging: 0,
@@ -499,10 +731,44 @@
           network_mode: "",
           sim_state: "",
           modem_mode: "",
+          modem_installed: true,
           modem_signal_strength: 0,
           isp_name: "",
           reboot_timer: null,
           reboot_timer_count: 0,
+          // Why the restarting overlay is up: "" / "reboot" (server-driven),
+          // "update" (MCU/firmware install) or "shutdown" (power off) — picks
+          // the overlay wording. Set via begin_restart_watch().
+          restart_cause: "",
+          restart_hold_until: 0,
+          // Open the restarting overlay for a restart the SERVER cannot
+          // announce (it dies with the device): updates and power-off. Starts
+          // the elapsed timer immediately; the dashboard poll takes over once
+          // the device drops (status 25) and reloads when it is back.
+          begin_restart_watch(cause) {
+            this.restart_cause = cause;
+            // Hold past the estimate the overlay promises, so a restart that
+            // never happens dismisses rather than pinning the page. An update
+            // says "3 to 5 minutes" (flashing, then reboot); a plain
+            // reboot/power-off says "1 to 2".
+            const hold_minutes = cause === "update" ? 7 : 3;
+            this.restart_hold_until = Date.now() + hold_minutes * 60 * 1000;
+            if (this.system_status === 0) this.system_status = 20;
+            if (!this.reboot_timer) {
+              this.reboot_timer_count = 0;
+              this.reboot_timer = setInterval(() => {
+                this.reboot_timer_count = this.reboot_timer_count + 1;
+              }, 1000);
+            }
+          },
+          // Bare seconds read as a meaningless number next to the overlay's
+          // minutes estimate; show mm:ss so it lines up with the estimate.
+          reboot_elapsed_text() {
+            if (!this.reboot_timer_count) return "";
+            const m = Math.floor(this.reboot_timer_count / 60);
+            const s = this.reboot_timer_count % 60;
+            return m + ":" + String(s).padStart(2, "0");
+          },
           tips_collection: [],
           tips: "",
           notifation_text: "",
@@ -520,6 +786,15 @@
           net_wan_carrier: false,
           net_route_mode: "",
           net_active_egress: "",
+          net_wifi_sta_active: false,
+          net_wifi_sta_radio: "",
+
+          // Is a given WiFi radio ("onboard"/"pcie") currently relaying the
+          // upstream STA? The STA runs on exactly one radio at a time, so only
+          // that radio's icon should show the green relay state.
+          wifiRelaying(cls) {
+            return this.net_wifi_sta_active && this.net_wifi_sta_radio === cls;
+          },
 
           // ---- network-status icon helpers ----
           // Four visual states per interface, driven by (enabled, active, egress):
@@ -536,6 +811,19 @@
           netIsEgress(kind) {
             return this.net_active_egress === kind;
           },
+          // Does the modem actually carry our traffic? Gates the header's
+          // mobile signal badge. network_route_mode comes from the
+          // pcat-manager daemon and only distinguishes wired from mobile — it
+          // has no notion of a WiFi upstream, so it says "mobile" whenever the
+          // modem is dialed even while egress is really on the WiFi STA (which
+          // read as "the router is on 5G" in the header). net_active_egress
+          // resolves the real default-route device; fall back to the daemon's
+          // view only while it is still unset.
+          get on_mobile_egress() {
+            return this.net_active_egress
+              ? this.net_active_egress === 'mobile'
+              : this.network_route_mode === 'mobile';
+          },
           // tooltip text for an interface icon
           netTip(label, enabled, active, kind) {
             if (!enabled) return label + ': ' + this.t_net_disabled;
@@ -548,6 +836,7 @@
           t_net_no_link: "{{ locales['net_state_no_link'] | default('Enabled, no link') }}",
           t_net_connected: "{{ locales['net_state_connected'] | default('Connected') }}",
           t_net_active_wan: "{{ locales['net_state_active_wan'] | default('Active internet connection') }}",
+          t_net_wifi_relay: "{{ locales['net_state_wifi_relay'] | default('Relaying upstream WiFi (Smart WAN)') }}",
 
           set_page(page) {
             this.page = page;
@@ -593,6 +882,8 @@
           },
 
           get mobile_signal_strength_img() {
+            // Cellular signal shown as the original 4-bar chart (sigN.svg:
+            // N bars filled dark, the rest gray). Same 20% thresholds.
             if (this.modem_signal_strength >= 80) {
               return "/static/sig4.svg";
             } else if (this.modem_signal_strength >= 60) {

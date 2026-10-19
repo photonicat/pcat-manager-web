@@ -35,7 +35,6 @@ class TestFirmwareUpgradeWorking(unittest.TestCase):
             'pc_screen_client': MagicMock(),
             'app': MagicMock(),
             'flask': MagicMock(),
-            'flask_socketio': MagicMock(),
         }
         
         self.module_patch = patch.dict('sys.modules', self.mock_modules)
@@ -64,7 +63,7 @@ class TestFirmwareUpgradeWorking(unittest.TestCase):
     def test_status_update_basic_functionality(self):
         """Test that status updates work correctly"""
         with patch.object(self.module, 'pcat_logger') as mock_logger, \
-             patch.object(self.module, 'socketio') as mock_socketio:
+             patch.object(self.module, 'publish') as mock_publish:
             
             mock_logger.logger = Mock()
             
@@ -81,7 +80,7 @@ class TestFirmwareUpgradeWorking(unittest.TestCase):
     def test_status_update_error_handling(self):
         """Test error status updates"""
         with patch.object(self.module, 'pcat_logger') as mock_logger, \
-             patch.object(self.module, 'socketio') as mock_socketio:
+             patch.object(self.module, 'publish') as mock_publish:
             
             mock_logger.logger = Mock()
             
@@ -189,7 +188,7 @@ class TestFirmwareUpgradeWorking(unittest.TestCase):
     def test_stage_workflow_transitions(self):
         """Test the expected stage workflow"""
         with patch.object(self.module, 'pcat_logger') as mock_logger, \
-             patch.object(self.module, 'socketio') as mock_socketio:
+             patch.object(self.module, 'publish') as mock_publish:
             
             mock_logger.logger = Mock()
             
@@ -237,7 +236,7 @@ class TestFirmwareUpgradeWorking(unittest.TestCase):
         
         # Simulate some other status update
         with patch.object(self.module, 'pcat_logger') as mock_logger, \
-             patch.object(self.module, 'socketio') as mock_socketio:
+             patch.object(self.module, 'publish') as mock_publish:
             mock_logger.logger = Mock()
             self.module.update_firmware_upgrade_status('download', 50, 'Test')
         
@@ -266,7 +265,7 @@ class TestFirmwareUpgradeWorking(unittest.TestCase):
     def test_error_status_handling(self):
         """Test error status updates and error message storage"""
         with patch.object(self.module, 'pcat_logger') as mock_logger, \
-             patch.object(self.module, 'socketio') as mock_socketio:
+             patch.object(self.module, 'publish') as mock_publish:
             
             mock_logger.logger = Mock()
             

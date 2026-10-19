@@ -1,5 +1,12 @@
 <!-- reboot modal -->
-<div id="reboot_dlg" class="modal" x-cloak x-data="{rebooting:false}" x-show="reboot_dlg_open" tabindex="-1">
+<!-- Listen for a page-level request to open the reboot dialog. Page components
+     (adv_settings, timer_settings, update...) run in a child Alpine scope that
+     has no reboot_dlg_open of its own, so `this.reboot_dlg_open = true` inside
+     them is a no-op. They instead dispatch a window CustomEvent('open-reboot-
+     dialog', {detail:{reason}}) which this handler — sitting in the body scope
+     that actually owns reboot_dlg_open — turns into the real flag flip. -->
+<div id="reboot_dlg" class="modal" x-cloak x-data="{rebooting:false}" x-show="reboot_dlg_open" tabindex="-1"
+     @open-reboot-dialog.window="reboot_reason = ($event.detail && $event.detail.reason) || ''; reboot_dlg_open = true">
   <section class="modal-main w-full sm:w-1/2" @click.outside="reboot_dlg_open = false">
     <div class="p-6">
       <p class="text-xl font-semibold">{{locales["need_reboot_device_now"]}}</p>
@@ -11,8 +18,11 @@
         @click="fetch('/system/reboot', { method: 'POST', headers: { 'Content-Type': 'application/json' }})
           .then(response => response.json())
           .then(data => {
-            if(data.status === 'ok') { 
+            if(data.status === 'ok') {
               reboot_dlg_open = false;
+              // Server sets status 20 too, but the next dashboard poll is up
+              // to 5s away; open the overlay immediately.
+              $store.app.begin_restart_watch('reboot');
             }
       });
       "

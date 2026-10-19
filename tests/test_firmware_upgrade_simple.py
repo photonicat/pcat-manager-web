@@ -35,7 +35,6 @@ class TestFirmwareUpgradeSimple(unittest.TestCase):
                 'pc_screen_client': MagicMock(),
                 'app': MagicMock(),
                 'flask': MagicMock(),
-                'flask_socketio': MagicMock(),
             })
         ]
         
@@ -67,7 +66,7 @@ class TestFirmwareUpgradeSimple(unittest.TestCase):
     def test_update_firmware_upgrade_status_basic(self):
         """Test basic status update functionality"""
         with patch.object(self.module, 'pcat_logger') as mock_logger, \
-             patch.object(self.module, 'socketio') as mock_socketio:
+             patch.object(self.module, 'publish') as mock_publish:
             
             mock_logger.logger = Mock()
             
@@ -80,13 +79,13 @@ class TestFirmwareUpgradeSimple(unittest.TestCase):
             self.assertEqual(self.module.firmware_upgrade_status['message'], 'Downloading...')
             self.assertTrue(self.module.firmware_upgrade_status['active'])
             
-            # Check socket was called
-            mock_socketio.emit.assert_called_once()
+            # Check the status was pushed to watching clients
+            mock_publish.assert_called_once()
     
     def test_update_firmware_upgrade_status_error(self):
         """Test error status update"""
         with patch.object(self.module, 'pcat_logger') as mock_logger, \
-             patch.object(self.module, 'socketio') as mock_socketio:
+             patch.object(self.module, 'publish') as mock_publish:
             
             mock_logger.logger = Mock()
             
@@ -122,7 +121,7 @@ class TestFirmwareUpgradeSimple(unittest.TestCase):
     def test_keep_config_parameter_handling(self):
         """Test that keep_config parameter is properly stored"""
         with patch.object(self.module, 'pcat_logger'), \
-             patch.object(self.module, 'socketio'):
+             patch.object(self.module, 'publish'):
             
             # Reset status
             self.module.firmware_upgrade_status = {
@@ -146,7 +145,7 @@ class TestFirmwareUpgradeSimple(unittest.TestCase):
     def test_status_persistence(self):
         """Test that status persists between updates"""
         with patch.object(self.module, 'pcat_logger') as mock_logger, \
-             patch.object(self.module, 'socketio'):
+             patch.object(self.module, 'publish'):
             
             mock_logger.logger = Mock()
             
@@ -169,7 +168,7 @@ class TestFirmwareUpgradeSimple(unittest.TestCase):
     def test_stage_transitions(self):
         """Test valid stage transitions"""
         with patch.object(self.module, 'pcat_logger') as mock_logger, \
-             patch.object(self.module, 'socketio'):
+             patch.object(self.module, 'publish'):
             
             mock_logger.logger = Mock()
             

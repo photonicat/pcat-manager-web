@@ -1,0 +1,76 @@
+<!-- Self-contained toast.
+
+     `_notification.html` binds to a `notification` object that it expects to
+     find in the enclosing Alpine component, and every page that includes it
+     also defines its own `showNotification()` method — except /lxc and /nas,
+     which have neither and call a *bare global* `showNotification(...)`. On
+     those two pages the toast markup threw "notification is not defined" on
+     every render and each error call threw "showNotification is not defined",
+     so a failed action (e.g. Create with an empty name) looked like the button
+     did nothing at all.
+
+     This wrapper owns the state and publishes the global those pages call, so
+     include it INSTEAD of `_notification.html` from a page whose component has
+     no notification state of its own. -->
+<div x-data="toastHost">{% include '_notification.html' %}</div>
+
+<script>
+  document.addEventListener("alpine:init", () => {
+    // Backend errors arrive as bare codes ("bad_name", "exists"). Keys the
+    // page's locale dict doesn't define come through as null and fall back to
+    // the raw code, so this stays useful on pages that haven't translated them.
+    const ERR = {{ {
+      "bad_name": locales.get("err_bad_name"),
+      "bad_vmid": locales.get("err_bad_vmid"),
+      "vmid_in_use": locales.get("err_vmid_in_use"),
+      "bad_template": locales.get("err_bad_template"),
+      "bad_path": locales.get("err_bad_path"),
+      "bad_fs": locales.get("err_bad_fs"),
+      "exists": locales.get("err_exists"),
+      "not_found": locales.get("err_not_found"),
+      "running": locales.get("err_running"),
+      "in_use": locales.get("err_in_use"),
+      "io_error": locales.get("err_io_error"),
+      "no_lxc_create": locales.get("err_no_lxc_create"),
+      "no_tool": locales.get("err_no_tool"),
+      "bridge_not_up": locales.get("err_bridge_not_up"),
+      "bridge_missing": locales.get("err_bridge_missing"),
+      "cgroup_legacy": locales.get("err_cgroup_legacy"),
+      "reboot_required": locales.get("err_reboot_required"),
+      "start_failed": locales.get("err_start_failed"),
+      "uci_error": locales.get("err_uci_error"),
+      "ubus_error": locales.get("err_ubus_error"),
+      "too_big": locales.get("err_too_big"),
+      "auth_failed": locales.get("err_auth_failed"),
+      "unreachable": locales.get("err_unreachable"),
+    }|tojson }};
+
+    Alpine.data("toastHost", () => ({
+      notification: { show: false, type: "info", message: "", message_en: "", message_cn: "" },
+      _timer: null,
+
+      init() {
+        window.showNotification = (en, cn, type) => this.show(en, cn, type);
+      },
+
+      // Already rendered in the page's language, so the same text goes into
+      // both slots — _notification.html picks one by current_locale.
+      show(message_en, message_cn, type) {
+        const en = ERR[message_en] || message_en || "";
+        const cn = ERR[message_cn] || message_cn || en;
+        this.notification = {
+          show: true,
+          type: type || "info",
+          message: en,
+          message_en: en,
+          message_cn: cn,
+        };
+        clearTimeout(this._timer);
+        // Errors stay until dismissed; everything else auto-hides.
+        if (type !== "error") {
+          this._timer = setTimeout(() => { this.notification.show = false; }, 4000);
+        }
+      },
+    }));
+  });
+</script>

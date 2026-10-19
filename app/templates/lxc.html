@@ -1,0 +1,1478 @@
+{% extends '_base.html' %}
+{% block page_title %}{{locales.lxc_title}}{% endblock %} {% block html_head0 %}
+<script defer src="/static/pollbus.js?v={{ cache_bust_version }}"></script>
+{% endblock %} {% block content %}
+<!-- Hidden page: reachable at /lxc only, intentionally absent from the navbar. -->
+<div x-data="lxc">
+  <!-- Full-width like Proxmox: no centered container -->
+  <!-- pb clears the fixed footer + the default-open task-log bar -->
+  <div class="w-full px-2 pt-10 pb-44 sm:px-4 sm:pt-24 md:pt-28">
+    {% include '_notification_standalone.html' %}
+
+    <!-- title + page tabs on one line (no wasted vertical space) -->
+    <div class="flex items-center gap-3 overflow-x-auto border-b border-gray-300 px-1">
+      <h1 class="whitespace-nowrap py-2 font-bold uppercase text-gray-600">{{locales.lxc_title}}</h1>
+      <button @click="switchTab('containers')" :class="tabClass('containers')" class="whitespace-nowrap rounded-t px-3 py-2 text-sm font-semibold">{{locales.tab_containers}}</button>
+      <button @click="switchTab('create')" :class="tabClass('create')" class="whitespace-nowrap rounded-t px-3 py-2 text-sm font-semibold">{{locales.tab_create}}</button>
+      <button @click="switchTab('backups')" :class="tabClass('backups')" class="whitespace-nowrap rounded-t px-3 py-2 text-sm font-semibold">{{locales.tab_backups}}</button>
+      <button @click="switchTab('setup')" :class="tabClass('setup')" class="whitespace-nowrap rounded-t px-3 py-2 text-sm font-semibold">{{locales.tab_setup}}</button>
+      <button @click="switchTab('tasks')" :class="tabClass('tasks')" class="whitespace-nowrap rounded-t px-3 py-2 text-sm font-semibold">
+        {{locales.tab_tasks}}
+        <span x-show="activeJobCount() > 0" x-text="activeJobCount()" class="ml-1 rounded-full bg-pcatblue px-2 py-0.5 text-xs text-white"></span>
+      </button>
+    </div>
+
+    <!-- setup-needed banner -->
+    <div x-show="health.ready === false" x-cloak class="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-yellow-300 bg-yellow-50 p-2">
+      <div class="text-sm text-yellow-800">
+        {{locales.banner_not_ready}}
+        <span x-show="rebootNeeded" class="font-semibold">{{locales.banner_reboot}}</span>
+      </div>
+      <button @click="fix('all')" :disabled="busyFix != ''" class="rounded bg-pcatblue px-4 py-2 text-sm text-white disabled:opacity-40">{{locales.banner_fix_all}}</button>
+    </div>
+
+    <!-- ── Containers: Proxmox-style split — machines left, console right ── -->
+    <div x-show="tab == 'containers'" class="mt-2 flex flex-col gap-2 lg:flex-row">
+      <!-- left rail: machine list -->
+      <div class="w-full flex-shrink-0 lg:w-80">
+        <div class="rounded-lg bg-white p-1 shadow">
+          <!-- Distinguish "not loaded yet" from "really empty" so a refresh
+               doesn't flash the empty-state hint before the first fetch lands. -->
+          <div x-show="!ctLoaded" class="flex items-center justify-center gap-2 p-4 text-sm text-gray-400">
+            <svg class="h-4 w-4 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            <span>{{locales.ct_loading}}</span>
+          </div>
+          <div x-show="ctLoaded && !containers.length" class="p-4 text-center text-sm text-gray-400">{{locales.ct_none}}</div>
+          <template x-for="ct in containers" :key="ct.name">
+            <button @click="selected = ct.name" @dblclick="openConsole(ct)" @contextmenu.prevent="openCtx(ct, $event)" class="flex w-full items-center gap-2 rounded px-3 py-1.5 text-left"
+              :class="selected == ct.name ? 'bg-pcatblue text-white' : 'text-gray-700 hover:bg-gray-100'">
+              <!-- Proxmox-style state glyphs: ▶ running, ■ stopped, ❙❙ frozen -->
+              <span class="flex h-3 w-3 flex-shrink-0 items-center justify-center">
+                <svg x-show="ct.state == 'RUNNING'" viewBox="0 0 10 10" class="h-2.5 w-2.5 fill-green-500"><polygon points="1,0 10,5 1,10" /></svg>
+                <svg x-show="ct.state == 'STOPPED'" viewBox="0 0 10 10" class="h-2 w-2 fill-gray-400"><rect width="10" height="10" /></svg>
+                <svg x-show="ct.state == 'FROZEN'" viewBox="0 0 10 10" class="h-2.5 w-2.5 fill-blue-400"><rect x="1" width="3" height="10" /><rect x="6" width="3" height="10" /></svg>
+                <svg x-show="ct.state == 'BROKEN'" viewBox="0 0 10 10" class="h-2.5 w-2.5 fill-red-500"><circle cx="5" cy="5" r="5" /></svg>
+              </span>
+              <span class="min-w-0 flex-1">
+                <span class="block truncate font-mono text-sm font-semibold" x-text="(ct.vmid ? ct.vmid + ' (' + ct.name + ')' : ct.name)"></span>
+                <!-- v4 only here: v6 addresses turn the rail into a wall of hex -->
+                <span class="block truncate font-mono text-xs" :class="selected == ct.name ? 'text-blue-100' : 'text-gray-400'"
+                  x-text="v4list(ct).length ? v4list(ct).join(', ') : ct.state.toLowerCase()"></span>
+              </span>
+              <span class="text-xs" :class="selected == ct.name ? 'text-blue-100' : 'text-gray-400'"
+                x-text="ct.network == 'bridge' ? 'LAN' : ct.network == 'nat' ? 'NAT' : (ct.network || '').replace('custom:', '')"></span>
+            </button>
+          </template>
+        </div>
+      </div>
+
+      <!-- right pane: selected machine, Proxmox-style sub-tabs -->
+      <div class="min-w-0 flex-1">
+        <div x-show="ctLoaded && !sel()" class="rounded-lg bg-white p-10 text-center text-gray-400 shadow">{{locales.select_hint}}</div>
+        <template x-if="sel()">
+          <div class="rounded-lg bg-white shadow">
+            <!-- header: identity + quick actions -->
+            <div class="flex flex-wrap items-center justify-between gap-2 border-b border-gray-200 p-2">
+              <div class="flex items-center gap-2 text-sm font-medium text-gray-700">
+                <span class="font-mono text-base font-bold" x-text="(sel().vmid ? 'CT ' + sel().vmid + ' — ' : '') + sel().name"></span>
+                <span class="rounded px-2 py-0.5 text-xs" :class="stateClass(sel().state)" x-text="sel().state"></span>
+                <span x-show="sel().dist" class="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-500" x-text="sel().dist + ' ' + sel().release"></span>
+                <span x-show="ipv4()" class="rounded bg-gray-100 px-2 py-0.5 font-mono text-xs text-gray-600" x-text="ipv4()"></span>
+              </div>
+              <div class="flex flex-wrap items-center gap-1">
+                <button x-show="sel().state == 'STOPPED'" @click="ctAction('start', sel())" :disabled="busy == sel().name" class="rounded bg-pcatblue px-3 py-1 text-xs text-white disabled:opacity-40">{{locales.ct_btn_start}}</button>
+                <button x-show="sel().state == 'RUNNING'" @click="ctAction('shutdown', sel())" :disabled="busy == sel().name" class="rounded border border-gray-300 px-2 py-1 text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-40">{{locales.ct_btn_shutdown}}</button>
+                <button x-show="sel().state == 'RUNNING'" @click="ctAction('stop', sel())" :disabled="busy == sel().name" class="rounded border border-gray-300 px-2 py-1 text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-40">{{locales.ct_btn_stop}}</button>
+                <button x-show="sel().state == 'RUNNING'" @click="ctAction('freeze', sel())" :disabled="busy == sel().name" class="rounded border border-gray-300 px-2 py-1 text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-40">{{locales.ct_btn_freeze}}</button>
+                <button x-show="sel().state == 'FROZEN'" @click="ctAction('unfreeze', sel())" :disabled="busy == sel().name" class="rounded bg-pcatblue px-2 py-1 text-xs text-white disabled:opacity-40">{{locales.ct_btn_unfreeze}}</button>
+                <button @click="openMigrate(sel())" :disabled="busy == sel().name" class="rounded border border-gray-300 px-2 py-1 text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-40">{{locales.ct_btn_migrate}}</button>
+                <!-- Delete lives here too, not only under Options: this header
+                     is where the state buttons are, so it is where someone
+                     looking to remove a container goes first. -->
+                <button x-show="sel().state != 'RUNNING'" @click="destroyCt(sel())" :disabled="busy == sel().name" class="rounded border border-red-300 px-2 py-1 text-xs text-red-600 hover:bg-red-50 disabled:opacity-40">{{locales.ct_btn_destroy}}</button>
+              </div>
+            </div>
+            <div x-show="sel().state == 'BROKEN'" class="px-3 pt-2 text-xs text-red-500">{{locales.ct_broken_hint}}</div>
+
+            <!-- sub-tab bar -->
+            <div class="flex overflow-x-auto border-b border-gray-200 px-2">
+              <template x-for="st in ['summary','console','resources','network','options','history']" :key="st">
+                <button @click="pickSub(st)" class="whitespace-nowrap border-b-2 px-3 py-2 text-sm"
+                  :class="subTab == st ? 'border-pcatblue font-semibold text-pcatblue' : 'border-white text-gray-500 hover:text-gray-700'"
+                  x-text="subLabel(st)"></button>
+              </template>
+            </div>
+
+            <!-- ── Summary ── -->
+            <div x-show="subTab == 'summary'" class="grid gap-2 p-2 md:grid-cols-2">
+              <div class="space-y-1 text-sm">
+                <div class="flex justify-between"><span class="text-gray-500">{{locales.sum_status}}</span><span class="font-medium" x-text="sel().state"></span></div>
+                <div class="flex justify-between"><span class="text-gray-500">{{locales.sum_uptime}}</span><span class="font-mono" x-text="fmtUptime(stats.uptime)"></span></div>
+                <div class="flex justify-between">
+                  <span class="text-gray-500">{{locales.ct_ips}}</span>
+                  <span class="min-w-0 text-right font-mono text-xs">
+                    <template x-for="ip in allIps()" :key="ip">
+                      <span class="block truncate">
+                        <span x-text="ip"></span>
+                        <span x-show="gwFor(ip)" class="text-gray-400" x-text="' gw ' + gwFor(ip)"></span>
+                      </span>
+                    </template>
+                    <span x-show="!allIps().length">—</span>
+                  </span>
+                </div>
+                <div class="flex justify-between"><span class="text-gray-500">{{locales.net_mode}}</span><span x-text="netLabel()"></span></div>
+                <div class="flex justify-between"><span class="text-gray-500">{{locales.sum_disk}}</span><span class="font-mono" x-text="lxcFormatSize(diskBytes()) || '—'"></span></div>
+                <div class="flex justify-between gap-3"><span class="text-gray-500">{{locales.res_disk_location}}</span><span class="min-w-0 truncate font-mono text-xs text-gray-600" x-text="stats.rootfs_path || sel().storage || '—'"></span></div>
+                <div class="flex items-center justify-between"><span class="text-gray-500">{{locales.ct_autostart}}</span>
+                  <input type="checkbox" :checked="sel().autostart" @change="ctAction('autostart', sel(), { enabled: $event.target.checked })" class="rounded" /></div>
+              </div>
+              <div class="space-y-3">
+                <div>
+                  <div class="flex justify-between text-xs text-gray-500"><span>CPU</span><span x-text="stats.cpu_pct === null || stats.cpu_pct === undefined ? '—' : stats.cpu_pct + '%'"></span></div>
+                  <div class="mt-1 h-2 overflow-hidden rounded bg-gray-200"><div class="h-full bg-pcatblue transition-all" :style="barStyle(stats.cpu_pct)"></div></div>
+                </div>
+                <div>
+                  <div class="flex justify-between text-xs text-gray-500"><span>{{locales.res_memory}}</span>
+                    <span x-text="memLabel()"></span></div>
+                  <div class="mt-1 h-2 overflow-hidden rounded bg-gray-200"><div class="h-full bg-pcatblue transition-all" :style="barStyle(memPct())"></div></div>
+                </div>
+                <div class="flex justify-between text-xs text-gray-500"><span>{{locales.res_pids}}</span><span class="font-mono" x-text="stats.pids ?? '—'"></span></div>
+              </div>
+            </div>
+
+            <!-- ── Console ── -->
+            <div x-show="subTab == 'console'" class="p-1">
+              <template x-if="subTab == 'console' && sel().state == 'RUNNING'">
+                <iframe :src="'/terminal?lxc=' + encodeURIComponent(sel().name) + '&embed=1'"
+                  class="w-full rounded border border-gray-200" style="height: 62vh; background: #1a1a2e"></iframe>
+              </template>
+              <div x-show="sel().state != 'RUNNING'" class="flex w-full flex-col items-center justify-center rounded border border-gray-200 bg-gray-50 text-sm text-gray-400" style="height: 62vh">
+                <p>{{locales.console_stopped}}</p>
+                <button x-show="sel().state == 'STOPPED'" @click="ctAction('start', sel())" :disabled="busy == sel().name" class="mt-3 rounded bg-pcatblue px-4 py-2 text-sm text-white disabled:opacity-40">{{locales.ct_btn_start}}</button>
+              </div>
+            </div>
+
+            <!-- ── Resources ── -->
+            <div x-show="subTab == 'resources'" class="space-y-2 p-2">
+              <div class="grid gap-2 md:grid-cols-2">
+                <div>
+                  <div class="flex justify-between text-xs text-gray-500"><span>CPU</span><span x-text="stats.cpu_pct === null || stats.cpu_pct === undefined ? '—' : stats.cpu_pct + '%'"></span></div>
+                  <div class="mt-1 h-2 overflow-hidden rounded bg-gray-200"><div class="h-full bg-pcatblue transition-all" :style="barStyle(stats.cpu_pct)"></div></div>
+                </div>
+                <div>
+                  <div class="flex justify-between text-xs text-gray-500"><span>{{locales.res_memory}}</span>
+                    <span x-text="memLabel()"></span></div>
+                  <div class="mt-1 h-2 overflow-hidden rounded bg-gray-200"><div class="h-full bg-pcatblue transition-all" :style="barStyle(memPct())"></div></div>
+                </div>
+              </div>
+              <div class="border-t border-gray-100 pt-2">
+                <h4 class="text-sm font-semibold text-gray-700">{{locales.res_limits}}</h4>
+                <p class="mt-1 text-xs text-gray-400">{{locales.res_limits_hint}}</p>
+                <div class="mt-1 flex flex-wrap items-end gap-2 text-sm">
+                  <div>
+                    <label class="mb-1 block text-xs text-gray-500">{{locales.res_mem_limit}}</label>
+                    <input type="number" min="0" x-model.number="lim.mem" class="w-28 rounded border border-gray-300 px-2 py-1 font-mono" />
+                  </div>
+                  <div>
+                    <label class="mb-1 block text-xs text-gray-500">{{locales.res_cpu_limit}}</label>
+                    <input type="number" min="0" step="0.5" x-model.number="lim.cores" class="w-24 rounded border border-gray-300 px-2 py-1 font-mono" />
+                  </div>
+                  <button @click="applyLimits()" class="rounded bg-pcatblue px-3 py-1 text-white">{{locales.res_apply}}</button>
+                  <span class="text-xs text-gray-400">{{locales.res_zero_unlimited}}</span>
+                </div>
+              </div>
+              <!-- disk: where the rootfs lives + Proxmox-style move volume -->
+              <div class="border-t border-gray-100 pt-2">
+                <h4 class="text-sm font-semibold text-gray-700">{{locales.res_disk}}</h4>
+                <div class="mt-1 space-y-1 text-sm">
+                  <div class="flex justify-between gap-3"><span class="text-gray-500">{{locales.res_disk_location}}</span><span class="min-w-0 truncate font-mono text-xs" x-text="stats.rootfs_path || '—'"></span></div>
+                  <div class="flex justify-between"><span class="text-gray-500">{{locales.sum_disk}}</span><span class="font-mono text-xs" x-text="lxcFormatSize(diskBytes()) || '—'"></span></div>
+                </div>
+                <div class="mt-2 flex flex-wrap items-end gap-2 text-sm">
+                  <div>
+                    <label class="mb-1 block text-xs text-gray-500">{{locales.res_disk_move}}</label>
+                    <select x-model="diskMove" class="rounded border border-gray-300 py-1 pl-2 pr-7 font-mono text-xs">
+                      <option value="" x-text="'{{locales.create_storage_default}} (' + storage.lxcpath + ')'"></option>
+                      <template x-for="cand in storage.candidates" :key="'mv' + cand.path">
+                        <option :value="cand.path + '/lxc-storage'" :disabled="!cand.posix"
+                          x-text="cand.path + '/lxc-storage  (' + cand.fstype + ', ' + lxcFormatSize(cand.free_bytes) + ' {{locales.storage_free}})' + (cand.posix ? '' : ' — {{locales.storage_bad_fs}}')"></option>
+                      </template>
+                    </select>
+                  </div>
+                  <button @click="moveDisk()" :disabled="sel().state != 'STOPPED'" class="rounded bg-pcatblue px-3 py-1 text-white disabled:opacity-40">{{locales.res_disk_move_btn}}</button>
+                  <span x-show="sel().state != 'STOPPED'" class="text-xs text-yellow-700">{{locales.res_disk_move_stopped}}</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- ── Network ── -->
+            <div x-show="subTab == 'network'" class="space-y-2 p-2 text-sm">
+              <div class="flex flex-wrap items-center gap-2">
+                <label class="text-gray-500">{{locales.net_mode}}:</label>
+                <!-- pr-7: room for the native dropdown arrow so it cannot sit on the text -->
+                <select :value="netValue()" @change="changeNetwork(sel(), $event.target.value)" class="rounded border border-gray-300 py-1 pl-2 pr-7 text-xs">
+                  <option value="nat">{{locales.net_nat}}</option>
+                  <option value="bridge">{{locales.net_bridge}}</option>
+                  <template x-for="n in customNets()" :key="'nm' + n.bridge">
+                    <option :value="'link:' + n.bridge" x-text="n.bridge + (n.port ? ' (' + n.port + ')' : '')"></option>
+                  </template>
+                </select>
+                <span x-show="netHint == sel().name" class="text-xs text-yellow-700">{{locales.net_restart_hint}}</span>
+              </div>
+              <div class="flex justify-between border-t border-gray-100 pt-2">
+                <span class="text-gray-500">{{locales.ct_ips}}</span>
+                <span class="min-w-0 text-right font-mono text-xs">
+                  <template x-for="ip in allIps()" :key="'n' + ip">
+                    <span class="block truncate">
+                      <span x-text="ip"></span>
+                      <span x-show="gwFor(ip)" class="text-gray-400" x-text="' gw ' + gwFor(ip)"></span>
+                    </span>
+                  </template>
+                  <span x-show="!allIps().length">—</span>
+                </span>
+              </div>
+              <div class="flex justify-between"><span class="text-gray-500">MAC</span><span class="font-mono text-xs" x-text="stats.hwaddr || '—'"></span></div>
+              <div class="flex justify-between"><span class="text-gray-500">DNS</span><span class="font-mono text-xs" x-text="(stats.dns || []).join(', ') || '—'"></span></div>
+              <!-- address method: DHCP/SLAAC vs static, per family -->
+              <div class="border-t border-gray-100 pt-2">
+                <h4 class="text-sm font-semibold text-gray-700">{{locales.ipcfg_title}}</h4>
+                <p class="mt-1 text-xs text-gray-400">{{locales.ipcfg_hint}}</p>
+                <div class="mt-2 grid gap-2 md:grid-cols-2">
+                  <div class="rounded border border-gray-100 p-2">
+                    <div class="flex items-center justify-between">
+                      <span class="text-xs font-semibold text-gray-600">IPv4</span>
+                      <select x-model="ipc.v4_mode" @change="ipcDirty = true" class="rounded border border-gray-300 py-1 pl-2 pr-7 text-xs">
+                        <option value="dhcp">DHCP</option>
+                        <option value="manual">{{locales.ipcfg_manual}}</option>
+                      </select>
+                    </div>
+                    <div x-show="ipc.v4_mode == 'manual'" class="mt-2 space-y-1">
+                      <input x-model="ipc.v4_addr" @input="ipcDirty = true" placeholder="10.0.3.50/24" class="w-full rounded border border-gray-300 px-2 py-1 font-mono text-xs" />
+                      <input x-model="ipc.v4_gw" @input="ipcDirty = true" placeholder="{{locales.ipcfg_gw}}: 10.0.3.1" class="w-full rounded border border-gray-300 px-2 py-1 font-mono text-xs" />
+                    </div>
+                  </div>
+                  <div class="rounded border border-gray-100 p-2">
+                    <div class="flex items-center justify-between">
+                      <span class="text-xs font-semibold text-gray-600">IPv6</span>
+                      <select x-model="ipc.v6_mode" @change="ipcDirty = true" class="rounded border border-gray-300 py-1 pl-2 pr-7 text-xs">
+                        <option value="auto">{{locales.ipcfg_auto6}}</option>
+                        <option value="manual">{{locales.ipcfg_manual}}</option>
+                      </select>
+                    </div>
+                    <div x-show="ipc.v6_mode == 'manual'" class="mt-2 space-y-1">
+                      <input x-model="ipc.v6_addr" @input="ipcDirty = true" placeholder="fd00::50/64" class="w-full rounded border border-gray-300 px-2 py-1 font-mono text-xs" />
+                      <input x-model="ipc.v6_gw" @input="ipcDirty = true" placeholder="{{locales.ipcfg_gw}}: fd00::1" class="w-full rounded border border-gray-300 px-2 py-1 font-mono text-xs" />
+                    </div>
+                  </div>
+                </div>
+                <div class="mt-2 flex items-center gap-2">
+                  <button @click="applyIpc()" :disabled="!ipcDirty" class="rounded bg-pcatblue px-3 py-1 text-xs text-white disabled:opacity-40">{{locales.res_apply}}</button>
+                </div>
+              </div>
+            </div>
+
+            <!-- ── Options: dangerous ops + raw config editor ── -->
+            <div x-show="subTab == 'options'" class="space-y-2 p-2">
+              <div class="flex flex-wrap gap-1">
+                <button x-show="sel().state != 'RUNNING'" @click="renameCt(sel())" class="rounded border border-gray-300 px-2 py-1 text-xs text-gray-600 hover:bg-gray-50">{{locales.ct_btn_rename}}</button>
+                <button x-show="sel().state != 'RUNNING'" @click="cloneCt(sel())" class="rounded border border-gray-300 px-2 py-1 text-xs text-gray-600 hover:bg-gray-50">{{locales.ct_btn_clone}}</button>
+                <button @click="openMigrate(sel())" class="rounded border border-gray-300 px-2 py-1 text-xs text-gray-600 hover:bg-gray-50">{{locales.ct_btn_migrate}}</button>
+                <button x-show="sel().state != 'RUNNING'" @click="destroyCt(sel())" class="rounded border border-red-300 px-2 py-1 text-xs text-red-600 hover:bg-red-50">{{locales.ct_btn_destroy}}</button>
+              </div>
+              <div class="border-t border-gray-100 pt-3">
+                <div class="flex items-center justify-between">
+                  <h4 class="text-sm font-semibold text-gray-700">{{locales.opt_config}}</h4>
+                  <button @click="saveConfig()" :disabled="!cfg.dirty" class="rounded bg-pcatblue px-3 py-1 text-xs text-white disabled:opacity-40">{{locales.btn_save}}</button>
+                </div>
+                <p class="mt-1 text-xs text-gray-400">{{locales.opt_config_hint}}</p>
+                <textarea x-model="cfg.text" @input="cfg.dirty = true" rows="14" spellcheck="false"
+                  class="mt-2 w-full rounded border border-gray-300 bg-gray-900 p-2 font-mono text-xs text-green-400"></textarea>
+              </div>
+            </div>
+
+            <!-- ── History: this machine's jobs ── -->
+            <div x-show="subTab == 'history'" class="p-2">
+              <div x-show="!ctHistory().length" class="text-center text-sm text-gray-400">{{locales.hist_empty}}</div>
+              <div class="space-y-2">
+                <template x-for="job in ctHistory()" :key="job.id">
+                  <div class="rounded border border-gray-100 p-2 text-sm" @click="expandedJob = expandedJob == job.id ? '' : job.id">
+                    <div class="flex flex-wrap items-center justify-between gap-2">
+                      <span class="text-gray-700" x-text="jobLabel(job)"></span>
+                      <span class="text-xs" :class="job.state == 'error' ? 'text-red-500' : job.state == 'done' ? 'text-green-600' : 'text-pcatblue'" x-text="job.state"></span>
+                      <span class="font-mono text-xs text-gray-400" x-text="lxcFmtTime(job.created)"></span>
+                    </div>
+                    <pre x-show="expandedJob == job.id && job.log_tail && job.log_tail.length" class="mt-2 max-h-40 overflow-auto rounded bg-gray-900 p-2 font-mono text-xs text-green-400" x-text="(job.log_tail || []).join('\n')"></pre>
+                  </div>
+                </template>
+              </div>
+            </div>
+          </div>
+        </template>
+      </div>
+    </div>
+
+    <!-- ── right-click menu for the container rail (Proxmox-style) ──
+         A sibling of the tab panes, not a child of the rail: it is
+         position:fixed, so nesting it inside the scrolling list would clip
+         it. Backdrop swallows the next click/right-click to dismiss. -->
+    <template x-if="ctx.open">
+      <div>
+        <div class="fixed inset-0 z-40" @click="closeCtx()" @contextmenu.prevent="closeCtx()"></div>
+        <div class="fixed z-50 w-44 overflow-hidden rounded-md border border-gray-200 bg-white py-1 shadow-lg"
+          :style="'left:' + ctx.x + 'px; top:' + ctx.y + 'px'" @keydown.escape.window="closeCtx()">
+          <div class="truncate border-b border-gray-100 px-3 py-1 font-mono text-xs text-gray-400" x-text="ctx.name"></div>
+          <template x-if="ctxCt()">
+            <div>
+              <button x-show="ctxCt().state == 'STOPPED'" @click="ctxDo((ct) => ctAction('start', ct))"
+                class="block w-full px-3 py-1.5 text-left text-sm text-gray-700 hover:bg-gray-100">{{locales.ct_btn_start}}</button>
+              <button x-show="ctxCt().state == 'RUNNING'" @click="ctxDo((ct) => ctAction('shutdown', ct))"
+                class="block w-full px-3 py-1.5 text-left text-sm text-gray-700 hover:bg-gray-100">{{locales.ct_btn_shutdown}}</button>
+              <button x-show="ctxCt().state == 'RUNNING'" @click="ctxDo((ct) => ctAction('stop', ct))"
+                class="block w-full px-3 py-1.5 text-left text-sm text-gray-700 hover:bg-gray-100">{{locales.ct_btn_stop}}</button>
+              <button x-show="ctxCt().state == 'RUNNING'" @click="ctxDo((ct) => ctAction('freeze', ct))"
+                class="block w-full px-3 py-1.5 text-left text-sm text-gray-700 hover:bg-gray-100">{{locales.ct_btn_freeze}}</button>
+              <button x-show="ctxCt().state == 'FROZEN'" @click="ctxDo((ct) => ctAction('unfreeze', ct))"
+                class="block w-full px-3 py-1.5 text-left text-sm text-gray-700 hover:bg-gray-100">{{locales.ct_btn_unfreeze}}</button>
+              <div class="my-1 border-t border-gray-100"></div>
+              <button x-show="ctxCt().state == 'RUNNING'" @click="ctxDo((ct) => openConsole(ct))"
+                class="block w-full px-3 py-1.5 text-left text-sm text-gray-700 hover:bg-gray-100">{{locales.ct_btn_console}}</button>
+              <button x-show="ctxCt().state != 'RUNNING'" @click="ctxDo((ct) => renameCt(ct))"
+                class="block w-full px-3 py-1.5 text-left text-sm text-gray-700 hover:bg-gray-100">{{locales.ct_btn_rename}}</button>
+              <button x-show="ctxCt().state != 'RUNNING'" @click="ctxDo((ct) => cloneCt(ct))"
+                class="block w-full px-3 py-1.5 text-left text-sm text-gray-700 hover:bg-gray-100">{{locales.ct_btn_clone}}</button>
+              <button x-show="ctxCt().state != 'RUNNING'" @click="ctxDo((ct) => { backupPick = ct.name; doBackup(); })"
+                class="block w-full px-3 py-1.5 text-left text-sm text-gray-700 hover:bg-gray-100">{{locales.bk_btn_backup}}</button>
+              <button @click="ctxDo((ct) => openMigrate(ct))"
+                class="block w-full px-3 py-1.5 text-left text-sm text-gray-700 hover:bg-gray-100">{{locales.ct_btn_migrate}}</button>
+              <div class="my-1 border-t border-gray-100"></div>
+              <button x-show="ctxCt().state != 'RUNNING'" @click="ctxDo((ct) => destroyCt(ct))"
+                class="block w-full px-3 py-1.5 text-left text-sm text-red-600 hover:bg-red-50">{{locales.ct_btn_destroy}}</button>
+              <span x-show="ctxCt().state == 'RUNNING'" class="block px-3 py-1.5 text-left text-xs text-gray-400">{{locales.ct_stop_first}}</span>
+            </div>
+          </template>
+        </div>
+      </div>
+    </template>
+
+    <!-- ── bottom task-log bar: pinned to the viewport, above the fixed
+         footer (desktop) / bottom nav (mobile), Proxmox-style ── -->
+    <div class="fixed left-0 right-0 z-20 border-t border-gray-300 bg-white shadow" :style="'bottom:' + bottomOffset + 'px'">
+      <button @click="logsOpen = !logsOpen" class="flex w-full items-center justify-between px-4 py-1 text-sm font-semibold text-gray-600">
+        <span>{{locales.logs_title}}
+          <span x-show="activeJobCount() > 0" x-text="activeJobCount()" class="ml-1 rounded-full bg-pcatblue px-2 py-0.5 text-xs text-white"></span>
+        </span>
+        <span class="text-gray-400" x-text="logsOpen ? '▾' : '▸'"></span>
+      </button>
+      <!-- ~3 rows tall by default; scrolls for the rest -->
+      <div x-show="logsOpen" class="max-h-20 overflow-y-auto border-t border-gray-100 px-2 pb-2">
+        <div x-show="!jobList().length" class="p-3 text-center text-xs text-gray-400">{{locales.tasks_no_jobs}}</div>
+        <template x-for="job in jobList()" :key="'b' + job.id">
+          <div class="border-b border-gray-50 px-2 py-1 text-xs" @click="expandedJob = expandedJob == job.id ? '' : job.id">
+            <div class="flex flex-wrap items-center gap-2">
+              <span class="w-32 flex-shrink-0 font-mono text-gray-400" x-text="lxcFmtTime(job.created)"></span>
+              <span class="min-w-0 flex-1 truncate text-gray-700" x-text="jobLabel(job)"></span>
+              <span x-show="job.state == 'running'" class="w-24 flex-shrink-0">
+                <span class="block h-2 overflow-hidden rounded bg-gray-200"><span class="block h-full bg-pcatblue transition-all" :style="'width:' + (job.pct === null ? 100 : job.pct) + '%'"></span></span>
+              </span>
+              <span x-show="job.state == 'running' && job.speed_bps" class="w-20 flex-shrink-0 text-right font-mono text-pcatblue" x-text="lxcFormatSpeed(job.speed_bps)"></span>
+              <span class="w-16 flex-shrink-0 text-right" :class="job.state == 'error' ? 'text-red-500' : job.state == 'done' ? 'text-green-600' : 'text-pcatblue'" x-text="job.state"></span>
+            </div>
+            <div x-show="expandedJob == job.id" class="mt-1">
+              <span x-show="job.error" class="text-red-500" x-text="job.error"></span>
+              <pre x-show="job.log_tail && job.log_tail.length" class="max-h-40 overflow-auto rounded bg-gray-900 p-2 font-mono text-green-400" x-text="(job.log_tail || []).join('\n')"></pre>
+            </div>
+          </div>
+        </template>
+      </div>
+    </div>
+
+    <!-- ── Create ── -->
+    <div x-show="tab == 'create'" class="mt-2">
+      <div class="max-w-md rounded-lg bg-white p-2 shadow">
+        <h3 class="font-semibold text-gray-700">{{locales.create_title}}</h3>
+        <div class="mt-3 space-y-3 text-sm">
+          <div class="flex gap-2">
+            <div class="flex-1">
+              <label class="mb-1 block text-gray-500">{{locales.create_name}}</label>
+              <input x-model="create.name" class="w-full rounded border border-gray-300 px-2 py-1 font-mono" placeholder="ct1" />
+            </div>
+            <div class="w-28">
+              <label class="mb-1 block text-gray-500">{{locales.create_vmid}}</label>
+              <input x-model="create.vmid" type="number" min="100" :placeholder="nextVmid()"
+                class="w-full rounded border border-gray-300 px-2 py-1 font-mono"
+                :class="vmidTaken() ? 'border-red-400' : 'border-gray-300'" />
+            </div>
+          </div>
+          <p x-show="vmidTaken()" class="-mt-2 text-xs text-red-500">{{locales.create_vmid_taken}}</p>
+          <div>
+            <label class="mb-1 block text-gray-500">{{locales.create_template}}</label>
+            <select x-model="create.tpl" @change="applyTemplate()" class="w-full rounded border border-gray-300 px-2 py-1">
+              <template x-for="(t, i) in (health.templates || [])" :key="i">
+                <option :value="i" x-text="t.label"></option>
+              </template>
+              <option value="custom">{{locales.create_custom}}</option>
+            </select>
+          </div>
+          <div x-show="create.tpl == 'custom'" class="flex gap-2">
+            <div class="flex-1">
+              <label class="mb-1 block text-gray-500">{{locales.create_dist}}</label>
+              <input x-model="create.dist" class="w-full rounded border border-gray-300 px-2 py-1 font-mono" placeholder="debian" />
+            </div>
+            <div class="flex-1">
+              <label class="mb-1 block text-gray-500">{{locales.create_release}}</label>
+              <input x-model="create.release" class="w-full rounded border border-gray-300 px-2 py-1 font-mono" placeholder="trixie" />
+            </div>
+          </div>
+          <div>
+            <label class="mb-1 block text-gray-500">{{locales.create_arch}}</label>
+            <input x-model="create.arch" class="w-full rounded border border-gray-300 px-2 py-1 font-mono" />
+          </div>
+          <div>
+            <label class="mb-1 block text-gray-500">{{locales.create_storage}}</label>
+            <select x-model="create.storage" class="w-full rounded border border-gray-300 px-2 py-1 font-mono text-xs">
+              <option value="" x-text="'{{locales.create_storage_default}} (' + storage.lxcpath + ')'"></option>
+              <template x-for="cand in storage.candidates" :key="'cs' + cand.path">
+                <option :value="cand.path + '/lxc-storage'" :disabled="!cand.posix"
+                  x-text="cand.path + '/lxc-storage  (' + cand.fstype + ', ' + lxcFormatSize(cand.free_bytes) + ' {{locales.storage_free}})' + (cand.posix ? '' : ' — {{locales.storage_bad_fs}}')"></option>
+              </template>
+            </select>
+          </div>
+          <p class="text-xs text-gray-400">{{locales.create_hint}}</p>
+          <!-- Creating into the overlay: the container is gone at the next
+               firmware upgrade, so say it here rather than after the fact. -->
+          <p x-show="lxcCreateTargetVolatile()" x-cloak
+             class="rounded bg-red-50 p-2 text-xs text-red-700"
+             x-text="lxcCreateWarnText()"></p>
+          <div class="flex justify-end">
+            <button @click="submitCreate()" :disabled="creating" class="rounded bg-pcatblue px-4 py-2 text-sm text-white disabled:opacity-40">{{locales.create_btn}}</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Setup ── -->
+    <div x-show="tab == 'setup'" class="mt-2 space-y-2">
+      <div class="rounded-lg bg-white p-2 shadow">
+        <h3 class="font-semibold text-gray-700">{{locales.setup_title}}</h3>
+        <div class="mt-2 space-y-2">
+          <template x-for="c in checkRows()" :key="c.key">
+            <div class="flex flex-wrap items-center justify-between gap-2 rounded border border-gray-100 p-3">
+              <div>
+                <div class="text-sm text-gray-700" x-text="c.label"></div>
+                <div class="text-xs" :class="c.ok ? 'text-green-600' : 'text-red-500'"
+                  x-text="c.ok ? '{{locales.setup_ok}}' : (c.fixable ? '{{locales.setup_missing}}' : '{{locales.setup_unfixable}}')"></div>
+              </div>
+              <button x-show="!c.ok && c.fixable" @click="fix(c.key)" :disabled="busyFix != ''"
+                class="rounded bg-pcatblue px-3 py-1 text-sm text-white disabled:opacity-40"
+                x-text="busyFix == c.key ? '…' : '{{locales.setup_fix}}'"></button>
+            </div>
+          </template>
+        </div>
+      </div>
+
+      <div class="rounded-lg bg-white p-2 shadow">
+        <h3 class="font-semibold text-gray-700">{{locales.storage_title}}</h3>
+        <p class="mt-1 font-mono text-xs text-gray-500">
+          {{locales.storage_current}}: <span x-text="storage.lxcpath"></span>
+          <span x-show="health.free_bytes !== null" x-text="' · ' + lxcFormatSize(health.free_bytes) + ' {{locales.storage_free}}'"></span>
+        </p>
+        <p x-show="health.running > 0" class="mt-1 text-xs text-yellow-700">{{locales.storage_running_warn}}</p>
+
+        <!-- Upgrade durability. sysupgrade -c keeps only /etc, so anything on
+             the overlay is erased by a flash; containers on a mounted volume
+             are relinked automatically at the next boot. -->
+        <p x-show="lxcStorageWarnText()" x-cloak
+           class="mt-2 rounded bg-red-50 p-2 text-xs text-red-700"
+           x-text="lxcStorageWarnText()"></p>
+        <p x-show="storage.lxcpath && storage.lxcpath_durable && storage.volatile && !storage.volatile.length"
+           x-cloak class="mt-2 text-xs text-green-700">{{locales.storage_durable_ok}}</p>
+        <div class="mt-3 flex flex-wrap items-end gap-2 text-sm">
+          <div>
+            <label class="mb-1 block text-xs text-gray-500">{{locales.storage_pick}}</label>
+            <select x-model="storage.pick" class="rounded border border-gray-300 py-1 pl-2 pr-7">
+              <template x-for="cand in storage.candidates" :key="cand.path">
+                <option :value="cand.path + '/lxc'" :disabled="!cand.posix"
+                  x-text="cand.path + '/lxc  (' + cand.fstype + ', ' + lxcFormatSize(cand.free_bytes) + ' {{locales.storage_free}})' + (cand.posix ? '' : ' — {{locales.storage_bad_fs}}')"></option>
+              </template>
+              <option value="custom">{{locales.storage_custom_path}}</option>
+            </select>
+          </div>
+          <input x-show="storage.pick == 'custom'" x-model="storage.custom" class="rounded border border-gray-300 px-2 py-1 font-mono" placeholder="/mnt/disk/lxc" />
+          <label class="flex items-center gap-1 text-xs text-gray-500">
+            <input type="checkbox" x-model="storage.keep_old" class="rounded" /> {{locales.storage_keep_old}}
+          </label>
+          <button @click="moveStorage()" :disabled="health.running > 0" class="rounded bg-pcatblue px-3 py-1 text-white disabled:opacity-40">{{locales.storage_move}}</button>
+        </div>
+      </div>
+
+      <!-- container networks: built-in NAT/LAN plus custom bridges -->
+      <div class="rounded-lg bg-white p-2 shadow">
+        <h3 class="font-semibold text-gray-700">{{locales.nets_title}}</h3>
+        <p class="mt-1 text-xs text-gray-400">{{locales.nets_hint}}</p>
+        <table class="mt-2 w-full text-sm">
+          <thead>
+            <tr class="text-left text-xs font-semibold uppercase tracking-wide text-gray-400">
+              <th class="pb-1 font-semibold">{{locales.nets_col_bridge}}</th>
+              <th class="pb-1 font-semibold">{{locales.nets_col_port}}</th>
+              <th class="pb-1 font-semibold">{{locales.nets_col_mode}}</th>
+              <th class="pb-1 font-semibold">{{locales.nets_col_state}}</th>
+              <th class="pb-1"></th>
+            </tr>
+          </thead>
+          <tbody class="divide-y">
+            <template x-for="n in nets.networks" :key="'nw' + n.bridge">
+              <tr>
+                <td class="py-1.5 pr-2 font-mono text-xs" x-text="n.bridge"></td>
+                <td class="py-1.5 pr-2 font-mono text-xs text-gray-500" x-text="n.port || '—'"></td>
+                <td class="py-1.5 pr-2 text-xs text-gray-500"
+                  x-text="n.mode == 'nat' || n.mode == 'nat-island' ? '{{locales.nets_mode_nat}}' + (n.addr ? ' · ' + n.addr : '') : n.mode == 'lan' ? '{{locales.net_bridge}}' : '{{locales.nets_mode_l2}}'"></td>
+                <td class="py-1.5 pr-2 text-xs" :class="n.up ? 'text-green-600' : 'text-red-500'" x-text="n.up ? '{{locales.nets_up}}' : '{{locales.nets_down}}'"></td>
+                <td class="py-1.5 text-right">
+                  <button x-show="!n.builtin" @click="deleteNetwork(n)" class="rounded border border-red-300 px-2 py-0.5 text-xs text-red-600 hover:bg-red-50">{{locales.nets_delete}}</button>
+                </td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+        <div class="mt-2 border-t border-gray-100 pt-2">
+          <h4 class="text-sm font-semibold text-gray-700">{{locales.nets_create}}</h4>
+          <div class="mt-1 flex flex-wrap items-end gap-2 text-sm">
+            <div>
+              <label class="mb-1 block text-xs text-gray-500">{{locales.nets_name}}</label>
+              <input x-model="newNet.name" placeholder="wan1" class="w-24 rounded border border-gray-300 px-2 py-1 font-mono text-xs" />
+            </div>
+            <div>
+              <label class="mb-1 block text-xs text-gray-500">{{locales.nets_port}}</label>
+              <select x-model="newNet.port" class="rounded border border-gray-300 py-1 pl-2 pr-7 font-mono text-xs">
+                <option value="">{{locales.nets_port_none}}</option>
+                <template x-for="p in nets.ports" :key="'pp' + p.name">
+                  <option :value="p.name" :disabled="!!p.master"
+                    x-text="p.name + ' — ' + (p.master ? '{{locales.nets_port_in}} ' + p.master : (p.ifaces.length ? p.ifaces.join(', ') : '{{locales.nets_port_free}}'))"></option>
+                </template>
+              </select>
+            </div>
+            <div>
+              <label class="mb-1 block text-xs text-gray-500">{{locales.nets_addressing}}</label>
+              <select x-model="newNet.addressing" class="rounded border border-gray-300 py-1 pl-2 pr-7 text-xs">
+                <option value="l2">{{locales.nets_addr_l2}}</option>
+                <option value="nat">{{locales.nets_addr_nat}}</option>
+              </select>
+            </div>
+            <div x-show="newNet.addressing == 'nat'">
+              <label class="mb-1 block text-xs text-gray-500">{{locales.nets_subnet}}</label>
+              <input x-model="newNet.subnet" placeholder="10.0.4.1/24" class="w-32 rounded border border-gray-300 px-2 py-1 font-mono text-xs" />
+            </div>
+            <button @click="createNetwork()" :disabled="!newNet.name || netBusy" class="rounded bg-pcatblue px-3 py-1 text-white disabled:opacity-40">{{locales.nets_create_btn}}</button>
+          </div>
+          <p x-show="movedIfacesFor(newNet.port).length" class="mt-1 text-xs text-yellow-700"
+            x-text="'{{locales.nets_wan_warn}}'.replace('%s', movedIfacesFor(newNet.port).join(', '))"></p>
+        </div>
+      </div>
+
+      <div class="rounded-lg bg-white p-2 shadow">
+        <h3 class="font-semibold text-gray-700">{{locales.pubkey_title}}</h3>
+        <p class="mt-1 text-xs text-gray-400">{{locales.pubkey_hint}}</p>
+        <pre x-show="migrateInfo.pubkey" class="mt-2 overflow-x-auto rounded bg-gray-900 p-2 font-mono text-xs text-green-400" x-text="migrateInfo.pubkey"></pre>
+        <p x-show="!migrateInfo.key_ready" class="mt-2 text-xs text-yellow-700">{{locales.mig_key_missing}}</p>
+      </div>
+    </div>
+
+    <!-- ── Backups ── -->
+    <div x-show="tab == 'backups'" class="mt-2 space-y-2">
+      <div class="rounded-lg bg-white p-3 shadow">
+        <h3 class="font-semibold text-gray-700">{{locales.bk_new_title}}</h3>
+        <p class="mt-1 text-xs text-gray-400">{{locales.bk_offline_hint}}</p>
+        <div class="mt-2 flex flex-wrap items-end gap-2 text-sm">
+          <div class="flex-1">
+            <label class="mb-1 block text-gray-500">{{locales.bk_container}}</label>
+            <select x-model="backupPick" class="w-full rounded border border-gray-300 px-2 py-1">
+              <option value="">—</option>
+              <template x-for="ct in containers" :key="ct.name">
+                <option :value="ct.name" x-text="ct.name + (ct.state == 'RUNNING' ? ' ({{locales.bk_running_suffix}})' : '')" :disabled="ct.state == 'RUNNING'"></option>
+              </template>
+            </select>
+          </div>
+          <button @click="doBackup()" :disabled="!backupPick"
+            class="rounded bg-pcatblue px-4 py-1.5 text-sm text-white disabled:opacity-40">{{locales.bk_btn_backup}}</button>
+        </div>
+      </div>
+
+      <div class="rounded-lg bg-white p-3 shadow">
+        <h3 class="font-semibold text-gray-700">{{locales.bk_list_title}}</h3>
+        <div x-show="!backups.length" class="p-4 text-center text-sm text-gray-400">{{locales.bk_none}}</div>
+        <template x-for="b in backups" :key="b.file">
+          <div class="flex flex-wrap items-center justify-between gap-2 border-b border-gray-100 py-2 text-sm last:border-0">
+            <div class="min-w-0">
+              <div class="truncate font-mono text-gray-700" x-text="b.container"></div>
+              <div class="font-mono text-xs text-gray-400">
+                <span x-text="bkStamp(b.stamp)"></span> · <span x-text="lxcFormatSize(b.size_bytes)"></span>
+              </div>
+            </div>
+            <div class="flex flex-shrink-0 gap-1">
+              <button @click="doRestore(b)" class="rounded border border-gray-300 px-2 py-1 text-xs text-gray-600 hover:bg-gray-50">{{locales.bk_btn_restore}}</button>
+              <button @click="delBackup(b)" class="rounded border border-red-300 px-2 py-1 text-xs text-red-600 hover:bg-red-50">{{locales.bk_btn_delete}}</button>
+            </div>
+          </div>
+        </template>
+      </div>
+    </div>
+
+    <!-- ── Tasks ── -->
+    <div x-show="tab == 'tasks'" class="mt-2 space-y-1">
+      <div x-show="!jobList().length" class="rounded-lg bg-white p-6 text-center text-gray-400 shadow">{{locales.tasks_no_jobs}}</div>
+      <template x-for="job in jobList()" :key="job.id">
+        <div class="rounded-lg bg-white p-2 shadow">
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <div class="text-sm font-medium text-gray-700" x-text="jobLabel(job)"></div>
+              <div class="text-xs text-gray-400">
+                <span x-text="job.kind"></span>
+                <span class="mx-1">·</span>
+                <span :class="job.state == 'error' ? 'text-red-500' : job.state == 'done' ? 'text-green-600' : 'text-pcatblue'" x-text="job.state"></span>
+                <span x-show="job.error" class="text-red-500" x-text="' — ' + job.error"></span>
+              </div>
+            </div>
+            <div class="flex gap-2">
+              <button x-show="(job.state == 'running' || job.state == 'queued') && job.cancellable" @click="jobAction(job.id, 'cancel')"
+                class="rounded border border-gray-300 px-3 py-1 text-xs text-gray-600 hover:bg-gray-50">{{locales.tasks_btn_cancel}}</button>
+              <button x-show="job.state != 'running' && job.state != 'queued'" @click="jobAction(job.id, 'dismiss')"
+                class="rounded border border-gray-300 px-3 py-1 text-xs text-gray-400 hover:bg-gray-50">{{locales.tasks_btn_dismiss}}</button>
+            </div>
+          </div>
+          <div x-show="job.state == 'running'" class="mt-2">
+            <div class="h-2 overflow-hidden rounded bg-gray-200">
+              <div class="h-full bg-pcatblue transition-all" :style="'width:' + (job.pct === null ? 100 : job.pct) + '%'" :class="job.pct === null ? 'animate-pulse' : ''"></div>
+            </div>
+            <div class="mt-1 flex justify-between text-xs text-gray-400">
+              <span x-text="job.message"></span>
+              <span class="flex-shrink-0 space-x-2">
+                <span x-show="job.speed_bps" class="font-mono text-pcatblue" x-text="lxcFormatSpeed(job.speed_bps)"></span>
+                <span x-show="job.eta_sec" x-text="'ETA ' + lxcFormatEta(job.eta_sec)"></span>
+                <span x-show="job.bytes_total" x-text="lxcFormatSize(job.bytes_done) + ' / ' + lxcFormatSize(job.bytes_total)"></span>
+              </span>
+            </div>
+          </div>
+          <div x-show="job.log_tail && job.log_tail.length && job.state != 'done'" class="mt-2 max-h-24 overflow-y-auto rounded bg-gray-900 p-2 font-mono text-xs text-green-400">
+            <template x-for="(line, i) in job.log_tail" :key="i"><div x-text="line"></div></template>
+          </div>
+        </div>
+      </template>
+    </div>
+
+    <!-- ── Migrate modal ── -->
+    <div x-show="mig.open" x-cloak class="fixed inset-0 z-40 flex items-center justify-center bg-black bg-opacity-40 p-4" @click.self="mig.open = false">
+      <div class="max-h-[85vh] w-full max-w-md overflow-y-auto rounded-lg bg-white p-5 shadow-xl">
+        <h3 class="font-bold text-gray-700">{{locales.mig_title}}: <span class="font-mono" x-text="mig.name"></span></h3>
+        <div class="mt-3 space-y-3 text-sm">
+          <div class="flex gap-2">
+            <div class="flex-1">
+              <label class="mb-1 block text-gray-500">{{locales.mig_host}}</label>
+              <input x-model="mig.host" class="w-full rounded border border-gray-300 px-2 py-1 font-mono" placeholder="192.168.1.2" />
+            </div>
+            <div class="w-20">
+              <label class="mb-1 block text-gray-500">{{locales.mig_port}}</label>
+              <input x-model.number="mig.port" class="w-full rounded border border-gray-300 px-2 py-1 font-mono" />
+            </div>
+            <div class="w-24">
+              <label class="mb-1 block text-gray-500">{{locales.mig_user}}</label>
+              <input x-model="mig.user" class="w-full rounded border border-gray-300 px-2 py-1 font-mono" />
+            </div>
+          </div>
+          <div x-show="!migrateInfo.key_ready || mig.testFailed">
+            <label class="mb-1 block text-gray-500">{{locales.mig_password}}</label>
+            <div class="flex gap-2">
+              <input type="password" x-model="mig.password" class="flex-1 rounded border border-gray-300 px-2 py-1" />
+              <button @click="pushKey()" :disabled="mig.busy || !mig.password" class="rounded border border-gray-300 px-3 py-1 text-gray-600 hover:bg-gray-50 disabled:opacity-40">{{locales.mig_pushkey}}</button>
+            </div>
+          </div>
+          <div class="flex items-center gap-2">
+            <button @click="testTarget()" :disabled="mig.busy || !mig.host" class="rounded border border-gray-300 px-3 py-1 text-gray-600 hover:bg-gray-50 disabled:opacity-40" x-text="mig.busy ? '…' : '{{locales.mig_test}}'"></button>
+            <span x-show="mig.caps.code == 'ok'" class="text-xs text-green-600">{{locales.mig_target_ok}}</span>
+            <span x-show="mig.testFailed" class="text-xs text-red-500" x-text="mig.testDetail"></span>
+          </div>
+          <div x-show="mig.caps.code == 'ok'" class="space-y-3">
+            <p x-show="!mig.caps.tar" class="text-xs text-red-500">{{locales.mig_no_tar}}</p>
+            <div>
+              <label class="mb-1 block text-gray-500">{{locales.mig_remote_path}}</label>
+              <input x-model="mig.remote_path" class="w-full rounded border border-gray-300 px-2 py-1 font-mono" />
+            </div>
+            <div>
+              <label class="mb-1 block text-gray-500">{{locales.mig_mode}}</label>
+              <select x-model="mig.mode" class="w-full rounded border border-gray-300 px-2 py-1">
+                <option value="copy">{{locales.mig_copy}}</option>
+                <option value="move">{{locales.mig_move}}</option>
+              </select>
+            </div>
+            <label class="flex items-center gap-2 text-xs text-gray-500">
+              <input type="checkbox" x-model="mig.start_after" class="rounded" /> {{locales.mig_start_after}}
+            </label>
+          </div>
+        </div>
+        <div class="mt-4 flex justify-end gap-2">
+          <button @click="mig.open = false" class="rounded border border-gray-300 px-4 py-2 text-sm text-gray-600">{{locales.shares_btn_cancel}}</button>
+          <button @click="goMigrate()" :disabled="mig.caps.code != 'ok' || !mig.caps.tar || mig.busy" class="rounded bg-pcatblue px-4 py-2 text-sm text-white disabled:opacity-40">{{locales.mig_go}}</button>
+        </div>
+      </div>
+    </div>
+
+    {% include '_nas_confirm_modal.html' %}
+  </div>
+</div>
+{% endblock %} {% block bottom %}
+<script>
+  function lxcFmtTime(ts) {
+    if (!ts) return "";
+    var d = new Date(ts * 1000), p = (n) => (n < 10 ? "0" : "") + n;
+    return p(d.getMonth() + 1) + "-" + p(d.getDate()) + " " + p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
+  }
+  function lxcFormatSize(n) {
+    if (n === null || n === undefined) return "";
+    if (n === 0) return "0 B";
+    var k = 1024, sizes = ["B", "KB", "MB", "GB", "TB"],
+      i = Math.floor(Math.log(n) / Math.log(k));
+    if (i >= sizes.length) i = sizes.length - 1;
+    return parseFloat((n / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
+  }
+
+  function lxcFormatSpeed(bps) {
+    if (!bps) return "";
+    return lxcFormatSize(bps) + "/s";
+  }
+  function lxcFormatEta(sec) {
+    if (sec === null || sec === undefined || sec <= 0) return "";
+    if (sec < 60) return sec + "s";
+    var m = Math.floor(sec / 60), s = sec % 60;
+    if (m < 60) return m + "m" + (s ? " " + s + "s" : "");
+    return Math.floor(m / 60) + "h " + (m % 60) + "m";
+  }
+
+  // Console windows this page has opened, by window name. Deliberately NOT
+  // in the Alpine data object: reactive state proxies whatever you put in
+  // it, and reading a property off a proxied Window throws "Illegal
+  // invocation" — the accessors on Window want the real object as `this`.
+  var consoleWins = {};
+
+  document.addEventListener("alpine:init", () => {
+    Alpine.store("app").set_page("lxc");
+    Alpine.data("lxc", () => ({
+      tab: "containers",
+      subTab: "summary",
+      health: {},
+      containers: [],
+      ctLoaded: false,
+      selected: "",
+      netHint: "",
+      stats: {},
+      lim: { mem: 0, cores: 0 },
+      cfg: { text: "", dirty: false },
+      ipc: { v4_mode: "dhcp", v4_addr: "", v4_gw: "", v6_mode: "auto", v6_addr: "", v6_gw: "" },
+      ipcDirty: false,
+      diskMove: "",
+      expandedJob: "",
+      logsOpen: true,
+      bottomOffset: 0,
+      // right-click menu on the container rail (Proxmox-style)
+      ctx: { open: false, x: 0, y: 0, name: "" },
+      backups: [],
+      backupPick: "",
+      _pendingVmid: 0,
+      jobs: {},
+      busy: "",
+      busyFix: "",
+      creating: false,
+      rebootNeeded: false,
+      create: { name: "", vmid: "", tpl: 0, dist: "debian", release: "trixie", arch: "", storage: "" },
+      // volatile: containers a firmware upgrade would erase (null until the
+      // first load, so the "safe" line does not flash before we know).
+      storage: { lxcpath: "", candidates: [], pick: "custom", custom: "", keep_old: false,
+                 volatile: null, recommended: "", lxcpath_durable: true },
+      migrateInfo: { key_ready: false, pubkey: "" },
+      nets: { networks: [], ports: [] },
+      newNet: { name: "", port: "", addressing: "l2", subnet: "10.0.4.1/24" },
+      netBusy: false,
+      mig: { open: false, name: "", host: "", port: 22, user: "root", password: "", remote_path: "/srv/lxc", mode: "copy", start_after: true, caps: {}, testFailed: false, testDetail: "", busy: false },
+      confirm: { open: false, title: "", body: "", typed: "", expect: "", resolve: null },
+
+      init() {
+        // Compact deep-link: #<vmid><s|c|r|n|o|h> = machine + sub-tab
+        // (e.g. #100c = CT 100 console); #N/#S/#T = create/setup/tasks.
+        var h = (location.hash || "").slice(1);
+        var mm = h.match(/^(\d+)([scrnoh])$/);
+        if (mm) {
+          this._pendingVmid = parseInt(mm[1]);
+          this.subTab = { s: "summary", c: "console", r: "resources", n: "network", o: "options", h: "history" }[mm[2]];
+        } else if ({ N: 1, S: 1, T: 1 }[h]) {
+          this.tab = { N: "create", S: "setup", T: "tasks" }[h];
+        }
+        window.socket = io({ transports: ["polling"], upgrade: false });
+        socket.on("nas_job_status", (j) => {
+          if ((j.kind || "").indexOf("lxc_") == 0) {
+            this.jobs[j.id] = j;
+            if (j.state == "done") {
+              this.loadContainers(); this.loadHealth();
+              if (j.kind == "lxc_backup" || j.kind == "lxc_restore") this.loadBackups();
+            }
+          }
+        });
+        // Sit the pinned task-log bar on top of whichever fixed bottom
+        // chrome is visible (desktop footer / mobile bottom nav).
+        var measure = () => {
+          var el = document.getElementById("bottom-nav-content");
+          if (!el || el.offsetHeight == 0) el = document.querySelector("footer");
+          this.bottomOffset = el && el.offsetParent !== null ? el.offsetHeight : 0;
+        };
+        measure();
+        window.addEventListener("resize", measure);
+        // The footer renders after alpine:init on slow devices — re-measure
+        // a few times so the bar doesn't sit on top of it.
+        window.addEventListener("load", measure);
+        setTimeout(measure, 500);
+        setTimeout(measure, 2000);
+        this.loadHealth();
+        this.loadContainers(true);
+        this.loadStorage();
+        this.loadMigrateInfo();
+        this.loadNetworks();
+        this.loadJobs();
+        this.loadBackups();
+        this.$watch("selected", () => {
+          this.stats = {};
+          this.cfg = { text: "", dirty: false };
+          this.ipc = { v4_mode: "dhcp", v4_addr: "", v4_gw: "", v6_mode: "auto", v6_addr: "", v6_gw: "" };
+          this.ipcDirty = false;
+          this.diskMove = "";
+          this.loadStats();
+          if (this.subTab == "options") this.loadConfig();
+          this.syncHash();
+        });
+        setInterval(() => {
+          if (document.hidden) return;
+          if (this.tab == "containers") this.loadContainers();
+        }, 5000);
+        setInterval(() => {
+          if (document.hidden || this.tab != "containers" || !this.sel()) return;
+          if (["summary", "resources", "network"].includes(this.subTab)) this.loadStats();
+        }, 3000);
+      },
+
+      // ── sub-tabs / stats / limits / config ──
+      subLabel(st) {
+        return { summary: "{{locales.sub_summary}}", console: "{{locales.ct_btn_console}}",
+          resources: "{{locales.sub_resources}}", network: "{{locales.net_mode}}",
+          options: "{{locales.sub_options}}", history: "{{locales.sub_history}}" }[st] || st;
+      },
+      pickSub(st) {
+        this.subTab = st;
+        this.syncHash();
+        if (st == "options" && !this.cfg.text) this.loadConfig();
+        if (["summary", "resources", "network"].includes(st)) this.loadStats();
+      },
+      async loadStats() {
+        if (!this.sel()) return;
+        try {
+          var d = await (await fetch("/api/v1/lxc/stats.json?name=" + encodeURIComponent(this.sel().name))).json();
+          if (d.status == "ok" && this.sel() && d) {
+            this.stats = d;
+            if (!this.cfg.dirty && d.limits) { this.lim.mem = d.limits.memory_mb; this.lim.cores = d.limits.cpu_cores; }
+            if (!this.ipcDirty && d.ip_config) this.ipc = Object.assign({}, d.ip_config);
+          }
+        } catch (e) {}
+      },
+      v4list(ct) {
+        return (ct.ips || []).filter(ip => ip.indexOf(":") < 0);
+      },
+      allIps() {
+        return ((this.stats.ips && this.stats.ips.length ? this.stats.ips
+          : (this.sel() ? this.sel().ips : [])) || []);
+      },
+      gwFor(ip) {
+        return ip.indexOf(":") >= 0 ? (this.stats.gateway6 || "") : (this.stats.gateway4 || "");
+      },
+      diskBytes() {
+        var s = this.stats.size_bytes;
+        if (s === null || s === undefined) s = this.sel() ? this.sel().size_bytes : null;
+        return s;
+      },
+      async applyIpc() {
+        await this.ctAction("ipconfig", this.sel(), this.ipc);
+        this.ipcDirty = false;
+        this.netHint = this.sel() && this.sel().state == "RUNNING" ? this.sel().name : "";
+        this.loadStats();
+      },
+      async moveDisk() {
+        var dest = this.diskMove || this.storage.lxcpath;
+        var yes = await this.confirmDialog("{{locales.res_disk_move}}: " + this.sel().name + " → " + dest, "{{locales.res_disk_move_warn}}", "");
+        if (!yes) return;
+        var d = await (await fetch("/api/v1/lxc/move.json", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: this.sel().name, dest: this.diskMove || null })
+        })).json();
+        if (d.status == "ok") { this.logsOpen = true; this.loadJobs(); }
+        else showNotification(d.message, d.message, "error");
+      },
+      ipv4() {
+        var ips = (this.stats.ips && this.stats.ips.length ? this.stats.ips
+          : (this.sel() ? this.sel().ips : [])) || [];
+        return ips.find(ip => /^\d+\.\d+\.\d+\.\d+$/.test(ip)) || "";
+      },
+      memPct() {
+        var total = this.stats.mem_max_bytes || this.stats.host_mem_bytes;
+        if (!this.stats.mem_bytes || !total) return 0;
+        // One decimal, not a whole percent: an unlimited CT is measured
+        // against all of host RAM, where 68 MB of 16 GB rounds to 0.
+        return Math.min(100, Math.round(this.stats.mem_bytes * 1000 / total) / 10);
+      },
+      memLabel() {
+        if (!this.stats.mem_bytes) return "—";
+        var total = this.stats.mem_max_bytes || this.stats.host_mem_bytes;
+        return lxcFormatSize(this.stats.mem_bytes) + " / " + lxcFormatSize(total)
+          + (total ? " · " + this.memPct() + "%" : "");
+      },
+      // An idle container sits at 0.1% of CPU and well under 1% of host RAM.
+      // That is a fraction of a pixel, so the bar looked stuck at empty even
+      // while the numbers above it moved. Keep the real proportion and floor
+      // the paint at a sliver, so "idle" reads differently from "dead".
+      barStyle(pct) {
+        var w = Math.max(0, Math.min(100, pct || 0));
+        return "width:" + w + "%" + (w > 0 ? ";min-width:3px" : "");
+      },
+      fmtUptime(s) {
+        if (s === null || s === undefined) return "—";
+        var d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
+        return (d ? d + "d " : "") + (h ? h + "h " : "") + m + "m";
+      },
+      async applyLimits() {
+        var d = await (await fetch("/api/v1/lxc/limits.json", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: this.sel().name, memory_mb: this.lim.mem || 0, cpu_cores: this.lim.cores || 0 })
+        })).json();
+        if (d.status == "ok") { showNotification("OK", "OK", "success"); this.loadStats(); }
+        else showNotification(d.message, d.message, "error");
+      },
+      async loadConfig() {
+        if (!this.sel()) return;
+        try {
+          var d = await (await fetch("/api/v1/lxc/config.json?name=" + encodeURIComponent(this.sel().name))).json();
+          if (d.status == "ok") this.cfg = { text: d.text, dirty: false };
+        } catch (e) {}
+      },
+      async saveConfig() {
+        var yes = await this.confirmDialog("{{locales.opt_config}}: " + this.sel().name, "{{locales.opt_config_warn}}", "");
+        if (!yes) return;
+        var d = await (await fetch("/api/v1/lxc/config.json", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: this.sel().name, text: this.cfg.text })
+        })).json();
+        if (d.status == "ok") { this.cfg.dirty = false; showNotification("OK", "OK", "success"); this.loadContainers(); }
+        else showNotification(d.message, d.message, "error");
+      },
+      ctHistory() {
+        var name = this.sel() ? this.sel().name : "";
+        return this.jobList().filter(j => j.meta && (j.meta.container == name || j.meta.clone == name));
+      },
+
+      switchTab(t) {
+        this.tab = t;
+        this.syncHash();
+        if (t == "containers") this.loadContainers(true);
+        if (t == "setup") { this.loadHealth(); this.loadStorage(); this.loadMigrateInfo(); this.loadNetworks(); }
+        if (t == "tasks") this.loadJobs();
+      },
+      syncHash() {
+        var h = "";
+        if (this.tab == "containers" && this.sel()) {
+          var m = { summary: "s", console: "c", resources: "r", network: "n", options: "o", history: "h" };
+          h = (this.sel().vmid || "") + (m[this.subTab] || "s");
+        } else {
+          h = { create: "N", setup: "S", tasks: "T" }[this.tab] || "";
+        }
+        if (("#" + h) != location.hash) location.hash = h;
+      },
+      tabClass(t) {
+        return this.tab == t ? "bg-white border border-b-0 border-gray-300 text-pcatblue" : "text-gray-500 hover:text-gray-700";
+      },
+      stateClass(s) {
+        return s == "RUNNING" ? "bg-green-100 text-green-700"
+          : s == "FROZEN" ? "bg-blue-100 text-blue-700"
+          : s == "BROKEN" ? "bg-red-100 text-red-700"
+          : "bg-gray-100 text-gray-500";
+      },
+      isCN() { return "{{locales.current_locale}}" == "CN"; },
+
+      // ── health / fixes ──
+      async loadHealth() {
+        try {
+          var d = await (await fetch("/api/v1/lxc/health.json")).json();
+          if (d.status == "ok") {
+            this.health = d;
+            if (!this.create.arch) this.create.arch = d.arch;
+            this.applyTemplate();
+          }
+        } catch (e) {}
+      },
+      // The upgrade-durability warning for the storage card, "" when there is
+      // nothing to warn about. Two separate risks, and a device can have
+      // either or both: lxcpath itself being on the overlay (every NEW
+      // container lands somewhere a flash erases) and containers sitting
+      // there right now. Built here rather than inline because the template
+      // minifier mangles nested quotes in Alpine expressions.
+      lxcStorageWarnText() {
+        if (!this.storage.lxcpath) return "";        // not loaded yet
+        var v = this.storage.volatile || [];
+        var msg = "";
+        if (!this.storage.lxcpath_durable)
+          msg = "{{locales.storage_volatile_path}}".replace("%s", this.storage.lxcpath);
+        if (v.length)
+          msg += (msg ? " " : "") + "{{locales.storage_volatile_warn}}"
+            .replace("%n", v.length).replace("%s", v.join(", "));
+        if (!msg) return "";
+        return msg + " " + (this.storage.recommended
+          ? "{{locales.storage_move_hint}}".replace("%s", this.storage.recommended)
+          : "{{locales.storage_no_target}}");
+      },
+
+      // Same question for the create form's storage picker: is the target the
+      // user is about to create into one a flash would erase?
+      lxcCreateTargetVolatile() {
+        if (!this.storage.lxcpath) return false;
+        return !this.create.storage && !this.storage.lxcpath_durable;
+      },
+
+      lxcCreateWarnText() {
+        var msg = "{{locales.create_storage_volatile}}".replace("%s", this.storage.lxcpath);
+        return msg + " " + (this.storage.recommended
+          ? "{{locales.create_storage_pick}}"
+          : "{{locales.storage_no_target}}");
+      },
+
+      checkRows() {
+        var c = this.health.checks || {};
+        var labels = {
+          runtime: "{{locales.chk_runtime}}", ubus: "{{locales.chk_ubus}}",
+          bridge: "{{locales.chk_bridge}}", cgroup: "{{locales.chk_cgroup}}",
+          autostart: "{{locales.chk_autostart}}", sshkey: "{{locales.chk_sshkey}}",
+          storage: "{{locales.chk_storage}}",
+        };
+        return Object.keys(labels).filter(k => c[k]).map(k => ({
+          key: k, label: labels[k], ok: c[k].ok, fixable: c[k].fixable,
+        }));
+      },
+      async fix(what) {
+        this.busyFix = what;
+        try {
+          var d = await (await fetch("/api/v1/lxc/fix.json", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ what: what })
+          })).json();
+          if (d.status == "ok") {
+            this.health = d;
+            var r = d.fix_result || {};
+            var results = r.results || { one: r };
+            this.rebootNeeded = Object.values(results).some(v => v && v.code == "reboot_required");
+            showNotification(this.rebootNeeded ? "{{locales.banner_reboot}}" : "OK", this.rebootNeeded ? "{{locales.banner_reboot}}" : "OK", this.rebootNeeded ? "error" : "success");
+            this.loadMigrateInfo();
+          } else showNotification(d.message, d.message, "error");
+        } finally { this.busyFix = ""; }
+      },
+
+      // ── containers ──
+      sel() {
+        return this.containers.find(c => c.name == this.selected) || null;
+      },
+      async loadContainers(withSizes) {
+        try {
+          var d = await (await fetch("/api/v1/lxc/containers.json" + (withSizes ? "?sizes=1" : ""))).json();
+          this.ctLoaded = true;
+          if (d.status == "ok") {
+            this.containers = d.containers;
+            if (this._pendingVmid) {
+              var hit = d.containers.find(c => c.vmid == this._pendingVmid);
+              this._pendingVmid = 0;
+              if (hit) this.selected = hit.name;
+            }
+            if (!this.sel() && d.containers.length) this.selected = d.containers[0].name;
+          }
+        } catch (e) {}
+      },
+      async changeNetwork(ct, mode) {
+        if (mode == this.netValue()) return;
+        await this.ctAction("network", ct, { mode: mode });
+        this.netHint = ct.state == "RUNNING" ? ct.name : "";
+      },
+      // sel().network is "nat" / "bridge" / "custom:<link>"; the select's
+      // values use "link:<bridge>" for customs.
+      netValue() {
+        var n = this.sel() ? this.sel().network : "";
+        return n && n.indexOf("custom:") == 0 ? "link:" + n.slice(7) : n;
+      },
+      netLabel() {
+        var n = this.sel() ? this.sel().network : "";
+        if (n == "bridge") return "{{locales.net_bridge}}";
+        if (n == "nat") return "{{locales.net_nat}}";
+        return (n || "").replace("custom:", "") || "—";
+      },
+      customNets() {
+        return (this.nets.networks || []).filter(n => !n.builtin);
+      },
+      movedIfacesFor(port) {
+        var p = (this.nets.ports || []).find(x => x.name == port);
+        return p ? p.ifaces : [];
+      },
+      async loadNetworks() {
+        try {
+          var d = await (await fetch("/api/v1/lxc/networks.json")).json();
+          if (d.status == "ok") this.nets = { networks: d.networks, ports: d.ports };
+        } catch (e) {}
+      },
+      async createNetwork() {
+        if (this.movedIfacesFor(this.newNet.port).length) {
+          var yes = await this.confirmDialog("{{locales.nets_create}}: br-" + this.newNet.name,
+            "{{locales.nets_wan_warn}}".replace("%s", this.movedIfacesFor(this.newNet.port).join(", ")), "");
+          if (!yes) return;
+        }
+        this.netBusy = true;
+        try {
+          var d = await (await fetch("/api/v1/lxc/networks.json", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(Object.assign({ action: "create" }, this.newNet))
+          })).json();
+          if (d.status == "ok") {
+            this.nets = { networks: d.networks, ports: d.ports };
+            this.newNet = { name: "", port: "", addressing: "l2", subnet: "10.0.4.1/24" };
+            showNotification("OK", "OK", "success");
+          } else showNotification(d.message, d.message, "error");
+        } finally { this.netBusy = false; }
+      },
+      async deleteNetwork(n) {
+        var yes = await this.confirmDialog("{{locales.nets_delete}}: " + n.bridge, "{{locales.confirm_cannot_undo}}", "");
+        if (!yes) return;
+        var d = await (await fetch("/api/v1/lxc/networks.json", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "delete", name: n.name })
+        })).json();
+        if (d.status == "ok") this.nets = { networks: d.networks, ports: d.ports };
+        else showNotification(d.message, d.message, "error");
+      },
+      async ctAction(action, ct, extra) {
+        this.busy = ct.name;
+        try {
+          var d = await (await fetch("/api/v1/lxc/container.json", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(Object.assign({ action: action, name: ct.name }, extra || {}))
+          })).json();
+          if (d.status == "ok") {
+            this.containers = d.containers;
+            if (action == "rename" && extra && extra.newname) this.selected = extra.newname;
+            if (!this.sel() && d.containers.length) this.selected = d.containers[0].name;
+          } else { showNotification(d.message, d.message, "error"); this.loadContainers(); }
+        } finally { this.busy = ""; }
+      },
+      async destroyCt(ct) {
+        // Two plain confirms rather than one type-the-name dialog: retyping
+        // a container name is busywork, and a second deliberate click is
+        // just as hard to do by accident.
+        var yes = await this.confirmDialog("{{locales.ct_btn_destroy}}: " + ct.name, "{{locales.ct_destroy_warn}} {{locales.confirm_cannot_undo}}", "");
+        if (!yes) return;
+        var sure = await this.confirmDialog("{{locales.ct_btn_destroy}}: " + ct.name, "{{locales.ct_destroy_confirm2}}", "");
+        if (!sure) return;
+        this.ctAction("destroy", ct);
+      },
+
+      // ── right-click context menu ──
+      openCtx(ct, ev) {
+        // Selecting first keeps the menu and the right pane on the same
+        // container, so an action can never land on a different one.
+        this.selected = ct.name;
+        // Clamp to the viewport: a right-click near the bottom edge would
+        // otherwise open the menu off-screen with no way to reach it.
+        var w = 176, h = 300;
+        this.ctx = {
+          open: true, name: ct.name,
+          x: Math.min(ev.clientX, Math.max(4, window.innerWidth - w - 4)),
+          y: Math.min(ev.clientY, Math.max(4, window.innerHeight - h - 4)),
+        };
+      },
+      closeCtx() {
+        this.ctx.open = false;
+      },
+      ctxCt() {
+        return this.containers.find((c) => c.name == this.ctx.name) || null;
+      },
+      ctxDo(fn) {
+        var ct = this.ctxCt();
+        this.closeCtx();
+        if (ct) fn(ct);
+      },
+      async renameCt(ct) {
+        var newname = window.prompt("{{locales.ct_btn_rename}}: " + ct.name, ct.name);
+        if (!newname || newname == ct.name) return;
+        this.ctAction("rename", ct, { newname: newname });
+      },
+      openConsole(ct) {
+        // Proxmox-style: a real popup window, not a tab, opened at a modest
+        // default size (PVE's console is 800x420) and centred. It used to
+        // open filled to availWidth/availHeight and, worse, force a
+        // resizeTo() on every open — so a window the user had sized to suit
+        // them snapped back to full screen every time, which reads as a
+        // window that cannot be resized at all.
+        var geom = this.consoleGeometry();
+        // popup=1 renders the terminal without the nav header and footer, so
+        // the whole window is shell.
+        var url = "/terminal?lxc=" + encodeURIComponent(ct.name) + "&popup=1";
+        var name = "pcat-console-" + ct.name;
+
+        // Already open (and ours): just raise it. Reusing the window by name
+        // ignores the size features anyway, and touching its geometry here is
+        // exactly what made the window feel nailed down.
+        var open = consoleWins[name];
+        if (open && !open.closed) { open.focus(); return; }
+
+        var win = window.open(
+          url, name,
+          "popup=yes,width=" + geom.w + ",height=" + geom.h +
+          ",left=" + geom.left + ",top=" + geom.top +
+          ",menubar=no,toolbar=no,location=no,status=no,resizable=yes,scrollbars=yes");
+        // Popup blocked: fall back to a tab. Keep the chrome there — a full
+        // tab has room for it, and it is the only way back to the rest of
+        // the UI when this is not a separate window.
+        if (!win) { window.open("/terminal?lxc=" + encodeURIComponent(ct.name), "_blank"); return; }
+        consoleWins[name] = win;
+        win.focus();
+      },
+
+      // Size and position for a new console window: whatever the user last
+      // left one at (the popup records it), else a Proxmox-sized window
+      // centred on the available screen. Clamped so a geometry saved on a
+      // bigger monitor cannot open a window mostly off-screen.
+      consoleGeometry() {
+        var s = window.screen;
+        // availWidth/availHeight exclude OS chrome (taskbar, macOS menu bar
+        // and Dock), so the window lands fully on-screen.
+        var aw = s.availWidth || s.width || 1024;
+        var ah = s.availHeight || s.height || 768;
+        var al = s.availLeft || 0;     // non-zero on multi-monitor setups
+        var at = s.availTop || 0;
+        var w = 800, h = 480, saved = null;
+        try { saved = JSON.parse(localStorage.getItem("pcat_console_geom") || "null"); } catch (e) {}
+        if (saved && saved.w > 320 && saved.h > 240) { w = saved.w; h = saved.h; }
+        w = Math.min(w, aw);
+        h = Math.min(h, ah);
+        var left = saved && typeof saved.left == "number" ? saved.left : al + Math.round((aw - w) / 2);
+        var top = saved && typeof saved.top == "number" ? saved.top : at + Math.round((ah - h) / 2);
+        left = Math.max(al, Math.min(left, al + aw - w));
+        top = Math.max(at, Math.min(top, at + ah - h));
+        return { w: w, h: h, left: left, top: top };
+      },
+      async cloneCt(ct) {
+        var newname = window.prompt("{{locales.ct_btn_clone}}: " + ct.name + " →", ct.name + "-copy");
+        if (!newname || newname == ct.name) return;
+        var d = await (await fetch("/api/v1/lxc/clone.json", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: ct.name, newname: newname })
+        })).json();
+        if (d.status == "ok") this.switchTab("tasks");
+        else showNotification(d.message, d.message, "error");
+      },
+
+      // ── create ──
+      applyTemplate() {
+        if (this.create.tpl === "custom") return;
+        var t = (this.health.templates || [])[Number(this.create.tpl)];
+        if (t) { this.create.dist = t.dist; this.create.release = t.release; }
+      },
+      // Lowest free CT id — the placeholder shown when the field is blank.
+      // Derived from the loaded list so it needs no extra request; the
+      // backend recomputes it anyway, this is only the hint.
+      nextVmid() {
+        var used = this.containers.map((c) => Number(c.vmid)).filter((n) => n >= 100);
+        var id = 100;
+        while (used.includes(id)) id++;
+        return String(id);
+      },
+      vmidTaken() {
+        var v = Number(this.create.vmid);
+        if (!v) return false;
+        return this.containers.some((c) => Number(c.vmid) == v);
+      },
+      async submitCreate() {
+        this.creating = true;
+        try {
+          var d = await (await fetch("/api/v1/lxc/create.json", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name: this.create.name, dist: this.create.dist, release: this.create.release, arch: this.create.arch, storage: this.create.storage || null, vmid: this.create.vmid || null })
+          })).json();
+          if (d.status == "ok") { this.create.vmid = ""; this.switchTab("tasks"); }
+          else showNotification(d.message, d.message, "error");
+        } finally { this.creating = false; }
+      },
+
+      // ── backups ──
+      async loadBackups() {
+        try {
+          var d = await (await fetch("/api/v1/lxc/backups.json")).json();
+          if (d.status == "ok") this.backups = d.backups;
+        } catch (e) {}
+      },
+      // "20260813_004500" -> "2026-08-13 00:45:00"
+      bkStamp(s) {
+        if (!s || s.length != 15) return s || "";
+        return s.slice(0, 4) + "-" + s.slice(4, 6) + "-" + s.slice(6, 8) + " " +
+          s.slice(9, 11) + ":" + s.slice(11, 13) + ":" + s.slice(13, 15);
+      },
+      async bkPost(body) {
+        var d = await (await fetch("/api/v1/lxc/backups.json", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body)
+        })).json();
+        if (d.status != "ok") { showNotification(d.message, d.message, "error"); return null; }
+        if (d.backups) this.backups = d.backups;
+        return d;
+      },
+      async doBackup() {
+        if (!this.backupPick) return;
+        var d = await this.bkPost({ action: "backup", name: this.backupPick });
+        if (d) this.switchTab("tasks");
+      },
+      async doRestore(b) {
+        // Restoring over a live container is refused server-side, so offer a
+        // new name up front when the original is still there.
+        var exists = this.containers.some((c) => c.name == b.container);
+        var target = b.container;
+        if (exists) {
+          target = window.prompt("{{locales.bk_restore_as}}", b.container + "-restored");
+          if (!target) return;
+        }
+        var yes = await this.confirmDialog("{{locales.bk_btn_restore}}: " + b.container,
+          "{{locales.bk_restore_warn}}", "");
+        if (!yes) return;
+        var d = await this.bkPost({ action: "restore", file: b.file, newname: target });
+        if (d) this.switchTab("tasks");
+      },
+      async delBackup(b) {
+        var yes = await this.confirmDialog("{{locales.bk_btn_delete}}: " + b.container,
+          "{{locales.confirm_cannot_undo}}", "");
+        if (!yes) return;
+        await this.bkPost({ action: "delete", file: b.file });
+      },
+
+      // ── storage ──
+      async loadStorage() {
+        try {
+          var d = await (await fetch("/api/v1/lxc/storage.json")).json();
+          if (d.status == "ok") {
+            this.storage.lxcpath = d.lxcpath;
+            this.storage.candidates = d.candidates;
+            this.storage.volatile = d.volatile || [];
+            this.storage.recommended = d.recommended || "";
+            this.storage.lxcpath_durable = d.lxcpath_durable !== false;
+            if (this.storage.pick == "custom" && d.candidates.length) this.storage.pick = d.candidates[0].path + "/lxc";
+          }
+        } catch (e) {}
+      },
+      async moveStorage() {
+        var path = this.storage.pick == "custom" ? this.storage.custom : this.storage.pick;
+        if (!path) return;
+        var yes = await this.confirmDialog("{{locales.storage_move}} → " + path, "{{locales.storage_move_warn}}", "");
+        if (!yes) return;
+        var d = await (await fetch("/api/v1/lxc/storage.json", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: path, keep_old: this.storage.keep_old })
+        })).json();
+        if (d.status == "ok") this.switchTab("tasks");
+        else showNotification(d.message, d.message, "error");
+      },
+
+      // ── migrate ──
+      async loadMigrateInfo() {
+        try {
+          var d = await (await fetch("/api/v1/lxc/migrate.json")).json();
+          if (d.status == "ok") this.migrateInfo = d;
+        } catch (e) {}
+      },
+      openMigrate(ct) {
+        this.mig = { open: true, name: ct.name, host: this.mig.host, port: this.mig.port, user: "root", password: "", remote_path: this.mig.remote_path || "/srv/lxc", mode: "copy", start_after: true, caps: {}, testFailed: false, testDetail: "", busy: false };
+      },
+      async migPost(body) {
+        return await (await fetch("/api/v1/lxc/migrate.json", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(Object.assign({ host: this.mig.host, port: this.mig.port, user: this.mig.user }, body))
+        })).json();
+      },
+      async testTarget() {
+        this.mig.busy = true; this.mig.testFailed = false;
+        try {
+          var d = await this.migPost({ action: "test" });
+          if (d.status == "ok") {
+            this.mig.caps = d;
+            if (d.remote_lxcpath) this.mig.remote_path = d.remote_lxcpath;
+          } else { this.mig.caps = {}; this.mig.testFailed = true; this.mig.testDetail = d.message; }
+        } finally { this.mig.busy = false; }
+      },
+      async pushKey() {
+        this.mig.busy = true;
+        try {
+          var d = await this.migPost({ action: "pushkey", password: this.mig.password });
+          if (d.status == "ok") { this.mig.password = ""; this.loadMigrateInfo(); await this.testTarget(); }
+          else showNotification(d.message, d.message, "error");
+        } finally { this.mig.busy = false; }
+      },
+      async goMigrate() {
+        if (this.mig.mode == "move") {
+          var yes = await this.confirmDialog("{{locales.mig_move}}", "{{locales.confirm_cannot_undo}}", this.mig.name);
+          if (!yes) return;
+        }
+        var d = await this.migPost({ action: "go", name: this.mig.name, remote_path: this.mig.remote_path, mode: this.mig.mode, start_after: this.mig.start_after });
+        if (d.status == "ok") { this.mig.open = false; this.switchTab("tasks"); }
+        else showNotification(d.message, d.message, "error");
+      },
+
+      // ── jobs ──
+      activeJobCount() {
+        return Object.values(this.jobs).filter(j => j.state == "queued" || j.state == "running").length;
+      },
+      jobList() {
+        return Object.values(this.jobs).sort((a, b) => b.created - a.created);
+      },
+      async loadJobs() {
+        try {
+          var d = await (await fetch("/api/v1/nas/jobs.json")).json();
+          if (d.status == "ok") {
+            this.jobs = {};
+            d.jobs.filter(j => (j.kind || "").indexOf("lxc_") == 0).forEach(j => this.jobs[j.id] = j);
+          }
+        } catch (e) {}
+      },
+      async jobAction(id, action) {
+        var d = await (await fetch("/api/v1/nas/jobs.json", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: action, id: id })
+        })).json();
+        if (d.status == "ok") {
+          this.jobs = {};
+          d.jobs.filter(j => (j.kind || "").indexOf("lxc_") == 0).forEach(j => this.jobs[j.id] = j);
+        }
+      },
+      jobLabel(j) { return this.isCN() ? (j.label_cn || j.label) : j.label; },
+
+      // ── confirm modal (same shape the shared partial binds to) ──
+      confirmDialog(title, body, expect) {
+        return new Promise((resolve) => {
+          this.confirm = { open: true, title: title, body: body, typed: "", expect: expect || "", resolve: resolve };
+        });
+      },
+      confirmOk() {
+        if (this.confirm.expect && this.confirm.typed != this.confirm.expect) return;
+        this.confirm.open = false;
+        if (this.confirm.resolve) this.confirm.resolve(true);
+      },
+      confirmCancel() {
+        this.confirm.open = false;
+        if (this.confirm.resolve) this.confirm.resolve(false);
+      },
+    }));
+  });
+</script>
+{% endblock %}

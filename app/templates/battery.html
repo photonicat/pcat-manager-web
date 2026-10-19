@@ -1,0 +1,381 @@
+{% extends '_base.html' %}
+{% block page_title %}{{locales["battery_title"]}}{% endblock %}
+{% block content %}
+<div class="container mx-auto w-full pt-14 pb-6 sm:pt-24 sm:pb-8 md:pt-28 lg:px-4" x-data="battery_health" x-init="init()">
+  <div class="flex items-center justify-between">
+    <h1 class="px-3 py-4 font-bold uppercase text-gray-600">{{locales["battery_title"]}}</h1>
+  </div>
+
+  {% include '_notification.html' %}
+
+  <div class="mb-4 flex w-full leading-normal text-gray-800">
+    <div class="grow">
+      <div class="border bg-white p-4 sm:p-6">
+
+        {% if not stm32_firmware_exist %}
+        <!-- Home model: no MCU at all, nothing to report -->
+        <div class="rounded border border-gray-200 bg-gray-50 p-4 text-sm text-gray-600">
+          {{locales["battery_no_mcu"]}}
+        </div>
+        {% else %}
+
+        <!-- Loading -->
+        <div x-show="loading" class="py-6 text-center text-sm text-gray-400">…</div>
+
+        <!-- MCU firmware too old to answer the query -->
+        <div x-cloak x-show="!loading && !supported"
+             class="rounded border border-orange-200 bg-orange-50 p-4">
+          <div class="font-semibold text-orange-800">{{locales["battery_unsupported"]}}</div>
+          <div class="mt-1 text-sm text-orange-700">{{locales["battery_unsupported_tip"]}}</div>
+          <a href="/update" class="mt-2 inline-block text-sm text-pcatblue hover:underline">{{locales["nav_update"]}}</a>
+        </div>
+
+        <div x-cloak x-show="!loading && supported">
+          <div class="mb-4 text-sm text-gray-500">{{locales["battery_subtitle"]}}</div>
+
+          <!-- Health: only meaningful once the MCU has actually measured the
+               pack across a couple of full cycles (see health_ready()). -->
+          <div x-show="health_ready()" class="mb-6">
+            <div class="mb-1 flex items-end justify-between">
+              <span class="text-sm text-gray-600" title="{{locales['battery_health_tip']}}">{{locales["battery_health"]}}</span>
+              <span class="text-2xl font-bold" :class="health_color()" x-text="health_pct !== null ? health_pct + '%' : '--'"></span>
+            </div>
+            <div class="h-2 w-full overflow-hidden rounded bg-gray-200">
+              <div class="h-2 rounded transition-all" :class="health_bar_color()"
+                   :style="'width: ' + Math.max(0, Math.min(100, health_pct || 0)) + '%'"></div>
+            </div>
+          </div>
+
+          <!-- Not measured yet: say so plainly, otherwise the rated capacity
+               below reads as if it were a measurement.
+               Two separate blocks rather than an x-text ternary holding the
+               strings: locale text must stay in HTML text nodes, never inside a
+               JS string literal, or an apostrophe in a translation breaks the
+               expression (EN battery_cycle_count_tip already has one). -->
+          <div x-show="!health_ready() && learning_active"
+               class="mb-6 rounded border border-blue-200 bg-blue-50 p-3">
+            <div class="text-sm font-semibold text-blue-800">{{locales["battery_learning_active"]}}</div>
+            <div class="mt-1 text-xs text-blue-700">{{locales["battery_learning_active_tip"]}}</div>
+          </div>
+          <div x-show="!health_ready() && !learning_active"
+               class="mb-6 rounded border border-blue-200 bg-blue-50 p-3">
+            <div class="text-sm font-semibold text-blue-800">{{locales["battery_not_learned"]}}</div>
+            <div class="mt-1 text-xs text-blue-700">{{locales["battery_not_learned_tip"]}}</div>
+          </div>
+
+          <dl class="grid grid-cols-1 gap-4 sm:grid-cols-3">
+            <div class="rounded border border-gray-200 p-3">
+              <dt class="text-xs text-gray-500">{{locales["battery_full_capacity"]}}</dt>
+              <dd class="mt-1">
+                <span class="text-xl font-semibold" x-text="full_capacity !== null ? full_capacity : '--'"></span>
+                <span class="ml-1 text-xs text-gray-500">{{locales["battery_unit_mah"]}}</span>
+                <span x-show="capacity_learned" class="ml-1 rounded bg-green-100 px-1.5 py-0.5 text-xs text-green-700">{{locales["battery_learned"]}}</span>
+                <span x-show="!capacity_learned" class="ml-1 rounded bg-gray-100 px-1.5 py-0.5 text-xs text-gray-500">{{locales["battery_not_learned"]}}</span>
+                <!-- Measured value reads low while the current-meter gain is
+                     uncalibrated; suggested pump-up factor (nominal/measured)
+                     to compile into the MCU after multimeter verification. -->
+                <div x-show="suggest_factor !== null" class="mt-1 text-xs text-gray-400"
+                     title="suggested capacity correction factor = nominal / measured; apply as ax+b current trim in MCU after multimeter calibration"
+                     x-text="'suggest ×' + suggest_factor"></div>
+              </dd>
+            </div>
+
+            <div class="rounded border border-gray-200 p-3">
+              <dt class="text-xs text-gray-500">{{locales["battery_nominal_capacity"]}}</dt>
+              <dd class="mt-1">
+                <span class="text-xl font-semibold" x-text="nominal_capacity !== null ? nominal_capacity : '--'"></span>
+                <span class="ml-1 text-xs text-gray-500">{{locales["battery_unit_mah"]}}</span>
+              </dd>
+            </div>
+
+            <div class="rounded border border-gray-200 p-3">
+              <dt class="text-xs text-gray-500" title="{{locales['battery_cycle_count_tip']}}">{{locales["battery_cycle_count"]}}</dt>
+              <dd class="mt-1">
+                <span class="text-xl font-semibold" x-text="cycle_count !== null ? cycle_count : '--'"></span>
+                <span class="ml-1 text-xs text-gray-500">{{locales["battery_unit_times"]}}</span>
+              </dd>
+            </div>
+
+            <!-- Extended fields: only sent by MCU fw >= RA2E1260717006, hide otherwise.
+                 internal_resistance is the whole-loop total (cells + wiring + MOSFET). -->
+            <div x-show="internal_resistance !== null" class="rounded border border-gray-200 p-3">
+              <dt class="text-xs text-gray-500" title="{{locales['battery_internal_resistance_tip']}}">{{locales["battery_internal_resistance"]}}</dt>
+              <dd class="mt-1">
+                <span class="text-xl font-semibold" x-text="internal_resistance !== null ? internal_resistance : '--'"></span>
+                <span class="ml-1 text-xs text-gray-500">{{locales["battery_unit_mohm"]}}</span>
+              </dd>
+            </div>
+
+            <!-- Cell-only resistance (total - ~35mOhm parasitic): only sent by
+                 MCU fw >= RA2E1260721001, hide otherwise -->
+            <div x-show="internal_resistance_battery !== null" class="rounded border border-gray-200 p-3">
+              <dt class="text-xs text-gray-500" title="{{locales['battery_internal_resistance_battery_tip']}}">{{locales["battery_internal_resistance_battery"]}}</dt>
+              <dd class="mt-1">
+                <span class="text-xl font-semibold" x-text="internal_resistance_battery !== null ? internal_resistance_battery : '--'"></span>
+                <span class="ml-1 text-xs text-gray-500">{{locales["battery_unit_mohm"]}}</span>
+              </dd>
+            </div>
+
+            <div x-show="runtime_hours !== null" class="rounded border border-gray-200 p-3">
+              <dt class="text-xs text-gray-500" title="{{locales['battery_runtime_hours_tip']}}">{{locales["battery_runtime_hours"]}}</dt>
+              <dd class="mt-1">
+                <span class="text-xl font-semibold" x-text="runtime_hours !== null ? runtime_hours : '--'"></span>
+                <span class="ml-1 text-xs text-gray-500">{{locales["battery_unit_hours"]}}</span>
+              </dd>
+            </div>
+
+            <!-- MCU uptime (time without a reset): only sent by MCU fw >= RA2E1260721006 (proto v9), hide otherwise -->
+            <div x-show="mcu_uptime_seconds !== null" class="rounded border border-gray-200 p-3">
+              <dt class="text-xs text-gray-500" title="{{locales['battery_mcu_uptime_tip']}}">{{locales["battery_mcu_uptime"]}}</dt>
+              <dd class="mt-1">
+                <span class="text-xl font-semibold" x-text="fmt_duration(mcu_uptime_seconds)"></span>
+              </dd>
+            </div>
+
+            <!-- Time since the MCU last woke from standby: only sent by MCU fw >= RA2E1260721006 (proto v9), hide otherwise -->
+            <div x-show="mcu_since_sleep_seconds !== null" class="rounded border border-gray-200 p-3">
+              <dt class="text-xs text-gray-500" title="{{locales['battery_since_sleep_tip']}}">{{locales["battery_since_sleep"]}}</dt>
+              <dd class="mt-1">
+                <span class="text-xl font-semibold" x-text="fmt_duration(mcu_since_sleep_seconds)"></span>
+                <span x-show="mcu_sleep_count !== null" class="ml-1 text-xs text-gray-500"
+                      x-text="mcu_sleep_count !== null ? (mcu_sleep_count + ' {{locales['battery_sleep_count']}}') : ''"></span>
+              </dd>
+            </div>
+
+            <!-- 2P2S pack middle-point tap voltage: only sent by MCU fw >= RA2E1260718001, hide otherwise -->
+            <div x-show="mid_voltage !== null" class="rounded border border-gray-200 p-3">
+              <dt class="text-xs text-gray-500" title="{{locales['battery_mid_voltage_tip']}}">{{locales["battery_mid_voltage"]}}</dt>
+              <dd class="mt-1">
+                <span class="text-xl font-semibold" x-text="mid_voltage !== null ? mid_voltage : '--'"></span>
+                <span class="ml-1 text-xs text-gray-500">{{locales["battery_unit_volt"]}}</span>
+              </dd>
+            </div>
+
+            <!-- Remaining capacity / energy counters: only sent by MCU fw >= RA2E1260719002, hide otherwise -->
+            <div x-show="remain_mah !== null" class="rounded border border-gray-200 p-3">
+              <dt class="text-xs text-gray-500" title="{{locales['battery_remain_mah_tip']}}">{{locales["battery_remain_mah"]}}</dt>
+              <dd class="mt-1">
+                <span class="text-xl font-semibold" x-text="remain_mah !== null ? remain_mah : '--'"></span>
+                <span class="ml-1 text-xs text-gray-500">{{locales["battery_unit_mah"]}}</span>
+              </dd>
+            </div>
+
+            <div x-show="consumed_wh !== null" class="rounded border border-gray-200 p-3">
+              <dt class="text-xs text-gray-500" title="{{locales['battery_consumed_wh_tip']}}">{{locales["battery_consumed_wh"]}}</dt>
+              <dd class="mt-1">
+                <span class="text-xl font-semibold" x-text="consumed_wh !== null ? consumed_wh : '--'"></span>
+                <span class="ml-1 text-xs text-gray-500">{{locales["battery_unit_wh"]}}</span>
+              </dd>
+            </div>
+
+            <div x-show="charged_wh !== null" class="rounded border border-gray-200 p-3">
+              <dt class="text-xs text-gray-500" title="{{locales['battery_charged_wh_tip']}}">{{locales["battery_charged_wh"]}}</dt>
+              <dd class="mt-1">
+                <span class="text-xl font-semibold" x-text="charged_wh !== null ? charged_wh : '--'"></span>
+                <span class="ml-1 text-xs text-gray-500">{{locales["battery_unit_wh"]}}</span>
+              </dd>
+            </div>
+
+            <!-- Time estimates: only sent by MCU fw >= RA2E1260719003 and only
+                 while in steady discharge/charge (slow-EMA current) -->
+            <div x-show="minutes_to_empty !== null" class="rounded border border-gray-200 p-3">
+              <dt class="text-xs text-gray-500" title="{{locales['battery_time_to_empty_tip']}}">{{locales["battery_time_to_empty"]}}</dt>
+              <dd class="mt-1">
+                <span class="text-xl font-semibold" x-text="fmt_minutes(minutes_to_empty)"></span>
+              </dd>
+            </div>
+
+            <div x-show="minutes_to_full !== null" class="rounded border border-gray-200 p-3">
+              <dt class="text-xs text-gray-500" title="{{locales['battery_time_to_full_tip']}}">{{locales["battery_time_to_full"]}}</dt>
+              <dd class="mt-1">
+                <span class="text-xl font-semibold" x-text="fmt_minutes(minutes_to_full)"></span>
+              </dd>
+            </div>
+
+            <!-- Temperature compensation: only sent by MCU fw >= RA2E1260719009 (proto v7), hide otherwise -->
+            <div x-show="gauge_temp_c !== null" class="rounded border border-gray-200 p-3">
+              <dt class="text-xs text-gray-500" title="{{locales['battery_gauge_temp_tip']}}">{{locales["battery_gauge_temp"]}}</dt>
+              <dd class="mt-1">
+                <span class="text-xl font-semibold" x-text="gauge_temp_c !== null ? gauge_temp_c : '--'"></span>
+                <span class="ml-1 text-xs text-gray-500">{{locales["battery_unit_celsius"]}}</span>
+              </dd>
+            </div>
+
+            <div x-show="temp_empty_extra_pct !== null" class="rounded border border-gray-200 p-3">
+              <dt class="text-xs text-gray-500" title="{{locales['battery_temp_empty_extra_tip']}}">{{locales["battery_temp_empty_extra"]}}</dt>
+              <dd class="mt-1">
+                <span class="text-xl font-semibold" x-text="temp_empty_extra_pct !== null ? temp_empty_extra_pct : '--'"></span>
+                <span class="ml-1 text-xs text-gray-500">%</span>
+              </dd>
+            </div>
+
+            <div x-show="r_temp_factor !== null" class="rounded border border-gray-200 p-3">
+              <dt class="text-xs text-gray-500" title="{{locales['battery_r_temp_factor_tip']}}">{{locales["battery_r_temp_factor"]}}</dt>
+              <dd class="mt-1">
+                <span class="text-xl font-semibold" x-text="r_temp_factor !== null ? ('×' + r_temp_factor) : '--'"></span>
+              </dd>
+            </div>
+          </dl>
+        </div>
+
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  document.addEventListener("alpine:init", () => {
+    Alpine.data("battery_health", () => ({
+      loading: true,
+      supported: false,
+      // Full cycles required before the health bar is trusted enough to show.
+      MIN_HEALTH_CYCLES: 2,
+      full_capacity: null,
+      nominal_capacity: null,
+      cycle_count: null,
+      capacity_learned: false,
+      learning_active: false,
+      health_pct: null,
+      internal_resistance: null,
+      internal_resistance_battery: null,
+      runtime_hours: null,
+      mid_voltage: null,
+      suggest_factor: null,
+      remain_mah: null,
+      consumed_wh: null,
+      charged_wh: null,
+      minutes_to_empty: null,
+      minutes_to_full: null,
+      gauge_temp_c: null,
+      temp_empty_extra_pct: null,
+      r_temp_factor: null,
+      mcu_uptime_seconds: null,
+      mcu_since_sleep_seconds: null,
+      mcu_sleep_count: null,
+
+      // Required by the shared _notification.html partial. Without this the
+      // partial's notification.* references throw "notification is not defined"
+      // in Alpine because it renders inside this component's x-data scope.
+      notification: {
+        show: false,
+        message: '',
+        message_en: '',
+        message_cn: '',
+        type: 'info' // 'success', 'error', 'warning', 'info'
+      },
+
+      fmt_minutes(m) {
+        if (m === null || m === undefined) return "--";
+        if (m < 60) return m + "m";
+        return Math.floor(m / 60) + "h " + (m % 60) + "m";
+      },
+
+      // Seconds -> "13d 4h" / "4h 12m" / "12m", for the MCU uptime tiles.
+      fmt_duration(s) {
+        if (s === null || s === undefined) return "--";
+        s = Math.floor(s);
+        const d = Math.floor(s / 86400);
+        const h = Math.floor((s % 86400) / 3600);
+        const m = Math.floor((s % 3600) / 60);
+        if (d > 0) return d + "d " + h + "h";
+        if (h > 0) return h + "h " + m + "m";
+        return m + "m";
+      },
+
+      init() {
+        this.fetch_battery_info();
+        // The MCU only re-learns capacity after a full discharge and the cycle
+        // count ticks about once a day, so a slow refresh is plenty.
+        setInterval(() => this.fetch_battery_info(), 60000);
+      },
+
+      fetch_battery_info() {
+        fetch("/api/v1/battery_info.json")
+          .then((r) => r.json())
+          .then((d) => {
+            // Full battery detail dump for bench diagnosis (SOC empty-point
+            // autolearn, display ax+b factors, current trim, suggested
+            // capacity factor). Open the browser console on /battery to view.
+            console.log("battery_info", d);
+            if (d.soc_raw_pct !== undefined && d.soc_raw_pct !== null) {
+              console.log(
+                "soc factor: raw=" + d.soc_raw_pct + "% displayed=a*raw+b" +
+                " a=" + d.soc_disp_a + " b=" + d.soc_disp_b +
+                " empty_learned=" + d.soc_empty_learned_pct + "%" +
+                " chg_gain=" + d.chg_gain +
+                " cur_trim: a=" + d.cur_trim_a + " b=" + d.cur_trim_b_ma + "mA");
+            }
+            if (d.suggested_capacity_factor !== undefined &&
+                d.suggested_capacity_factor !== null) {
+              console.log(
+                "measured capacity " + d.full_capacity + "mAh vs nominal " +
+                d.nominal_capacity + "mAh -> suggest pump factor x" +
+                d.suggested_capacity_factor +
+                " (set as MCU current trim after multimeter calibration)");
+            }
+            this.supported = !!d.supported;
+            if (this.supported) {
+              this.full_capacity = d.full_capacity ?? null;
+              this.nominal_capacity = d.nominal_capacity ?? null;
+              this.cycle_count = d.cycle_count ?? null;
+              this.capacity_learned = !!d.capacity_learned;
+              this.learning_active = !!d.learning_active;
+              this.health_pct = d.health_pct ?? null;
+              this.internal_resistance = d.internal_resistance_mohm ?? null;
+              this.internal_resistance_battery = d.internal_resistance_battery_mohm ?? null;
+              this.runtime_hours = d.runtime_hours ?? null;
+              this.mid_voltage = d.mid_voltage_v ?? null;
+              this.suggest_factor = d.suggested_capacity_factor ?? null;
+              this.remain_mah = d.remain_mah ?? null;
+              this.consumed_wh = d.consumed_wh ?? null;
+              this.charged_wh = d.charged_wh ?? null;
+              this.minutes_to_empty = d.minutes_to_empty ?? null;
+              this.minutes_to_full = d.minutes_to_full ?? null;
+              this.gauge_temp_c = d.gauge_temp_c ?? null;
+              this.temp_empty_extra_pct = d.temp_empty_extra_pct ?? null;
+              this.r_temp_factor = d.r_temp_factor ?? null;
+              this.mcu_uptime_seconds = d.mcu_uptime_seconds ?? null;
+              this.mcu_since_sleep_seconds = d.mcu_since_sleep_seconds ?? null;
+              this.mcu_sleep_count = d.mcu_sleep_count ?? null;
+            }
+            this.loading = false;
+          })
+          .catch((e) => {
+            console.error("battery_info fetch failed", e);
+            this.loading = false;
+          });
+      },
+
+      // Show the health bar only once the pack has been measured AND has been
+      // through at least MIN_HEALTH_CYCLES full cycles. The MCU relearns
+      // capacity on each full discharge, and the first one or two readings
+      // swing widely (an early partial-discharge learn can land far off), so a
+      // bar drawn from them looks broken. Until then the learning notice is
+      // the honest answer.
+      // cycle_count is null on MCU firmware that predates the cycle-count
+      // field: fall back to the learned flag alone rather than hiding health
+      // forever on those units.
+      health_ready() {
+        if (!this.capacity_learned || this.health_pct === null) return false;
+        if (this.cycle_count === null) return true;
+        return this.cycle_count >= this.MIN_HEALTH_CYCLES;
+      },
+
+      health_color() {
+        if (this.health_pct === null) return "text-gray-400";
+        if (this.health_pct >= 80) return "text-green-600";
+        if (this.health_pct >= 60) return "text-orange-500";
+        return "text-red-600";
+      },
+
+      health_bar_color() {
+        if (this.health_pct === null) return "bg-gray-300";
+        if (this.health_pct >= 80) return "bg-green-500";
+        if (this.health_pct >= 60) return "bg-orange-400";
+        return "bg-red-500";
+      },
+    }));
+  });
+</script>
+{% endblock %}

@@ -1,4 +1,5 @@
-{% extends '_base.html' %} {% block content %}
+{% extends '_base.html' %}
+{% block page_title %}{{locales["tab_timers"]}}{% endblock %} {% block content %}
 <div class="container mx-auto w-full pt-14 pb-12 sm:pt-24 sm:pb-12 md:pt-28 lg:px-4" x-data="timer_settings">
   <div class="flex items-center justify-between">
     <h1 class="px-1 py-4 font-bold uppercase text-gray-600">{{locales["nav_settings"]}}</h1>
@@ -71,12 +72,16 @@
                     </svg>
                     <span class="font-medium">{{locales["timer_mode"]}}</span>
                   </label>
+                  {% if is_photonicat2 %}
+                  <!-- Direct power is an MCU power-on mode of the Photonicat 2; the
+                       Photonicat 1 PMU has no such mode, so it gets no tab for it. -->
                   <label @click="mode_page = 'force_power_mode_page'" :class="mode_page === 'force_power_mode_page' ? 'bg-pcatblue text-white border-pcatblue shadow-lg' : 'bg-white border-gray-300 hover:border-pcatblue'" class="flex items-center space-x-2 rounded-lg border-2 px-4 py-2 cursor-pointer transition-all duration-200">
                     <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
                       <path stroke-linecap="round" stroke-linejoin="round" d="M12 3v5m0 0l-2-2m2 2l2-2M7 12H5a2 2 0 00-2 2v1a2 2 0 002 2h14a2 2 0 002-2v-1a2 2 0 00-2-2h-2M9 21v-3h6v3" />
                     </svg>
                     <span class="font-medium">{{locales["force_power_mode"]}}</span>
                   </label>
+                  {% endif %}
                 </div>
 
                 <!-- Mode Content Card -->
@@ -93,7 +98,7 @@
                       <div class="bg-gradient-to-r from-blue-50 to-indigo-50 rounded-lg p-4 border border-blue-200">
                         <label class="flex flex-wrap items-center gap-2 text-gray-700">
                           <span>{{locales["when_power_supply_disconnected"]}}</span>
-                          <input x-model="car_mode_timeout" type="number" class="w-24 text-center border-2 border-blue-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pcatblue focus:border-transparent transition-all" min="0" value="0" />
+                          <input x-model="car_mode_timeout" @input="car_mode_touched = true" type="number" class="w-24 text-center border-2 border-blue-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pcatblue focus:border-transparent transition-all" min="0" value="0" />
                           <span>{{locales["after_minutes"]}}</span>
                           <span class="font-medium">{{locales["device_auto_power_off"]}}</span>
                         </label>
@@ -213,6 +218,7 @@
                     </div>
                   </div>
 
+                  {% if is_photonicat2 %}
                   <!-- Direct Power Mode Page -->
                   <div class="force_power_mode_page" x-cloak x-show="mode_page === 'force_power_mode_page'">
                     <h3 class="text-base font-semibold text-gray-800 mb-3 flex items-center">
@@ -235,6 +241,7 @@
                       {% endif %}
                     </div>
                   </div>
+                  {% endif %}
                 </div>
               </div>
               <!-- /Left Column -->
@@ -300,6 +307,7 @@
                   </div>
                 </div>
 
+                {% if is_photonicat2 %}
                 <!-- Low Battery Shutdown Policy -->
                 <div class="bg-gradient-to-br from-amber-50 to-orange-50 border-2 border-amber-200 rounded-xl shadow-sm p-5">
                   <div class="space-y-3">
@@ -325,6 +333,7 @@
                     <p class="text-xs text-gray-500 leading-relaxed">{{locales["low_battery_tip"]}}</p>
                   </div>
                 </div>
+                {% endif %}
 
                 <!-- Battery Charge Limit moved to Device Control (/device_control)
                      so there is a single place to set it; see charge_limit there. -->
@@ -530,6 +539,7 @@
         // Load power event log
         this._fetchEventLog();
 
+        {% if is_photonicat2 %}
         // Load low battery shutdown settings
         fetch("/api/v1/low_battery_shutdown.json")
           .then((response) => response.json())
@@ -541,13 +551,21 @@
             this.low_battery_shutdown_enabled = false;
             this.low_battery_threshold = 20;
           });
+        {% endif %}
 
         // Charge limit moved to Device Control (/device_control); not loaded here.
 
         Alpine.effect(() => {
-          console.log("!!!! Detect car mode changed", Alpine.store("app").car_mode.enabled);
-          this.car_mode_enabled = Alpine.store("app").car_mode.enabled;
-          this.car_mode_timeout = Alpine.store("app").car_mode.timeout;
+          var car = Alpine.store("app").car_mode;
+          this.car_mode_enabled = car.enabled;
+          // null = the daemon has not reported the timeout yet; leave the
+          // field as it is rather than filling it with a guess. And never
+          // overwrite a number the user is in the middle of typing: this
+          // effect re-runs on every dashboard poll, so a late-arriving value
+          // would otherwise replace an unsaved edit.
+          if (car.timeout !== null && car.timeout !== undefined && !this.car_mode_touched) {
+            this.car_mode_timeout = car.timeout;
+          }
         });
       },
 
@@ -562,6 +580,9 @@
       mode_page: "{{mode_page}}",
       car_mode_enabled: "false",
       car_mode_timeout: 0, // unit: minutes
+      // Set once the user edits the timeout, so the dashboard poll cannot
+      // overwrite an unsaved edit; cleared when the value is committed.
+      car_mode_touched: false,
       saving_car_mode: false,
       saving_force_mode: false,
 
@@ -626,8 +647,9 @@
             }, 1000);
 
             setTimeout(() => {
-              this.reboot_reason = '{{locales["reboot_reason_power_settings"]}}';
-              this.reboot_dlg_open = true;
+              // reboot_dlg_open/reboot_reason live in the _base.html body scope,
+              // not this component — dispatch the window event the modal listens for.
+              window.dispatchEvent(new CustomEvent('open-reboot-dialog', { detail: { reason: '{{locales["reboot_reason_power_settings"]}}' } }));
             }, 3000);
           });
       },
@@ -637,11 +659,17 @@
           this.showNotification("{{locales['car_timeout_invalid']}}", "车载模式超时无效", 'error');
           return;
         }
+        // A blank field would post NaN minutes. That can only happen in the
+        // moment before the daemon has reported the current value, so fall
+        // back to the same default the form offers for a fresh device.
+        var minutes = parseInt(this.car_mode_timeout, 10);
+        if (isNaN(minutes) || minutes < 0) minutes = 10;
+        this.car_mode_timeout = minutes;
         this.saving_car_mode = true;
         this.car_mode_enabled = "true";
         const form_data = {
           carmode: this.car_mode_enabled,
-          timeout: this.car_mode_timeout * 60,
+          timeout: minutes * 60,
         };
 
         fetch("/api/v1/carbootmode.json", {
@@ -657,6 +685,8 @@
             setTimeout(() => {
               this.saving_car_mode = false;
               if (data.status == "ok") {
+                // Committed: let the daemon's read-back drive the field again.
+                this.car_mode_touched = false;
                 this.showNotification("{{locales['save_action_success_carmode_tip']}}", "车载模式保存成功", 'success');
               } else {
                 this.showNotification("{{locales['save_action_failed']}}", "保存失败", 'error');
@@ -763,6 +793,7 @@
         // Poll server every 5 seconds for idle status
         this._fetchIdleStatus();
         this._idle_poll_timer = setInterval(() => {
+          if (document.hidden) return; // skip polling in background tabs
           this._fetchIdleStatus();
         }, 5000);
         // Tick every second for smooth countdown
@@ -823,9 +854,15 @@
           action: this.action,
           days: this.days,
         };
+        // Normalize a days array to a comparable key: sort by numeric value and
+        // stringify. Checkbox x-model yields string values ("1") while timers
+        // loaded from the backend may hold numbers (1), so compare by value/order
+        // rather than by array reference (=== on two arrays is always false).
+        const daysKey = (days) => (days || []).map(Number).sort((a, b) => a - b).join(",");
+        const form_days_key = daysKey(form_data.days);
         for (let i = 0; i < this.timers.length; i++) {
           let t = this.timers[i];
-          if (t.time === form_data.time && t.action === form_data.action && t.days === form_data.days) {
+          if (t.time === form_data.time && t.action === form_data.action && daysKey(t.days) === form_days_key) {
             this.showNotification("{{locales['same_timer_exist']}}", "相同的计时器已存在", 'error');
             return;
           }
@@ -987,11 +1024,13 @@
               headers: { Accept: "application/json", "Content-Type": "application/json" },
               body: JSON.stringify({ enabled: this.idle_shutdown_enabled, timeout: this.idle_shutdown_timeout, battery_only: this.idle_shutdown_battery_only }),
             }),
+            {% if is_photonicat2 %}
             fetch("/api/v1/low_battery_shutdown.json", {
               method: "POST",
               headers: { Accept: "application/json", "Content-Type": "application/json" },
               body: JSON.stringify({ enabled: this.low_battery_shutdown_enabled, threshold: this.low_battery_threshold }),
             }),
+            {% endif %}
             // Charge limit is set on Device Control (/device_control) now; the
             // Timer page no longer writes it, to avoid overwriting that value.
           ]);
@@ -1017,8 +1056,9 @@
         setTimeout(() => {
           this.saving_all = false;
           if (needs_reboot) {
-            this.reboot_reason = '{{locales["reboot_reason_power_settings"]}}';
-            this.reboot_dlg_open = true;
+            // reboot_dlg_open/reboot_reason live in the _base.html body scope —
+            // dispatch the window event the reboot modal listens for.
+            window.dispatchEvent(new CustomEvent('open-reboot-dialog', { detail: { reason: '{{locales["reboot_reason_power_settings"]}}' } }));
           }
         }, 2000);
       },

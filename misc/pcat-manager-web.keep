@@ -1,0 +1,22 @@
+# Installed as /lib/upgrade/keep.d/pcat-manager-web: files sysupgrade carries
+# over to the new firmware. None of these are package conffiles, so without
+# this list a firmware update silently reset every web setting (power mode,
+# fan, menus, ...) and dropped the SMS/call history (issue #118).
+#
+# Only user settings and bounded data belong here. Deliberately left out:
+#   /etc/pcat-secret-key, /etc/pcat-remember.db  login sessions; re-login is fine
+#   /etc/pcat-manager-web/{tiles,tracks,celldb.sqlite}  caches that can grow large
+/etc/pcat-manager-web-user.json
+/etc/pcat-manager-web.ini
+/etc/pcat-manager-web/ssl/
+/etc/pcat-manager-web/audio_token.key
+/etc/pcat_hook_cmd.sh
+/etc/pcat-modem-pref.json
+/etc/pcat-sim_number.json
+/etc/pcat-power-events.json
+/etc/pcat-nas/rclone.conf
+# SMS, call history and contacts
+/etc/pc_modem.db
+# Both pruned to a fixed window by the app, so their size is bounded
+/etc/net_stats.db
+/etc/pcat-battery-history.db

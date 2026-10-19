@@ -1,0 +1,1849 @@
+{% extends '_base.html' %}
+{% block page_title %}{{locales.gps_title}}{% endblock %}
+{% block html_head %}
+<link rel="stylesheet" href="/static/leaflet/leaflet.css" />
+<script src="/static/leaflet/leaflet.js"></script>
+<style>
+  /* Map lives in its own stacking context so Leaflet's high-z panes never
+     cover the fixed top/bottom nav (z-20). */
+  .gps-map-wrap {
+    position: relative;
+    z-index: 0;
+  }
+  #gps-map {
+    height: 420px;
+    border-radius: 0.25rem;
+    background: #e5e7eb;
+  }
+  @media (min-width: 1024px) {
+    #gps-map { height: 100%; min-height: 520px; }
+  }
+  .gps-map-overlay {
+    position: absolute;
+    inset: 0;
+    /* Above Leaflet's tile/marker panes (z 200-700), below its controls
+       (z 1000) — at the old z-index 5 the message was invisible under the
+       map. pointer-events stays none so the map remains draggable. */
+    z-index: 800;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    background: rgba(243, 244, 246, 0.72);
+    border-radius: 0.25rem;
+    pointer-events: none;
+    text-align: center;
+  }
+  /* SNR chart: recessive gridlines behind the bars */
+  .gps-snr-plot {
+    position: relative;
+  }
+  .gps-snr-grid {
+    position: absolute;
+    left: 0;
+    right: 0;
+    border-top: 1px solid #f3f4f6;
+    font-size: 9px;
+    line-height: 1;
+    color: #d1d5db;
+  }
+  .gps-snr-grid span {
+    position: absolute;
+    left: 0;
+    top: -4px;
+  }
+  .gps-snr-bar {
+    width: 10px;
+    border-radius: 4px 4px 0 0;
+    transition: height 0.4s ease;
+  }
+  .gps-compass {
+    transition: transform 0.5s ease;
+    transform-origin: center;
+  }
+  /* AT log: terminal-style pane, matches the /dev modem log look */
+  .gps-at-pane {
+    background: #1a1a2e;
+    color: #d8dee9;
+    font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    max-height: 280px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+    padding: 8px 10px;
+    border-radius: 0.25rem;
+  }
+  .gps-at-tx  { color: #7bc0e6; }
+  .gps-at-rx  { color: #d8dee9; }
+  .gps-at-evt { color: #9ca3af; }
+  .gps-at-err { color: #f87171; }
+</style>
+{% endblock %}
+{% block content %}
+<div class="container mx-auto w-full pt-14 pb-16 sm:pt-24 sm:pb-8 md:pt-28 lg:px-4" x-data="gps_page">
+  <div class="flex items-center justify-between">
+    <h1 class="px-3 py-4 font-bold uppercase text-gray-600">{{locales.gps_heading}}</h1>
+  </div>
+
+  {% include '_notification.html' %}
+
+  <!-- Capability is decided live, not baked in at render. _gps_capable_modem()
+       reads the modem model, which is empty for the first seconds after boot
+       (and after a module reset), so a page load in that window used to render
+       the permanent "no GNSS" card: reloading right after a reboot left the
+       receiver looking off with no way back short of another reload later.
+       `capable` from the status poll re-decides it every 2s. -->
+  <div class="mx-2 rounded border bg-white p-6 shadow sm:mx-0" x-show="st && st.capable === false" x-cloak>
+    <div class="flex items-center space-x-3 text-gray-600">
+      <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+      </svg>
+      <span>{{locales.gps_not_capable}}</span>
+    </div>
+  </div>
+  <div x-show="!st || st.capable !== false">
+
+  <!-- Status / power bar -->
+  <div class="mx-2 mb-4 rounded border bg-white px-5 py-4 shadow sm:mx-0">
+    <div class="flex flex-wrap items-center justify-between gap-3">
+      <div class="flex items-center space-x-3">
+        <span class="relative flex h-3 w-3">
+          <span class="absolute inline-flex h-full w-full rounded-full opacity-60" :class="statusDotClass() + (statusKey() == 'acquiring' ? ' animate-ping' : '')"></span>
+          <span class="relative inline-flex h-3 w-3 rounded-full" :class="statusDotClass()"></span>
+        </span>
+        <span class="font-semibold text-gray-700" x-text="statusText()"></span>
+        <span class="text-sm text-gray-400" x-show="powered && st && st.nmea_age_s !== null" x-cloak>
+          {{locales.gps_nmea_age}}: <span x-text="fmtAge()"></span>
+        </span>
+        <span class="flex items-center gap-1.5 rounded-full bg-red-50 px-2.5 py-0.5 text-xs font-medium text-red-600" x-show="recOn()" x-cloak :title="recTitle()">
+          <span class="inline-block h-2 w-2 animate-pulse rounded-full bg-red-500"></span>
+          <span>{{locales.gps_logger_recording}}</span>
+        </span>
+      </div>
+      <div class="flex items-center space-x-3">
+        <button type="button" @click="openSettings()"
+                class="flex items-center space-x-1.5 rounded border border-gray-300 px-3 py-1.5 text-sm text-gray-600 hover:border-pcatblue hover:text-pcatblue">
+          <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.324.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 0 1 1.37.49l1.296 2.247a1.125 1.125 0 0 1-.26 1.431l-1.003.827c-.293.24-.438.613-.431.992a6.759 6.759 0 0 1 0 .255c-.007.378.138.75.43.99l1.005.828c.424.35.534.954.26 1.43l-1.298 2.247a1.125 1.125 0 0 1-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.57 6.57 0 0 1-.22.128c-.331.183-.581.495-.644.869l-.213 1.28c-.09.543-.56.941-1.11.941h-2.594c-.55 0-1.02-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 0 1-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 0 1-1.369-.49l-1.297-2.247a1.125 1.125 0 0 1 .26-1.431l1.004-.827c.292-.24.437-.613.43-.992a6.932 6.932 0 0 1 0-.255c.007-.378-.138-.75-.43-.99l-1.004-.828a1.125 1.125 0 0 1-.26-1.43l1.297-2.247a1.125 1.125 0 0 1 1.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.087.22-.128.332-.183.582-.495.644-.869l.214-1.28Z" />
+            <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" />
+          </svg>
+          <span>{{locales.gps_settings_btn}}</span>
+        </button>
+        <span class="text-sm font-medium text-gray-600">{{locales.gps_power_label}}</span>
+        <label class="relative flex cursor-pointer items-center">
+          <input class="peer sr-only" type="checkbox" :checked="powered" :disabled="switching" @click.prevent="togglePower()" />
+          <div
+            class="h-6 w-11 rounded-full border-2 border-gray-200 bg-gray-200 after:absolute after:top-0.5 after:left-0.5 after:h-5 after:w-5 after:rounded-full after:border after:border-gray-300 after:bg-white after:shadow-sm after:transition-all after:duration-300 peer-checked:border-blue-600 peer-checked:bg-blue-600 peer-checked:after:translate-x-full peer-checked:after:border-white"
+          ></div>
+        </label>
+        <span class="text-sm text-gray-400" x-show="switching" x-cloak>{{locales.gps_switching}}</span>
+      </div>
+    </div>
+    <p class="mt-2 text-sm text-red-500" x-show="!!(st && st.error && powered)" x-cloak x-text="st && st.error"></p>
+  </div>
+
+  <!-- Left: data · Right: map -->
+  <div class="mx-2 mb-4 grid grid-cols-1 gap-4 sm:mx-0 lg:grid-cols-5">
+    <!-- ───────── Left column: professional data ───────── -->
+    <div class="space-y-4 lg:col-span-2">
+      <!-- Motion. Above Position because it is the at-a-glance panel: speed
+           and trip are readable from across the cab, coordinates are not. -->
+      <div class="rounded border bg-white shadow">
+        <div class="border-b px-5 py-3">
+          <h5 class="font-bold text-gray-600">{{locales.gps_motion_title}}</h5>
+        </div>
+        <div class="flex flex-wrap items-center justify-around gap-y-4 p-5">
+          <div class="text-center">
+            <div class="text-xs uppercase tracking-wide text-gray-400">{{locales.gps_speed}}</div>
+            <div class="font-mono text-4xl font-semibold text-gray-800">
+              <span x-text="speedText()"></span><span class="ml-1 text-base font-normal text-gray-400">km/h</span>
+            </div>
+          </div>
+          <div class="text-center">
+            <div class="text-xs uppercase tracking-wide text-gray-400">{{locales.gps_course}}</div>
+            <div class="flex items-center justify-center space-x-2">
+              <svg xmlns="http://www.w3.org/2000/svg" class="gps-compass h-8 w-8 text-pcatblue" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" :style="compassStyle()">
+                <path d="M12 3 L16 17 L12 14 L8 17 Z" fill="currentColor" stroke="none"/>
+              </svg>
+              <span class="font-mono text-2xl text-gray-800" x-text="courseText()"></span>
+            </div>
+          </div>
+          <div class="text-center" :title="tripTitle()">
+            <div class="text-xs uppercase tracking-wide text-gray-400">{{locales.gps_trip}}</div>
+            <div class="font-mono text-2xl text-gray-800">
+              <span x-text="tripValue()"></span><span class="ml-1 text-base font-normal text-gray-400" x-text="tripUnit()"></span>
+            </div>
+          </div>
+        </div>
+        <div class="border-t border-gray-100 px-5 py-2 text-xs text-gray-400">{{locales.gps_trip_hint}}</div>
+      </div>
+
+      <!-- Position -->
+      <div class="rounded border bg-white shadow">
+        <div class="border-b px-5 py-3">
+          <h5 class="font-bold text-gray-600">{{locales.gps_position_title}}</h5>
+        </div>
+        <div class="p-5">
+          <div class="grid grid-cols-2 gap-x-4 gap-y-3">
+            <div>
+              <div class="text-xs uppercase tracking-wide text-gray-400">{{locales.gps_latitude}}</div>
+              <div class="font-mono text-lg text-gray-800" x-text="fmtLat()"></div>
+            </div>
+            <div>
+              <div class="text-xs uppercase tracking-wide text-gray-400">{{locales.gps_longitude}}</div>
+              <div class="font-mono text-lg text-gray-800" x-text="fmtLon()"></div>
+            </div>
+            <div>
+              <div class="text-xs uppercase tracking-wide text-gray-400">{{locales.gps_altitude}}</div>
+              <div class="font-mono text-lg text-gray-800" x-text="fmtNum(fix('alt_m'), 1, ' m')"></div>
+            </div>
+            <div>
+              <div class="text-xs uppercase tracking-wide text-gray-400">{{locales.gps_accuracy}}</div>
+              <div class="font-mono text-lg text-gray-800" x-text="fmtNum(fix('accuracy_m'), 1, ' m')"></div>
+            </div>
+            <div class="col-span-2">
+              <div class="text-xs uppercase tracking-wide text-gray-400">{{locales.gps_gps_time}}</div>
+              <div class="font-mono text-lg text-gray-800" x-text="fix('utc') || '—'"></div>
+              <div class="text-xs text-gray-400" x-show="timeOffsetText()" x-text="timeOffsetText()"></div>
+            </div>
+          </div>
+          <div class="mt-4 flex items-center space-x-3">
+            <button type="button" @click="copyCoords()"
+                    :disabled="!hasFix()"
+                    :class="hasFix() ? 'text-pcatblue hover:underline cursor-pointer' : 'text-gray-300 cursor-not-allowed'"
+                    class="text-sm font-medium">
+              <span x-show="!copied">{{locales.gps_copy_coords}}</span>
+              <span x-show="copied" x-cloak class="text-green-600">{{locales.gps_copied}}</span>
+            </button>
+            <button type="button" @click="syncTime()"
+                    :disabled="!canSyncTime() || timeSyncing"
+                    :class="canSyncTime() && !timeSyncing ? 'text-pcatblue hover:underline cursor-pointer' : 'text-gray-300 cursor-not-allowed'"
+                    class="text-sm font-medium">
+              <span x-show="!timeSynced">{{locales.gps_sync_time}}</span>
+              <span x-show="timeSynced" x-cloak class="text-green-600" x-text="timeSyncedText"></span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Signal quality -->
+      <div class="rounded border bg-white shadow">
+        <div class="border-b px-5 py-3">
+          <h5 class="font-bold text-gray-600">{{locales.gps_quality_title}}</h5>
+        </div>
+        <div class="p-5">
+          <div class="grid grid-cols-3 gap-x-4 gap-y-3">
+            <div>
+              <div class="text-xs uppercase tracking-wide text-gray-400">{{locales.gps_fix_type}}</div>
+              <div class="font-mono text-lg text-gray-800" x-text="hasFix() ? fix('fix_type') : '—'"></div>
+            </div>
+            <div>
+              <div class="text-xs uppercase tracking-wide text-gray-400">{{locales.gps_sats_used}}</div>
+              <div class="font-mono text-lg text-gray-800" x-text="fix('sats_used') || 0"></div>
+            </div>
+            <div>
+              <div class="text-xs uppercase tracking-wide text-gray-400">{{locales.gps_sats_in_view}}</div>
+              <div class="font-mono text-lg text-gray-800" x-text="satsInView()"></div>
+            </div>
+            <div>
+              <div class="text-xs uppercase tracking-wide text-gray-400">{{locales.gps_hdop}}</div>
+              <div class="font-mono text-lg text-gray-800" x-text="fmtNum(fix('hdop'), 1, '')"></div>
+            </div>
+            <div>
+              <div class="text-xs uppercase tracking-wide text-gray-400">{{locales.gps_pdop}}</div>
+              <div class="font-mono text-lg text-gray-800" x-text="fmtNum(fix('pdop'), 1, '')"></div>
+            </div>
+            <div>
+              <div class="text-xs uppercase tracking-wide text-gray-400">{{locales.gps_vdop}}</div>
+              <div class="font-mono text-lg text-gray-800" x-text="fmtNum(fix('vdop'), 1, '')"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ───────── Right column: OSM map ───────── -->
+    <div class="lg:col-span-3">
+      <div class="flex h-full flex-col rounded border bg-white shadow">
+        <div class="flex flex-wrap items-center justify-between gap-2 border-b px-5 py-3">
+          <h5 class="font-bold text-gray-600">{{locales.gps_map_title}}</h5>
+          <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
+            <label class="flex cursor-pointer select-none items-center space-x-1 text-gray-600">
+              <input type="checkbox" x-model="follow" class="rounded border-gray-300 text-pcatblue focus:ring-pcatblue" />
+              <span>{{locales.gps_map_follow}}</span>
+            </label>
+            <button type="button" class="text-gray-500 hover:text-pcatblue hover:underline" @click="clearTrack()">{{locales.gps_clear_track}}</button>
+            <span class="flex items-center gap-1 rounded bg-red-50 px-2 py-0.5 text-xs font-medium text-red-700" x-show="trk" x-cloak>
+              <span x-text="trkChipText()"></span>
+              <button type="button" class="ml-0.5 font-bold hover:text-red-900" @click="closeTrack()" title="{{locales.gps_track_hide}}">✕</button>
+            </span>
+            <span class="flex items-center gap-1.5 text-xs" x-show="trk" x-cloak>
+              <button type="button"
+                      class="w-7 rounded border border-gray-300 px-1 py-0.5 text-center text-gray-600 hover:border-pcatblue hover:text-pcatblue"
+                      @click="toggleReplay()" :title="replayBtnTitle()"
+                      x-text="replay.playing ? '⏸' : '▶'"></button>
+              <select x-model.number="replay.speed" class="rounded border border-gray-300 py-0.5 pl-1 pr-5 text-xs">
+                <option value="10">10×</option>
+                <option value="100">100×</option>
+                <option value="1000">1000×</option>
+              </select>
+              <span class="font-mono text-gray-500" x-show="replay.simT" x-text="replayTimeText()"></span>
+            </span>
+            <button type="button" class="text-gray-500 hover:text-pcatblue hover:underline"
+                    x-show="!tilesDl.running" @click="downloadTiles()">{{locales.gps_dl_tiles}}</button>
+            <span class="text-gray-400" x-show="tilesDl.running" x-cloak>
+              {{locales.gps_dl_running}} <span x-text="tilesDlText()"></span>
+            </span>
+            <span class="text-gray-400" x-show="!!(tilesDl.store_mb && !tilesDl.running)" x-cloak>
+              {{locales.gps_tiles_store}}: <span x-text="tilesDl.store_mb + ' MB'"></span>
+            </span>
+            <a class="text-pcatblue hover:underline" x-show="hasFix()" x-cloak :href="osmLink()" target="_blank" rel="noopener">{{locales.gps_open_osm}}</a>
+            <button type="button" class="text-gray-500 hover:text-pcatblue hover:underline" :disabled="cellBusy"
+                    @click="locateCell()">{{locales.gps_cell_locate}}</button>
+            <button type="button" class="hover:text-pcatblue hover:underline"
+                    :class="towersShown ? 'text-pcatblue font-medium' : 'text-gray-500'"
+                    @click="toggleNearbyTowers()">{{locales.gps_cells_nearby}}</button>
+            <span class="text-gray-400" x-show="cellInfo" x-cloak x-text="cellInfoText()"></span>
+          </div>
+        </div>
+        <div class="gps-map-wrap grow p-2">
+          <div id="gps-map"></div>
+          <div class="gps-map-overlay" x-show="!hasFix() && !lastPos" x-cloak>
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-8 w-8 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <circle cx="12" cy="12" r="6" stroke-width="2"/>
+              <line x1="12" y1="2" x2="12" y2="4.5" stroke-width="2" stroke-linecap="round"/>
+              <line x1="12" y1="19.5" x2="12" y2="22" stroke-width="2" stroke-linecap="round"/>
+              <line x1="2" y1="12" x2="4.5" y2="12" stroke-width="2" stroke-linecap="round"/>
+              <line x1="19.5" y1="12" x2="22" y2="12" stroke-width="2" stroke-linecap="round"/>
+            </svg>
+            <span class="font-medium text-gray-500" x-text="powered ? '{{locales.gps_map_waiting}}' : '{{locales.gps_status_off}}'"></span>
+            <span class="px-6 text-xs text-gray-400">{{locales.gps_map_offline_hint}}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ───────── Satellites: SNR per constellation ───────── -->
+  <div class="mx-2 mb-4 rounded border bg-white shadow sm:mx-0">
+    <div class="flex flex-wrap items-center justify-between gap-2 border-b px-5 py-3">
+      <h5 class="font-bold text-gray-600">{{locales.gps_satellites_title}}</h5>
+      <!-- Legend: constellation identity chips (color follows the entity) -->
+      <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-500">
+        <template x-for="g in satGroups()" :key="g.name">
+          <span class="flex items-center space-x-1">
+            <span class="inline-block h-2.5 w-2.5 rounded-sm" :style="'background-color:' + g.color"></span>
+            <span x-text="g.name"></span>
+          </span>
+        </template>
+      </div>
+    </div>
+    <div class="p-5">
+      <div x-show="satsInView() > 0" x-cloak>
+        <div class="flex flex-col items-center gap-5 lg:flex-row lg:items-start">
+        <!-- Sky view: satellites by azimuth/elevation (center = zenith),
+             filled = used in the fix. Rendered as one SVG string because
+             Alpine's <template x-for> does not expand inside an <svg>. -->
+        <div class="w-56 flex-shrink-0" x-html="skyPlotSvg()"></div>
+        <div class="min-w-0 flex-1 overflow-x-auto pb-1">
+          <div class="gps-snr-plot ml-7 min-w-fit pr-2">
+            <!-- gridlines at 10 dB steps; SNR scale is fixed 0–55 dB-Hz -->
+            <template x-for="tick in [50, 40, 30, 20, 10]" :key="tick">
+              <div class="gps-snr-grid" :style="'top:' + Math.round(140 - tick / 55 * 140) + 'px'">
+                <span style="left: -22px" x-text="tick"></span>
+              </div>
+            </template>
+            <div class="relative flex items-end gap-4" style="height: 140px">
+              <template x-for="g in satGroups()" :key="g.name">
+                <div class="flex items-end gap-[2px]">
+                  <template x-for="s in g.sats" :key="g.name + '-' + s.prn">
+                    <div class="flex w-4 flex-col items-center justify-end self-stretch">
+                      <div class="gps-snr-bar" :style="barStyle(g, s)" :title="barTitle(g, s)"></div>
+                    </div>
+                  </template>
+                </div>
+              </template>
+            </div>
+            <!-- PRN labels under the bars -->
+            <div class="flex gap-4 border-t border-gray-200 pt-1">
+              <template x-for="g in satGroups()" :key="'l' + g.name">
+                <div class="flex gap-[2px]">
+                  <template x-for="s in g.sats" :key="'lp' + g.name + '-' + s.prn">
+                    <div class="w-4 text-center text-[9px] leading-none text-gray-500" x-text="s.prn"></div>
+                  </template>
+                </div>
+              </template>
+            </div>
+          </div>
+        </div>
+        </div>
+        <p class="mt-3 text-sm text-gray-400">{{locales.gps_snr_help}}</p>
+        <!-- Table view of the same data (accessibility / precision) -->
+        <details class="mt-2">
+          <summary class="cursor-pointer select-none text-sm text-gray-500 hover:text-pcatblue">▸ {{locales.gps_satellites_title}} — table</summary>
+          <div class="mt-2 overflow-x-auto">
+            <table class="w-full text-left text-sm text-gray-600">
+              <thead class="text-xs uppercase text-gray-400">
+                <tr>
+                  <th class="py-1 pr-4">GNSS</th>
+                  <th class="py-1 pr-4">PRN</th>
+                  <th class="py-1 pr-4">Elev°</th>
+                  <th class="py-1 pr-4">Az°</th>
+                  <th class="py-1 pr-4">SNR</th>
+                  <th class="py-1">Fix</th>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-for="s in allSats()" :key="s.gnss + s.prn">
+                  <tr class="border-t border-gray-100">
+                    <td class="py-1 pr-4" x-text="s.gnss"></td>
+                    <td class="py-1 pr-4 font-mono" x-text="s.prn"></td>
+                    <td class="py-1 pr-4 font-mono" x-text="s.elev !== null ? s.elev : '—'"></td>
+                    <td class="py-1 pr-4 font-mono" x-text="s.az !== null ? s.az : '—'"></td>
+                    <td class="py-1 pr-4 font-mono" x-text="s.snr !== null ? s.snr : '—'"></td>
+                    <td class="py-1" x-text="s.used ? '●' : ''"></td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </details>
+      </div>
+      <p class="text-sm text-gray-400" x-show="powered && satsInView() == 0" x-cloak>{{locales.gps_no_sats_hint}}</p>
+      <p class="text-sm text-gray-400" x-show="!powered" x-cloak>{{locales.gps_status_off}}</p>
+    </div>
+  </div>
+
+  <!-- ───────── AT command log (collapsed by default) ───────── -->
+  <div class="mx-2 mb-4 rounded border bg-white shadow sm:mx-0">
+    <details @toggle="atLogOpen = $event.target.open; scrollAtLog(true)">
+      <summary class="flex cursor-pointer select-none items-center justify-between px-5 py-3">
+        <span class="font-bold text-gray-600">▸ {{locales.gps_at_log_title}}</span>
+        <span class="text-sm text-gray-400" x-text="atLogCountText()"></span>
+      </summary>
+      <div class="border-t p-3">
+        <div class="gps-at-pane" x-ref="atpane">
+          <template x-for="(e, i) in atLog()" :key="i + '-' + e.t">
+            <div :class="atClass(e)"><span class="text-gray-500" x-text="atTime(e) + ' '"></span><span x-text="atPrefix(e) + e.text"></span></div>
+          </template>
+          <div class="gps-at-evt" x-show="atLog().length == 0">{{locales.gps_at_log_empty}}</div>
+        </div>
+        <p class="mt-2 text-sm text-gray-400">{{locales.gps_at_log_help}}</p>
+      </div>
+    </details>
+  </div>
+
+  <!-- ───────── GPS Settings modal ───────── -->
+  <div x-show="settingsOpen" x-cloak
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+       @click.self="settingsOpen = false" @keydown.escape.window="settingsOpen = false">
+    <div class="flex max-h-[85vh] w-full max-w-2xl flex-col rounded bg-white shadow-lg">
+      <div class="flex items-center justify-between border-b px-5 py-3">
+        <h5 class="font-bold text-gray-600">{{locales.gps_settings_title}}</h5>
+        <button type="button" class="px-1 text-2xl leading-none text-gray-400 hover:text-gray-600"
+                @click="settingsOpen = false" title="{{locales.gps_settings_close}}">&times;</button>
+      </div>
+      <div class="grow space-y-6 overflow-y-auto p-5">
+
+        <!-- Constellation profile. GPS is always tracked; this picks which of
+             the other systems ride along. -->
+        <section>
+          <h6 class="mb-2 font-semibold text-gray-700">{{locales.gps_constellation_label}}</h6>
+          <div class="flex flex-wrap items-center gap-2">
+            <select x-model.number="gnssPick" :disabled="gnssBusy"
+                    class="rounded border border-gray-300 py-1 pl-2 pr-7 text-sm disabled:opacity-40">
+              <template x-for="p in gnssProfiles" :key="p.value">
+                <option :value="p.value" x-text="constellationLabel(p)"></option>
+              </template>
+            </select>
+            <button @click="applyConstellation()" :disabled="gnssBusy || gnssPick === gnssCurrent"
+                    class="rounded bg-pcatblue px-3 py-1 text-sm text-white disabled:opacity-40">{{locales.gps_constellation_apply}}</button>
+            <span class="text-xs text-gray-400" x-show="gnssBusy" x-cloak>…</span>
+            <button x-show="gnssNeedsRestart" x-cloak @click="restartModem()" :disabled="gnssBusy"
+                    class="rounded border border-yellow-400 bg-yellow-50 px-3 py-1 text-sm text-yellow-800 hover:bg-yellow-100 disabled:opacity-40">{{locales.gps_modem_restart_btn}}</button>
+            <span class="text-xs text-yellow-700" x-show="gnssNeedsRestart" x-cloak>{{locales.gps_constellation_restart}}</span>
+          </div>
+          <p class="mt-2 text-xs text-gray-400">{{locales.gps_constellation_hint}}</p>
+
+          <!-- AGPS: gpsOneXTRA assist data (faster cold-start fix) -->
+          <div class="mt-5 border-t border-gray-100 pt-4">
+            <div class="flex items-center justify-between">
+              <h6 class="font-semibold text-gray-700">{{locales.gps_agps_title}}</h6>
+              <button type="button" @click="updateAgps()" :disabled="agpsBusy"
+                      class="rounded bg-pcatblue px-3 py-1 text-sm text-white disabled:opacity-40">
+                <span x-show="!agpsBusy">{{locales.gps_agps_update}}</span>
+                <span x-show="agpsBusy" x-cloak>{{locales.gps_agps_updating}}</span>
+              </button>
+            </div>
+            <p class="mt-1.5 text-sm text-gray-600" x-text="agpsStatusText()"></p>
+            <p class="mt-1 text-xs text-gray-400">{{locales.gps_agps_hint}}</p>
+          </div>
+
+          <!-- Offline map packs: storage picker + country downloads -->
+          <div class="mt-5 border-t border-gray-100 pt-4">
+            <h6 class="font-semibold text-gray-700">{{locales.gps_offline_map_title}}</h6>
+            <div class="mt-2 flex flex-wrap items-center gap-2 text-sm">
+              <span class="text-gray-500">{{locales.gps_tiles_store_label}}</span>
+              <select class="rounded border-gray-300 py-0.5 text-sm" x-model="tilesStorePick" @change="setTilesStore()">
+                <option value="auto">{{locales.gps_tiles_store_auto}}</option>
+                <option value="internal">{{locales.gps_logger_store_internal}}</option>
+                <template x-for="o in tilesExtStores()" :key="o.key">
+                  <option :value="o.key" x-text="storeOptLabel(o)"></option>
+                </template>
+              </select>
+              <span class="text-xs text-gray-400" x-text="tilesActiveText()"></span>
+            </div>
+            <div class="mt-3 flex flex-wrap items-center gap-2 text-sm">
+              <span class="text-gray-500">{{locales.gps_country_label}}</span>
+              <select class="rounded border-gray-300 py-0.5 text-sm" x-model="countryPick">
+                <template x-for="c in tilesCountries()" :key="c.code">
+                  <option :value="c.code" x-text="c.en + ' ' + c.cn"></option>
+                </template>
+              </select>
+              <button type="button" @click="downloadCountry()" :disabled="countryBusy || tilesDl.running"
+                      class="rounded bg-pcatblue px-3 py-1 text-sm text-white disabled:opacity-40">{{locales.gps_country_download}}</button>
+              <span class="text-xs text-gray-400" x-text="countryInfoText()"></span>
+            </div>
+            <p class="mt-1 text-xs text-gray-400" x-show="tilesDl.running" x-cloak>{{locales.gps_dl_running}} <span x-text="tilesDlText()"></span></p>
+            <p class="mt-1 text-xs text-gray-400">{{locales.gps_country_hint}}</p>
+            <div class="mt-3 flex flex-wrap items-center gap-2 text-sm">
+              <span class="text-gray-500">{{locales.gps_celldb_label}}</span>
+              <button type="button" @click="downloadCelldb()" :disabled="celldb && celldb.running"
+                      class="rounded bg-pcatblue px-3 py-1 text-sm text-white disabled:opacity-40">{{locales.gps_celldb_download}}</button>
+              <span class="text-xs text-gray-400" x-text="celldbText()"></span>
+            </div>
+            <p class="mt-1 text-xs text-gray-400">{{locales.gps_celldb_hint}}</p>
+            <div class="mt-3 flex flex-wrap items-center gap-2 text-sm">
+              <span class="text-gray-500">{{locales.gps_cell_key_label}}</span>
+              <input type="text" maxlength="64" class="w-56 rounded border-gray-300 py-0.5 text-sm"
+                     placeholder="OpenCelliD API key" x-model="cellKey" />
+              <button type="button" @click="saveCellKey()"
+                      class="rounded bg-pcatblue px-3 py-1 text-sm text-white">{{locales.gps_cell_key_save}}</button>
+            </div>
+            <p class="mt-1 text-xs text-gray-400">{{locales.gps_cell_key_hint}}</p>
+          </div>
+        </section>
+
+        <!-- Smart position logger -->
+        <section class="border-t border-gray-100 pt-4">
+          <div class="flex items-center justify-between">
+            <div class="flex items-center space-x-2">
+              <h6 class="font-semibold text-gray-700">{{locales.gps_logger_title}}</h6>
+              <button type="button" @click="lgHelp = !lgHelp"
+                      class="flex h-5 w-5 items-center justify-center rounded-full border text-xs font-semibold"
+                      :class="lgHelp ? 'border-pcatblue bg-pcatblue text-white' : 'border-gray-300 text-gray-400 hover:border-pcatblue hover:text-pcatblue'">?</button>
+            </div>
+            <div class="flex items-center space-x-2">
+              <span class="text-sm text-gray-600">{{locales.gps_logger_enable}}</span>
+              <label class="relative flex cursor-pointer items-center">
+                <input class="peer sr-only" type="checkbox" :checked="lg.enabled" :disabled="lgBusy"
+                       @click.prevent="saveLogger({ enabled: !lg.enabled })" />
+                <div
+                  class="h-6 w-11 rounded-full border-2 border-gray-200 bg-gray-200 after:absolute after:top-0.5 after:left-0.5 after:h-5 after:w-5 after:rounded-full after:border after:border-gray-300 after:bg-white after:shadow-sm after:transition-all after:duration-300 peer-checked:border-blue-600 peer-checked:bg-blue-600 peer-checked:after:translate-x-full peer-checked:after:border-white"
+                ></div>
+              </label>
+            </div>
+          </div>
+          <p class="mt-2 text-xs text-gray-400" x-show="lgHelp" x-cloak>{{locales.gps_logger_hint}}</p>
+          <p class="mt-1 text-xs text-amber-600" x-show="lg.enabled && !powered" x-cloak>{{locales.gps_logger_needs_receiver}}</p>
+          <div class="mt-4 grid grid-cols-1 gap-x-4 gap-y-4 sm:grid-cols-2">
+            <label class="block">
+              <span class="mb-1.5 block text-xs font-medium uppercase tracking-wide text-gray-400">{{locales.gps_logger_mode}}</span>
+              <select x-model="lg.mode" :disabled="lgBusy" @change="saveLogger({ mode: lg.mode })"
+                      class="w-full rounded border border-gray-300 py-1.5 pl-2 pr-7 text-sm disabled:opacity-40">
+                <option value="fine">{{locales.gps_logger_mode_fine}}</option>
+                <option value="normal">{{locales.gps_logger_mode_normal}}</option>
+                <option value="coarse">{{locales.gps_logger_mode_coarse}}</option>
+                <option value="int_1">{{locales.gps_logger_int_1s}}</option>
+                <option value="int_10">{{locales.gps_logger_int_10s}}</option>
+                <option value="int_60">{{locales.gps_logger_int_1m}}</option>
+                <option value="int_600">{{locales.gps_logger_int_10m}}</option>
+                <option value="int_3600">{{locales.gps_logger_int_1h}}</option>
+              </select>
+            </label>
+            <label class="block">
+              <span class="mb-1.5 block text-xs font-medium uppercase tracking-wide text-gray-400">{{locales.gps_logger_fmt}}</span>
+              <select x-model="lg.fmt" :disabled="lgBusy" @change="saveLogger({ fmt: lg.fmt })"
+                      class="w-full rounded border border-gray-300 py-1.5 pl-2 pr-7 text-sm disabled:opacity-40">
+                <option value="minimal">{{locales.gps_logger_fmt_minimal}}</option>
+                <option value="standard">{{locales.gps_logger_fmt_standard}}</option>
+                <option value="verbose">{{locales.gps_logger_fmt_verbose}}</option>
+              </select>
+            </label>
+            <label class="block sm:col-span-2">
+              <span class="mb-1.5 block text-xs font-medium uppercase tracking-wide text-gray-400">{{locales.gps_logger_store_dir}}</span>
+              <select x-model="lg.store" :disabled="lgBusy" @change="saveLogger({ store: lg.store })"
+                      class="w-full rounded border border-gray-300 py-1.5 pl-2 pr-7 text-sm disabled:opacity-40">
+                <template x-for="o in lg.storeOptions" :key="o.key">
+                  <option :value="o.key" x-text="storeOptLabel(o)" :selected="o.key === lg.store"></option>
+                </template>
+              </select>
+            </label>
+            <label class="block">
+              <span class="mb-1.5 block text-xs font-medium uppercase tracking-wide text-gray-400">{{locales.gps_logger_rotate}}</span>
+              <select x-model="lg.rotate" :disabled="lgBusy" @change="saveLogger({ rotate: lg.rotate })"
+                      class="w-full rounded border border-gray-300 py-1.5 pl-2 pr-7 text-sm disabled:opacity-40">
+                <option value="weekly">{{locales.gps_logger_rotate_weekly}}</option>
+                <option value="monthly">{{locales.gps_logger_rotate_monthly}}</option>
+              </select>
+            </label>
+            <label class="block">
+              <span class="mb-1.5 block text-xs font-medium uppercase tracking-wide text-gray-400">{{locales.gps_logger_cap}}</span>
+              <select x-model.number="lg.cap_mb" :disabled="lgBusy" @change="saveLogger({ cap_mb: lg.cap_mb })"
+                      class="w-full rounded border border-gray-300 py-1.5 pl-2 pr-7 text-sm disabled:opacity-40">
+                <option value="32">32 MB</option>
+                <option value="128">128 MB</option>
+                <option value="512">512 MB</option>
+                <option value="0" :disabled="lg.store === 'internal'">{{locales.gps_logger_cap_unlimited}}</option>
+              </select>
+            </label>
+          </div>
+          <p class="mt-2 text-xs text-amber-600" x-show="lg.storeError" x-cloak>{{locales.gps_logger_store_missing}}</p>
+          <div class="mt-4 inline-block rounded border border-gray-200 bg-gray-50 px-3 py-1.5 text-sm text-gray-500" x-text="storeText()"></div>
+          <p class="mt-3 text-xs text-gray-400" x-text="capEstimateText()"></p>
+          <p class="mt-1.5 text-xs text-gray-400" x-show="lgHelp" x-cloak>{{locales.gps_logger_flush_hint}}</p>
+        </section>
+
+        <!-- Recorded tracks -->
+        <section class="border-t border-gray-100 pt-4">
+          <div class="flex items-center justify-between">
+            <h6 class="font-semibold text-gray-700">{{locales.gps_tracks_title}}</h6>
+            <button x-show="lgTracks.length > 1" x-cloak @click="clearTracks()"
+                    class="text-sm text-red-500 hover:underline">{{locales.gps_tracks_clear}}</button>
+          </div>
+          <p class="mt-2 text-sm text-gray-400" x-show="lgTracks.length == 0">{{locales.gps_tracks_empty}}</p>
+          <!-- combined export: every segment of one (UTC) day as a single GPX -->
+          <div class="mt-2 flex items-center gap-2 text-sm" x-show="trackDays().length > 0" x-cloak>
+            <span class="text-gray-500">{{locales.gps_day_export}}</span>
+            <select class="rounded border-gray-300 py-0.5 text-sm" x-model="dayPick">
+              <template x-for="d in trackDays()" :key="d">
+                <option :value="d" x-text="fmtDay(d)"></option>
+              </template>
+            </select>
+            <a class="text-pcatblue hover:underline" :href="'/gps/day/' + dayPick + '.gpx'">GPX</a>
+          </div>
+          <div class="mt-2 overflow-x-auto" x-show="lgTracks.length > 0" x-cloak>
+            <table class="w-full text-left text-sm text-gray-600">
+              <thead class="text-xs uppercase text-gray-400">
+                <tr>
+                  <th class="py-1 pr-3">{{locales.gps_track_start}}</th>
+                  <th class="py-1 pr-3">{{locales.gps_track_duration}}</th>
+                  <th class="py-1 pr-3 text-right">{{locales.gps_track_dist}}</th>
+                  <th class="py-1 pr-3 text-right">{{locales.gps_track_maxspd}}</th>
+                  <th class="py-1 pr-3 text-right">{{locales.gps_track_points}}</th>
+                  <th class="py-1 pr-3 text-right">{{locales.gps_track_size}}</th>
+                  <th class="py-1"></th>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-for="tr in lgTracks" :key="tr.id">
+                  <tr class="border-t border-gray-100">
+                    <td class="py-1.5 pr-3 font-mono">
+                      <span x-text="segLabel(tr.id)"></span>
+                      <span class="ml-1 rounded bg-red-50 px-1.5 font-sans text-[10px] font-medium text-red-600" x-show="tr.active">{{locales.gps_track_active}}</span>
+                    </td>
+                    <td class="py-1.5 pr-3 font-mono" x-text="fmtDur(tr.end_t - tr.start_t)"></td>
+                    <td class="py-1.5 pr-3 text-right font-mono" x-text="fmtDist(tr.dist_m)"></td>
+                    <td class="py-1.5 pr-3 text-right font-mono" x-text="fmtMaxSpd(tr.max_kmh)"></td>
+                    <td class="py-1.5 pr-3 text-right font-mono" x-text="tr.points"></td>
+                    <td class="py-1.5 pr-3 text-right font-mono" x-text="fmtBytes(tr.bytes)"></td>
+                    <td class="whitespace-nowrap py-1.5 text-right">
+                      <button @click="viewTrack(tr.id)" class="text-pcatblue hover:underline">{{locales.gps_track_view}}</button>
+                      <a :href="'/gps/track/' + tr.id + '.gpx'" class="ml-2 text-pcatblue hover:underline">GPX</a>
+                      <a :href="'/gps/track/' + tr.id + '.bin'" class="ml-2 text-pcatblue hover:underline">{{locales.gps_track_raw}}</a>
+                      <button @click="deleteTrack(tr.id)" class="ml-2 text-red-500 hover:underline">{{locales.gps_track_delete}}</button>
+                    </td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    </div>
+  </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block bottom %}
+<script>
+  document.addEventListener("alpine:init", () => {
+    Alpine.store("app").set_page("gps");
+
+    // Constellation identity colors — fixed per entity, validated for CVD
+    // separation and 3:1 surface contrast (GPS carries the brand blue).
+    const GNSS_COLORS = {
+      "GPS": "#008AD3",
+      "BeiDou": "#B07800",
+      "GLONASS": "#15916A",
+      "Galileo": "#7C5CD6",
+    };
+    const GNSS_FALLBACK = "#D64550";
+    const GNSS_ORDER = ["GPS", "BeiDou", "GLONASS", "Galileo"];
+
+    const L10N = {
+      off: "{{locales.gps_status_off}}",
+      acquiring: "{{locales.gps_status_acquiring}}",
+      fix2d: "{{locales.gps_status_fix_2d}}",
+      fix3d: "{{locales.gps_status_fix_3d}}",
+      recPoints: "{{locales.gps_logger_points_label}}",
+      store: "{{locales.gps_logger_store}}",
+      estimate: "{{locales.gps_logger_estimate}}",
+      days: "{{locales.gps_logger_days}}",
+      months: "{{locales.gps_logger_months}}",
+      years: "{{locales.gps_logger_years}}",
+      play: "{{locales.gps_replay_play}}",
+      pause: "{{locales.gps_replay_pause}}",
+      storeInternal: "{{locales.gps_logger_store_internal}}",
+      storeSd: "{{locales.gps_logger_store_sd}}",
+      storeNvme: "{{locales.gps_logger_store_nvme}}",
+      storeUsb: "{{locales.gps_logger_store_usb}}",
+      free: "{{locales.gps_logger_free}}",
+      noLimit: "{{locales.gps_logger_cap_unlimited}}",
+    };
+
+    // Bytes per stored point, by record verbosity (for the capacity estimate).
+    const PT_BYTES = { minimal: 12, standard: 16, verbose: 20 };
+
+    // Points per hour of recording, for the capacity estimate. Fixed
+    // intervals are exact; smart profiles assume continuous movement at
+    // ~30 km/h (the worst realistic case — parked time costs ~nothing, so
+    // real life lasts longer). "fine" saturates at the 1 s sample rate.
+    const EST_PTS_PER_HOUR = {
+      int_1: 3600, int_10: 360, int_60: 60, int_600: 6, int_3600: 1,
+      fine: 3600, normal: 2000, coarse: 600,
+    };
+
+    // Viewed-track styling: identity red distinct from the live track
+    // (pcatgray) and the position marker (brand blue).
+    const TRACK_COLOR = "#D64550";
+    const TRACK_START_COLOR = "#15916A";
+    // Gap between consecutive logged points that means "the receiver was
+    // off / the device jumped"; the viewer breaks the line there instead of
+    // drawing a straight bridge across town.
+    const TRACK_GAP_S = 1800;
+
+    Alpine.data("gps_page", () => ({
+      st: null,
+      powered: false,
+      switching: false,
+      follow: true,
+      copied: false,
+      timeSyncing: false,
+      timeSynced: false,
+      timeSyncedText: "",
+      dayPick: "",
+      agps: null,
+      agpsBusy: false,
+      tilesCfg: null,
+      tilesStorePick: "auto",
+      countryPick: "th",
+      countryBusy: false,
+      cellInfo: null,
+      cellBusy: false,
+      cellKey: "",
+      celldb: null,
+      towersShown: false,
+      towerLayers: [],
+      lastAcc: null,
+      cellMarker: null,
+      cellCircle: null,
+      cellLine: null,
+      atLogOpen: false,
+      gnssProfiles: [],
+      gnssCurrent: null,
+      gnssPick: null,
+      gnssBusy: false,
+      gnssNeedsRestart: false,
+      tilesDl: { running: false, total: 0, done: 0, failed: 0, store_mb: 0 },
+      settingsOpen: false,
+      lg: { enabled: false, mode: "normal", fmt: "standard", store_bytes: 0,
+            cap_mb: 8, rotate: "weekly", store: "internal", storeOptions: [],
+            storeError: null },
+      lgTracks: [],
+      lgBusy: false,
+      lgHelp: false,
+      trk: null,
+      trkLayer: null,
+      replay: { playing: false, speed: 100, simT: 0 },
+      lastPos: null,
+      map: null,
+      marker: null,
+      accCircle: null,
+      trackLine: null,
+      hadFirstFix: false,
+
+      notification: { show: false, message: '', message_en: '', message_cn: '', type: 'info' },
+
+      init() {
+        // Alpine auto-runs init() on Alpine.data components; guard against a
+        // second call (an extra L.map() on the same element throws).
+        if (this._inited) return;
+        this._inited = true;
+        // Unconditional now that the capability card is decided client-side:
+        // the map element is always in the DOM, and initMap() no-ops when the
+        // container is missing.
+        this.initMap();
+        // The lg: layout sizes the map from the left column after first
+        // paint; re-measure once so Leaflet fills the real box.
+        setTimeout(() => { if (this.map) this.map.invalidateSize(); }, 400);
+        this.poll();
+        this._timer = setInterval(() => this.poll(), 2000);
+        this.pollTilesStatus();
+        this.loadConstellation();
+      },
+
+      destroy() {
+        clearInterval(this._timer);
+      },
+
+      poll() {
+        fetch("/api/v1/gps.json")
+          .then(r => r.json())
+          .then(d => {
+            this.st = d;
+            this.powered = !!d.powered;
+            this.updateMap();
+            this.scrollAtLog();
+          })
+          .catch(() => {});
+      },
+
+      // ---------- AT log ----------
+      atLog() {
+        return this.st && this.st.at_log ? this.st.at_log : [];
+      },
+      atLogCountText() {
+        const n = this.atLog().length;
+        return n ? n + " " : "";
+      },
+      atTime(e) {
+        const d = new Date(e.t * 1000);
+        const p = n => String(n).padStart(2, "0");
+        return p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
+      },
+      atPrefix(e) {
+        return { tx: ">> ", rx: "<< ", evt: "-- ", err: "!! " }[e.kind] || "";
+      },
+      atClass(e) {
+        return "gps-at-" + (e.kind || "evt");
+      },
+      scrollAtLog(force) {
+        if (!this.atLogOpen) return;
+        const el = this.$refs.atpane;
+        if (!el) return;
+        // Stick to the tail only when already there (or on open), so a user
+        // reading older entries isn't yanked back down by the 2s poll.
+        const nearBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 60;
+        if (force || nearBottom) {
+          this.$nextTick(() => { el.scrollTop = el.scrollHeight; });
+        }
+      },
+
+      // ---- constellation profile ----
+      constellationLabel(p) {
+        const names = { auto: "{{locales.gps_gnss_auto}}", gps: "GPS", glonass: "GPS + GLONASS",
+                        beidou: "GPS + BeiDou", galileo: "GPS + Galileo",
+                        gl_bd: "GPS + GLONASS + BeiDou", gl_ga: "GPS + GLONASS + Galileo",
+                        bd_ga: "GPS + BeiDou + Galileo" };
+        return names[p.key] || ("gnssconfig " + p.value);
+      },
+      loadConstellation() {
+        fetch("/api/v1/gps/constellation.json")
+          .then(r => r.json())
+          .then(d => {
+            if (d.status !== "ok") return;
+            this.gnssProfiles = d.profiles || [];
+            this.gnssCurrent = d.current;
+            if (this.gnssPick === null) this.gnssPick = d.current;
+          })
+          .catch(() => {});
+      },
+      restartModem() {
+        if (this.gnssBusy) return;
+        if (!confirm("{{locales.gps_modem_restart_confirm}}")) return;
+        this.gnssBusy = true;
+        fetch("/api/v1/gps/modem_restart.json", { method: "POST" })
+          .then(r => r.json())
+          .then(d => {
+            this.gnssBusy = false;
+            if (d.status === "ok") {
+              this.gnssNeedsRestart = false;
+              this.showNotification("{{locales.gps_modem_restarting}}", "模块重启中…", "success");
+              // The module is off the bus for ~30-60s; re-read once it is back.
+              setTimeout(() => this.loadConstellation(), 45000);
+            } else {
+              this.showNotification(d.message || "failed", d.message || "失败", "error");
+            }
+          })
+          .catch(() => {
+            this.gnssBusy = false;
+            this.showNotification("Network error", "网络错误", "error");
+          });
+      },
+
+      applyConstellation() {
+        if (this.gnssBusy) return;
+        this.gnssBusy = true;
+        fetch("/api/v1/gps/constellation.json", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ value: this.gnssPick }),
+        })
+          .then(r => r.json())
+          .then(d => {
+            this.gnssBusy = false;
+            if (d.status === "ok") {
+              this.gnssCurrent = d.current;
+              this.gnssNeedsRestart = !!d.needs_restart;
+              this.showNotification("{{locales.gps_constellation_saved}}", "已保存", "success");
+            } else {
+              this.showNotification(d.message || "failed", d.message || "失败", "error");
+            }
+          })
+          .catch(() => {
+            this.gnssBusy = false;
+            this.showNotification("Network error", "网络错误", "error");
+          });
+      },
+
+      // ---- GPS settings modal / position logger ----
+      openSettings() {
+        this.settingsOpen = true;
+        // All refresh on every open: constellation and AGPS state are read
+        // from the modem, logger state and track list can change while the
+        // modal is closed.
+        this.loadConstellation();
+        this.loadLogger();
+        this.loadAgps();
+        this.loadTilesConfig();
+        this.loadCelldb();
+      },
+      applyLoggerState(d) {
+        this.lg = { enabled: !!d.enabled, mode: d.mode, fmt: d.fmt,
+                    store_bytes: d.store_bytes, cap_mb: d.cap_mb,
+                    rotate: d.rotate, store: d.store,
+                    storeOptions: d.store_options || [],
+                    storeError: d.store_error || null };
+        if (d.tracks) this.lgTracks = d.tracks;
+      },
+      storeOptLabel(o) {
+        const kind = { internal: L10N.storeInternal, sd: L10N.storeSd,
+                       nvme: L10N.storeNvme, usb: L10N.storeUsb }[o.kind] || o.key;
+        const name = o.kind === "internal" ? kind : kind + " (" + o.key + ")";
+        return name + " · " + this.fmtBytes(o.free) + " " + L10N.free;
+      },
+      loadLogger() {
+        fetch("/api/v1/gps/logger.json")
+          .then(r => r.json())
+          .then(d => {
+            if (d.status === "ok") this.applyLoggerState(d);
+          })
+          .catch(() => {});
+      },
+      saveLogger(patch) {
+        if (this.lgBusy) return;
+        this.lgBusy = true;
+        fetch("/api/v1/gps/logger.json", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(patch),
+        })
+          .then(r => r.json())
+          .then(d => {
+            this.lgBusy = false;
+            if (d.status === "ok") {
+              this.applyLoggerState(d);
+              // A smaller cap may have evicted files; re-list them.
+              this.loadLogger();
+              this.showNotification("{{locales.gps_logger_saved}}", "记录设置已保存。", "success");
+            } else {
+              this.showNotification(d.message || "failed", d.message || "失败", "error");
+              this.loadLogger();
+            }
+          })
+          .catch(() => {
+            this.lgBusy = false;
+            this.showNotification("Network error", "网络错误", "error");
+          });
+      },
+      recOn() {
+        return !!(this.powered && this.st && this.st.logger && this.st.logger.on);
+      },
+      recTitle() {
+        const n = this.st && this.st.logger ? this.st.logger.points : 0;
+        return n + " " + L10N.recPoints;
+      },
+      storeText() {
+        const cap = this.lg.cap_mb ? this.lg.cap_mb + " MB" : L10N.noLimit;
+        return L10N.store + ": " + this.fmtBytes(this.lg.store_bytes) + " / " + cap;
+      },
+      capBudgetBytes() {
+        if (this.lg.cap_mb) return this.lg.cap_mb * 1048576;
+        // No limit: budget is whatever is free on the chosen medium.
+        const o = this.lg.storeOptions.find(o => o.key === this.lg.store);
+        return o ? o.free : 0;
+      },
+      capEstimateText() {
+        const ph = EST_PTS_PER_HOUR[this.lg.mode] || 2000;
+        const bpp = PT_BYTES[this.lg.fmt] || 16;
+        const budget = this.capBudgetBytes();
+        if (!budget) return "";
+        const days = budget / (ph * 8 * bpp);
+        let v;
+        if (days < 90) v = Math.max(1, Math.round(days)) + " " + L10N.days;
+        else if (days < 1095) v = Math.round(days / 30) + " " + L10N.months;
+        else if (days < 365 * 99) v = (days / 365).toFixed(days < 3650 ? 1 : 0) + " " + L10N.years;
+        else v = "99+ " + L10N.years;
+        return L10N.estimate.replace("{v}", v);
+      },
+      fmtBytes(b) {
+        if (!b) return "0 B";
+        if (b < 1024) return b + " B";
+        if (b < 1048576) return (b / 1024).toFixed(1) + " KB";
+        if (b < 1073741824) return (b / 1048576).toFixed(1) + " MB";
+        return (b / 1073741824).toFixed(1) + " GB";
+      },
+      // "20260807-063015" -> "2026-08-07 06:30" (segment ids are UTC start times)
+      segLabel(id) {
+        return id.slice(0, 4) + "-" + id.slice(4, 6) + "-" + id.slice(6, 8)
+          + " " + id.slice(9, 11) + ":" + id.slice(11, 13);
+      },
+      fmtDur(s) {
+        if (!s || s < 0) return "—";
+        if (s < 60) return s + "s";
+        if (s < 3600) return Math.round(s / 60) + "m";
+        return Math.floor(s / 3600) + "h " + Math.round((s % 3600) / 60) + "m";
+      },
+
+      // ---- track viewer ----
+      viewTrack(id) {
+        fetch("/api/v1/gps/track.json?id=" + id)
+          .then(r => r.json())
+          .then(d => {
+            if (d.status !== "ok" || !d.points || !d.points.length) {
+              this.showNotification("{{locales.gps_track_load_failed}}", "无法加载该轨迹。", "error");
+              return;
+            }
+            this.drawTrack(d);
+            this.settingsOpen = false;
+          })
+          .catch(() => this.showNotification("Network error", "网络错误", "error"));
+      },
+      drawTrack(d) {
+        if (!this.map) return;
+        this.closeTrack();
+        // Points are [t, lat, lon, alt, kmh]; break the polyline on long
+        // time gaps rather than bridging them.
+        const segs = [];
+        let seg = [], prevT = null;
+        for (const p of d.points) {
+          if (prevT !== null && p[0] - prevT > TRACK_GAP_S && seg.length) {
+            segs.push(seg);
+            seg = [];
+          }
+          seg.push([p[1], p[2]]);
+          prevT = p[0];
+        }
+        if (seg.length) segs.push(seg);
+        const layer = L.layerGroup();
+        for (const s of segs) {
+          layer.addLayer(L.polyline(s, { color: TRACK_COLOR, weight: 3, opacity: 0.85 }));
+        }
+        const first = d.points[0], last = d.points[d.points.length - 1];
+        layer.addLayer(L.circleMarker([first[1], first[2]], {
+          radius: 5, color: "#ffffff", weight: 2,
+          fillColor: TRACK_START_COLOR, fillOpacity: 1,
+        }));
+        layer.addLayer(L.circleMarker([last[1], last[2]], {
+          radius: 5, color: "#ffffff", weight: 2,
+          fillColor: TRACK_COLOR, fillOpacity: 1,
+        }));
+        layer.addTo(this.map);
+        this.trkLayer = layer;
+        this.trk = { id: d.id, total: d.total_points, stats: d.stats };
+        this._trkPts = d.points;
+        // Follow would immediately pan away from the loaded track.
+        this.follow = false;
+        const flat = segs.flat();
+        if (flat.length) this.map.fitBounds(L.latLngBounds(flat), { padding: [30, 30] });
+      },
+      closeTrack() {
+        this.stopReplay();
+        if (this.trkLayer && this.map) this.map.removeLayer(this.trkLayer);
+        this.trkLayer = null;
+        this.trk = null;
+        this._trkPts = null;
+      },
+
+      // ---- replay ----
+      toggleReplay() {
+        if (this.replay.playing) {
+          this.pauseReplay();
+          return;
+        }
+        const pts = this._trkPts;
+        if (!this.map || !pts || pts.length < 2) return;
+        const last = pts[pts.length - 1][0];
+        if (!this.replay.simT || this.replay.simT >= last) {
+          this.replay.simT = pts[0][0];
+          this._rIdx = 0;
+        }
+        if (!this._replayMarker) {
+          // Brand-yellow puck, distinct from the red track and blue live dot.
+          this._replayMarker = L.circleMarker([pts[0][1], pts[0][2]], {
+            radius: 6, color: "#00274D", weight: 2,
+            fillColor: "#FDE021", fillOpacity: 1,
+          }).addTo(this.map);
+        }
+        this.replay.playing = true;
+        this._replayTimer = setInterval(() => this.replayTick(0.1), 100);
+      },
+      pauseReplay() {
+        clearInterval(this._replayTimer);
+        this._replayTimer = null;
+        this.replay.playing = false;
+      },
+      stopReplay() {
+        this.pauseReplay();
+        if (this._replayMarker && this.map) this.map.removeLayer(this._replayMarker);
+        this._replayMarker = null;
+        this.replay.simT = 0;
+        this._rIdx = 0;
+      },
+      replayTick(dt) {
+        const pts = this._trkPts;
+        if (!pts || pts.length < 2) {
+          this.pauseReplay();
+          return;
+        }
+        this.replay.simT += dt * this.replay.speed;
+        let i = this._rIdx || 0;
+        while (i < pts.length - 1 && pts[i + 1][0] <= this.replay.simT) i++;
+        let lat, lon;
+        if (i >= pts.length - 1) {
+          lat = pts[i][1];
+          lon = pts[i][2];
+          this.replay.simT = pts[i][0];
+          this.pauseReplay();
+        } else {
+          const a = pts[i], b = pts[i + 1];
+          const gap = b[0] - a[0];
+          if (gap > TRACK_GAP_S) {
+            // Recording gap (receiver was off): jump the clock, don't glide.
+            this.replay.simT = b[0];
+            lat = b[1];
+            lon = b[2];
+            i++;
+          } else {
+            const f = gap > 0 ? Math.min(1, Math.max(0, (this.replay.simT - a[0]) / gap)) : 1;
+            lat = a[1] + (b[1] - a[1]) * f;
+            lon = a[2] + (b[2] - a[2]) * f;
+          }
+        }
+        this._rIdx = i;
+        if (this._replayMarker) {
+          this._replayMarker.setLatLng([lat, lon]);
+          if (!this.map.getBounds().contains([lat, lon])) this.map.panTo([lat, lon]);
+        }
+      },
+      replayBtnTitle() {
+        return this.replay.playing ? L10N.pause : L10N.play;
+      },
+      replayTimeText() {
+        if (!this.replay.simT) return "";
+        const d = new Date(this.replay.simT * 1000);
+        const p = n => String(n).padStart(2, "0");
+        return p(d.getUTCHours()) + ":" + p(d.getUTCMinutes()) + ":" + p(d.getUTCSeconds());
+      },
+      trkChipText() {
+        if (!this.trk) return "";
+        const m = this.trk.stats.distance_m || 0;
+        const km = m >= 10000 ? Math.round(m / 1000) : (m / 1000).toFixed(1);
+        return this.segLabel(this.trk.id) + " · " + km + " km";
+      },
+      deleteTrack(id) {
+        if (!confirm("{{locales.gps_track_delete_confirm}}")) return;
+        fetch("/api/v1/gps/track/delete.json", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: id }),
+        })
+          .then(r => r.json())
+          .then(d => {
+            if (d.status === "ok") {
+              if (this.trk && this.trk.id === id) this.closeTrack();
+              this.showNotification("{{locales.gps_track_deleted}}", "轨迹已删除。", "success");
+            }
+            this.loadLogger();
+          })
+          .catch(() => {});
+      },
+      clearTracks() {
+        if (!confirm("{{locales.gps_tracks_clear_confirm}}")) return;
+        fetch("/api/v1/gps/track/delete.json", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ all: true }),
+        })
+          .then(r => r.json())
+          .then(() => {
+            this.closeTrack();
+            this.loadLogger();
+          })
+          .catch(() => {});
+      },
+
+      togglePower() {
+        if (this.switching) return;
+        this.switching = true;
+        fetch("/api/v1/gps/power.json", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ on: !this.powered }),
+        })
+          .then(r => r.json())
+          .then(d => {
+            this.switching = false;
+            if (d.status === "ok") {
+              this.powered = !!d.powered;
+              this.poll();
+            } else {
+              this.showNotification(d.message || "GNSS command failed", "GNSS 命令失败", "error");
+            }
+          })
+          .catch(() => {
+            this.switching = false;
+            this.showNotification("Network error", "网络错误", "error");
+          });
+      },
+
+      // ---------- state helpers ----------
+      fix(key) {
+        return this.st && this.st.fix ? this.st.fix[key] : null;
+      },
+      hasFix() {
+        return !!(this.st && this.st.fix && this.st.fix.has_fix);
+      },
+      satsInView() {
+        return this.st && this.st.satellites ? this.st.satellites.in_view : 0;
+      },
+      allSats() {
+        return this.st && this.st.satellites ? this.st.satellites.list : [];
+      },
+      statusKey() {
+        if (!this.powered) return "off";
+        if (!this.hasFix()) return "acquiring";
+        return this.fix("fix_type") === "2D" ? "fix2d" : "fix3d";
+      },
+      statusText() {
+        return L10N[this.statusKey()];
+      },
+      statusDotClass() {
+        const k = this.statusKey();
+        if (k === "off") return "bg-gray-400";
+        if (k === "acquiring") return "bg-amber-500";
+        return "bg-green-500";
+      },
+
+      // ---------- formatting ----------
+      fmtNum(v, digits, suffix) {
+        if (v === null || v === undefined) return "—";
+        return v.toFixed(digits) + suffix;
+      },
+      fmtLat() {
+        const v = this.fix("lat");
+        if (v === null || v === undefined) return "—";
+        return Math.abs(v).toFixed(6) + "° " + (v >= 0 ? "N" : "S");
+      },
+      fmtLon() {
+        const v = this.fix("lon");
+        if (v === null || v === undefined) return "—";
+        return Math.abs(v).toFixed(6) + "° " + (v >= 0 ? "E" : "W");
+      },
+      fmtAge() {
+        const a = this.st ? this.st.nmea_age_s : null;
+        if (a === null || a === undefined) return "—";
+        return a < 10 ? a.toFixed(1) + "s" : Math.round(a) + "s";
+      },
+      speedText() {
+        const v = this.fix("speed_kmh");
+        return v === null || v === undefined ? "—" : v.toFixed(1);
+      },
+      courseText() {
+        const v = this.fix("course_deg");
+        return v === null || v === undefined ? "—" : Math.round(v) + "°";
+      },
+      compassStyle() {
+        const v = this.fix("course_deg");
+        return "transform: rotate(" + (v === null || v === undefined ? 0 : v) + "deg)";
+      },
+
+      // ---------- trip odometer ----------
+      // Server-side and outside st.fix, so it survives a lost fix and a page
+      // reload; it restarts with the GNSS session, not with this tab.
+      tripM() {
+        const v = this.st && this.st.trip ? this.st.trip.distance_m : null;
+        return typeof v === "number" ? v : null;
+      },
+      // Metres up to 1 km, then km — a 3-digit readout either way, so the
+      // card does not reflow as the number grows.
+      tripValue() {
+        const m = this.tripM();
+        if (m === null) return "—";
+        return m < 1000 ? Math.round(m).toString() : (m / 1000).toFixed(2);
+      },
+      tripUnit() {
+        const m = this.tripM();
+        return m !== null && m >= 1000 ? "km" : "m";
+      },
+      tripTitle() {
+        const since = this.st && this.st.trip ? this.st.trip.since : null;
+        if (!since) return "";
+        return new Date(since * 1000).toLocaleString();
+      },
+
+      // ---------- satellites chart ----------
+      satGroups() {
+        const byName = {};
+        for (const s of this.allSats()) {
+          (byName[s.gnss] = byName[s.gnss] || []).push(s);
+        }
+        const names = Object.keys(byName).sort((a, b) => {
+          const ia = GNSS_ORDER.indexOf(a), ib = GNSS_ORDER.indexOf(b);
+          return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib) || a.localeCompare(b);
+        });
+        return names.map(n => ({
+          name: n,
+          color: GNSS_COLORS[n] || GNSS_FALLBACK,
+          sats: byName[n].slice().sort((a, b) => a.prn - b.prn),
+        }));
+      },
+      barStyle(g, s) {
+        const snr = s.snr === null || s.snr === undefined ? 0 : Math.min(s.snr, 55);
+        const h = Math.max(2, Math.round(snr / 55 * 140));
+        const op = s.used ? 1 : 0.35;
+        return "height:" + h + "px;background-color:" + g.color + ";opacity:" + op;
+      },
+      barTitle(g, s) {
+        const snr = s.snr === null || s.snr === undefined ? "—" : s.snr + " dB-Hz";
+        const el = s.elev === null || s.elev === undefined ? "—" : s.elev + "°";
+        const az = s.az === null || s.az === undefined ? "—" : s.az + "°";
+        return g.name + " PRN " + s.prn + " · SNR " + snr + " · elev " + el + " · az " + az + (s.used ? " · in fix" : "");
+      },
+
+      // ---------- map ----------
+      initMap() {
+        // Leaflet throws if the container is missing; init() calls this
+        // unconditionally now, so check rather than let it break the whole
+        // Alpine component (which would stop the status poll too).
+        if (typeof L === "undefined" || !document.getElementById("gps-map")) return;
+        this.map = L.map("gps-map", { zoomControl: true }).setView([20, 0], 2);
+        // Same-origin tile endpoint: downloaded region tiles, then the
+        // builtin z0-4 world pack, then a server-side OSM fetch — so the
+        // browser never needs to reach openstreetmap.org itself.
+        L.tileLayer("/osm/{z}/{x}/{y}.png", {
+          maxZoom: 19,
+          attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+        }).addTo(this.map);
+        this.trackLine = L.polyline([], { color: "#00274D", weight: 2, opacity: 0.6 }).addTo(this.map);
+      },
+      updateMap() {
+        if (!this.map) return;
+        // iPhone-style position halo: the circle IS the accuracy estimate.
+        // With a fix its radius is the estimated error (inflated for 2D);
+        // when the fix drops but coordinates remain, the position dims and
+        // the circle grows with the time since the last fix — the honest
+        // "somewhere around here, and less sure every second" rendering.
+        const hasFix = this.hasFix();
+        const lat = this.fix("lat"), lon = this.fix("lon");
+        if (lat === null || lon === null || lat === undefined) return;
+        const pos = [lat, lon];
+        this.lastPos = pos;
+        const acc = this.fix("accuracy_m");
+        let radius, live;
+        if (hasFix) {
+          radius = Math.max(acc || 0, 5);
+          if (this.fix("fix_type") === "2D") radius = Math.max(radius * 1.5, 25);
+          this.lastAcc = radius;
+          live = true;
+        } else {
+          // Uncertainty grows ~15 m/s of fix age (walking-to-driving drift),
+          // capped so a long outage doesn't paint the whole city.
+          const age = this.fix("age_s");
+          radius = Math.min((this.lastAcc || 25) + (age || 0) * 15, 2000);
+          live = false;
+        }
+        if (!this.marker) {
+          this.marker = L.circleMarker(pos, {
+            radius: 7, color: "#ffffff", weight: 2,
+            fillColor: "#008AD3", fillOpacity: 1,
+          }).addTo(this.map);
+          this.accCircle = L.circle(pos, {
+            radius: 0, color: "#008AD3", weight: 1,
+            fillColor: "#008AD3", fillOpacity: 0.12,
+          }).addTo(this.map);
+        } else {
+          this.marker.setLatLng(pos);
+          this.accCircle.setLatLng(pos);
+        }
+        this.marker.setStyle({ fillColor: live ? "#008AD3" : "#9CA3AF",
+                               fillOpacity: live ? 1 : 0.7 });
+        this.accCircle.setStyle(live
+          ? { color: "#008AD3", fillColor: "#008AD3", fillOpacity: 0.12,
+              dashArray: null }
+          : { color: "#9CA3AF", fillColor: "#9CA3AF", fillOpacity: 0.08,
+              dashArray: "6 6" });
+        this.accCircle.setRadius(radius);
+        if (!hasFix) return;   // track, first-view and follow only on real fixes
+        const pts = this.trackLine.getLatLngs();
+        const last = pts.length ? pts[pts.length - 1] : null;
+        if (!last || last.lat !== lat || last.lng !== lon) {
+          this.trackLine.addLatLng(pos);
+          if (pts.length > 1000) {
+            this.trackLine.setLatLngs(pts.slice(-1000));
+          }
+        }
+        if (!this.hadFirstFix) {
+          this.hadFirstFix = true;
+          this.map.setView(pos, 16);
+        } else if (this.follow) {
+          this.map.panTo(pos);
+        }
+      },
+      clearTrack() {
+        if (this.trackLine) this.trackLine.setLatLngs([]);
+      },
+      downloadTiles() {
+        if (!this.map || this.tilesDl.running) return;
+        const b = this.map.getBounds();
+        const z = Math.floor(this.map.getZoom());
+        fetch("/api/v1/gps/tiles/download.json", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            min_lat: b.getSouth(), max_lat: b.getNorth(),
+            min_lon: b.getWest(), max_lon: b.getEast(),
+            min_z: z, max_z: Math.min(z + 3, 17),
+          }),
+        })
+          .then(r => r.json())
+          .then(d => {
+            if (d.status === "ok") {
+              this.tilesDl.running = true;
+              this.tilesDl.total = d.total;
+              this.tilesDl.done = 0;
+              this.pollTilesStatus();
+            } else {
+              this.showNotification(d.message || "Download failed", "下载失败", "error");
+            }
+          })
+          .catch(() => this.showNotification("Network error", "网络错误", "error"));
+      },
+      tilesDlText() {
+        // "312/2500 · 4.6 MB / ~37.1 MB · 3.2 Mbps · ETA 1m 25s"
+        const d = this.tilesDl;
+        let s = d.done + "/" + d.total;
+        if (d.bytes) {
+          s += " · " + (d.bytes / 1048576).toFixed(1) + " MB";
+          if (d.est_bytes) s += " / ~" + (d.est_bytes / 1048576).toFixed(1) + " MB";
+        }
+        if (d.rate_bps) s += " · " + (d.rate_bps * 8 / 1e6).toFixed(1) + " Mbps";
+        if (d.eta_s !== null && d.eta_s !== undefined) s += " · ETA " + this.fmtDur(d.eta_s);
+        return s;
+      },
+      pollTilesStatus() {
+        fetch("/api/v1/gps/tiles/status.json")
+          .then(r => r.json())
+          .then(d => {
+            this.tilesDl = d;
+            if (d.running) {
+              setTimeout(() => this.pollTilesStatus(), 2000);
+            }
+          })
+          .catch(() => {});
+      },
+      osmLink() {
+        if (!this.lastPos) return "#";
+        const [lat, lon] = this.lastPos;
+        return "https://www.openstreetmap.org/?mlat=" + lat + "&mlon=" + lon + "#map=16/" + lat + "/" + lon;
+      },
+      copyCoords() {
+        if (!this.hasFix()) return;
+        const text = this.fix("lat") + ", " + this.fix("lon");
+        const done = () => {
+          this.copied = true;
+          setTimeout(() => { this.copied = false; }, 2000);
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(done).catch(() => {});
+        } else {
+          // http:// context has no async clipboard API
+          const ta = document.createElement("textarea");
+          ta.value = text;
+          document.body.appendChild(ta);
+          ta.select();
+          try { document.execCommand("copy"); done(); } catch (e) {}
+          document.body.removeChild(ta);
+        }
+      },
+
+      // ---------- track stats / day export ----------
+      fmtDist(m) {
+        if (m === null || m === undefined) return "—";
+        return m >= 1000 ? (m / 1000).toFixed(m >= 10000 ? 0 : 1) + " km" : m + " m";
+      },
+      fmtMaxSpd(kmh) {
+        if (kmh === null || kmh === undefined) return "—";
+        return Math.round(kmh) + " km/h";
+      },
+      trackDays() {
+        const days = [...new Set(this.lgTracks.map(tr => tr.id.slice(0, 8)))];
+        if (days.length && !days.includes(this.dayPick)) this.dayPick = days[0];
+        return days;
+      },
+      fmtDay(d) {
+        return d.slice(0, 4) + "-" + d.slice(4, 6) + "-" + d.slice(6, 8);
+      },
+
+      // ---------- sky plot ----------
+      skyPlotSvg() {
+        // Polar az/el view: center = zenith, outer ring = horizon; filled
+        // dot = used in the fix. Built as a string because Alpine templates
+        // don't expand inside <svg>.
+        let out = '<svg viewBox="-112 -112 224 236" class="mx-auto block" role="img">';
+        for (const el of [0, 30, 60]) {
+          out += '<circle cx="0" cy="0" r="' + Math.round((90 - el) / 90 * 100) +
+                 '" fill="none" stroke="#e5e7eb" stroke-width="1"/>';
+        }
+        out += '<line x1="-100" y1="0" x2="100" y2="0" stroke="#f3f4f6"/>' +
+               '<line x1="0" y1="-100" x2="0" y2="100" stroke="#f3f4f6"/>';
+        const compass = [["N", 0, -103], ["E", 105, 0], ["S", 0, 108], ["W", -105, 0]];
+        for (const [label, x, y] of compass) {
+          out += '<text x="' + x + '" y="' + (y + 3) + '" text-anchor="middle"' +
+                 ' font-size="9" fill="#9ca3af">' + label + '</text>';
+        }
+        for (const s of this.allSats()) {
+          if (s.elev === null || s.elev === undefined ||
+              s.az === null || s.az === undefined) continue;
+          const color = GNSS_COLORS[s.gnss] || GNSS_FALLBACK;
+          const r = (90 - Math.min(s.elev, 90)) / 90 * 100;
+          const a = s.az * Math.PI / 180;
+          const x = (r * Math.sin(a)).toFixed(1), y = (-r * Math.cos(a)).toFixed(1);
+          out += '<g><title>' + this.barTitle({ name: s.gnss }, s) + '</title>' +
+                 '<circle cx="' + x + '" cy="' + y + '" r="4.5" fill="' + color +
+                 '" fill-opacity="' + (s.used ? 1 : 0.35) + '"' +
+                 (s.used ? ' stroke="#374151" stroke-width="1"' : '') + '/>' +
+                 '<text x="' + x + '" y="' + (parseFloat(y) + 11).toFixed(1) +
+                 '" text-anchor="middle" font-size="7" fill="#6b7280">' + s.prn +
+                 '</text></g>';
+        }
+        return out + '</svg>';
+      },
+
+      // ---------- AGPS ----------
+      loadAgps() {
+        fetch("/api/v1/gps/agps.json?refresh=1")
+          .then(r => r.json())
+          .then(d => { if (d.status === "ok") this.agps = d.agps; })
+          .catch(() => {});
+      },
+      agpsStatusText() {
+        const a = this.agps;
+        if (!a) return "…";
+        if (a.valid_min) {
+          const hours = Math.round(a.valid_min / 60);
+          return "{{locales.gps_agps_valid}} " + hours + " h" +
+                 (a.injected_utc ? " · " + a.injected_utc + " UTC" : "");
+        }
+        if (a.enabled === false) return "{{locales.gps_agps_disabled}}";
+        return "{{locales.gps_agps_none}}";
+      },
+      updateAgps() {
+        if (this.agpsBusy) return;
+        this.agpsBusy = true;
+        fetch("/api/v1/gps/agps.json", { method: "POST" })
+          .then(r => r.json())
+          .then(d => {
+            this.agpsBusy = false;
+            if (d.status === "ok") {
+              this.agps = d.agps;
+              this.showNotification("{{locales.gps_agps_done}}", "辅助数据已注入", "success");
+            } else {
+              this.showNotification(d.message || "AGPS update failed", "AGPS 更新失败", "error");
+            }
+          })
+          .catch(() => {
+            this.agpsBusy = false;
+            this.showNotification("Network error", "网络错误", "error");
+          });
+      },
+
+      // ---------- offline map packs ----------
+      loadTilesConfig() {
+        fetch("/api/v1/gps/tiles/config.json")
+          .then(r => r.json())
+          .then(d => {
+            if (d.status !== "ok") return;
+            this.tilesCfg = d;
+            this.tilesStorePick = d.store_pref || "auto";
+            this.cellKey = d.opencellid_key || "";
+            const codes = d.countries.map(c => c.code);
+            if (!codes.includes(this.countryPick)) this.countryPick = codes[0] || "";
+          })
+          .catch(() => {});
+      },
+      tilesExtStores() {
+        return this.tilesCfg ? this.tilesCfg.stores.filter(o => o.kind !== "internal") : [];
+      },
+      storeOptLabel(o) {
+        const kinds = {
+          sd: "{{locales.gps_logger_store_sd}}",
+          nvme: "{{locales.gps_logger_store_nvme}}",
+          usb: "{{locales.gps_logger_store_usb}}",
+        };
+        return (kinds[o.kind] || o.kind) + " · " + (o.free / 1073741824).toFixed(1) + " GB";
+      },
+      tilesActiveText() {
+        const a = this.tilesCfg && this.tilesCfg.active;
+        if (!a) return "";
+        return "→ " + (a.key === "internal" ? "{{locales.gps_logger_store_internal}}" : a.key)
+          + " · " + a.cap_mb + " MB";
+      },
+      setTilesStore() {
+        fetch("/api/v1/gps/tiles/config.json", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ store: this.tilesStorePick }),
+        })
+          .then(r => r.json())
+          .then(d => {
+            if (d.status === "ok") {
+              if (this.tilesCfg) this.tilesCfg.active = d.active;
+            } else {
+              this.showNotification(d.message || "Storage not available", "存储不可用", "error");
+            }
+          })
+          .catch(() => {});
+      },
+      tilesCountries() {
+        return this.tilesCfg ? this.tilesCfg.countries : [];
+      },
+      countryInfoText() {
+        const c = this.tilesCountries().find(x => x.code === this.countryPick);
+        if (!c) return "";
+        return c.tiles + " tiles · ~" + c.est_mb + " MB · z0–z" + c.max_z;
+      },
+      downloadCountry() {
+        if (this.countryBusy || this.tilesDl.running) return;
+        this.countryBusy = true;
+        fetch("/api/v1/gps/tiles/country.json", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ code: this.countryPick }),
+        })
+          .then(r => r.json())
+          .then(d => {
+            this.countryBusy = false;
+            if (d.status === "ok") {
+              this.tilesDl.running = true;
+              this.tilesDl.total = d.total;
+              this.tilesDl.done = 0;
+              this.pollTilesStatus();
+            } else {
+              this.showNotification(d.message || "Download failed", "下载失败", "error");
+            }
+          })
+          .catch(() => { this.countryBusy = false; });
+      },
+
+      // ---------- cell tower ----------
+      locateCell() {
+        if (this.cellBusy) return;
+        this.cellBusy = true;
+        fetch("/api/v1/gps/cell.json")
+          .then(r => r.json())
+          .then(d => {
+            this.cellBusy = false;
+            if (d.status !== "ok") {
+              this.showNotification(d.message || "No cell info", "无基站信息", "error");
+              return;
+            }
+            this.cellInfo = d;
+            if (d.tower && this.map) {
+              this.drawCellTower(d);
+            } else if (!d.tower) {
+              this.showNotification(
+                "{{locales.gps_cell_no_db}}" + (d.has_key ? "" : " — {{locales.gps_cell_add_key}}"),
+                "基站不在数据库中", "info");
+            }
+          })
+          .catch(() => { this.cellBusy = false; });
+      },
+      cellInfoText() {
+        const c = this.cellInfo && this.cellInfo.cell;
+        if (!c) return "";
+        let s = "📡 " + c.tech + (c.band ? " " + c.band : "")
+          + " · " + c.mcc + "-" + ("0" + c.mnc).slice(-2);
+        if (c.tac !== null && c.tac !== undefined) s += " · TAC " + c.tac;
+        if (c.cid !== null && c.cid !== undefined) s += " · CID " + c.cid;
+        if (c.rsrp !== null && c.rsrp !== undefined) s += " · " + c.rsrp + " dBm";
+        return s;
+      },
+      drawCellTower(d) {
+        const pos = [d.tower.lat, d.tower.lon];
+        for (const layer of [this.cellMarker, this.cellCircle, this.cellLine]) {
+          if (layer) this.map.removeLayer(layer);
+        }
+        this.cellLine = null;
+        this.cellMarker = L.circleMarker(pos, {
+          radius: 7, color: "#ffffff", weight: 2,
+          fillColor: "#D97706", fillOpacity: 1,
+        }).addTo(this.map).bindPopup(
+          this.cellInfoText() + "<br>±" + Math.round(d.tower.accuracy) + " m · " + d.tower.source);
+        this.cellCircle = L.circle(pos, {
+          radius: d.tower.accuracy || 0, color: "#D97706", weight: 1,
+          fillColor: "#D97706", fillOpacity: 0.08,
+        }).addTo(this.map);
+        if (this.lastPos) {
+          this.cellLine = L.polyline([this.lastPos, pos], {
+            color: "#D97706", weight: 1.5, dashArray: "5 5",
+          }).addTo(this.map);
+        }
+        this.map.panTo(pos);
+      },
+      toggleNearbyTowers() {
+        if (this.towersShown) {
+          for (const l of this.towerLayers) this.map.removeLayer(l);
+          this.towerLayers = [];
+          this.towersShown = false;
+          return;
+        }
+        if (!this.map) return;
+        const c = this.map.getCenter();
+        fetch("/api/v1/gps/cells_nearby.json?lat=" + c.lat.toFixed(6) +
+              "&lon=" + c.lng.toFixed(6) + "&radius=3000")
+          .then(r => r.json())
+          .then(d => {
+            if (d.status !== "ok") {
+              this.showNotification(d.message || "No cell DB", "未安装基站数据库", "error");
+              return;
+            }
+            const colors = { LTE: "#2563EB", UMTS: "#059669", GSM: "#6B7280" };
+            for (const t of d.towers) {
+              const m = L.circleMarker([t.lat, t.lon], {
+                radius: 4, weight: 1, color: "#ffffff",
+                fillColor: colors[t.radio] || "#D64550", fillOpacity: 0.85,
+              }).addTo(this.map).bindPopup(
+                t.radio + " " + t.net + " · " + (t.area || "—") + "/" + t.cell +
+                (t.unit ? " · PCI/PSC " + t.unit : "") +
+                "<br>±" + (t.range || "?") + " m · " + t.samples + " samples");
+              this.towerLayers.push(m);
+            }
+            this.towersShown = true;
+            this.showNotification(d.count + " towers", d.count + " 个基站", "success");
+          })
+          .catch(() => {});
+      },
+      loadCelldb(poll = false) {
+        fetch("/api/v1/gps/celldb.json")
+          .then(r => r.json())
+          .then(d => {
+            this.celldb = d;
+            if (d.running) setTimeout(() => this.loadCelldb(true), 2000);
+            else if (poll && d.error) this.showNotification(d.error, "下载失败", "error");
+          })
+          .catch(() => {});
+      },
+      celldbText() {
+        const d = this.celldb;
+        if (!d) return "";
+        if (d.running) {
+          let s = (d.bytes / 1048576).toFixed(1) + " MB";
+          if (d.total) s += " / " + (d.total / 1048576).toFixed(1) + " MB";
+          return s + " …";
+        }
+        if (d.path) return "✓ " + (d.size / 1048576).toFixed(1) + " MB · " + d.path;
+        return "{{locales.gps_celldb_none}}";
+      },
+      downloadCelldb() {
+        fetch("/api/v1/gps/celldb.json", { method: "POST",
+          headers: { "Content-Type": "application/json" }, body: "{}" })
+          .then(r => r.json())
+          .then(d => {
+            if (d.status === "ok") this.loadCelldb(true);
+            else this.showNotification(d.message || "failed", "下载失败", "error");
+          })
+          .catch(() => {});
+      },
+      saveCellKey() {
+        fetch("/api/v1/gps/cell_key.json", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ key: this.cellKey }),
+        })
+          .then(r => r.json())
+          .then(d => {
+            if (d.status === "ok") this.showNotification("{{locales.gps_cell_key_saved}}", "已保存", "success");
+          })
+          .catch(() => {});
+      },
+
+      // ---------- time sync ----------
+      timeSync() {
+        return this.st && this.st.time_sync ? this.st.time_sync : null;
+      },
+      canSyncTime() {
+        const t = this.timeSync();
+        return !!(t && t.usable);
+      },
+      timeOffsetText() {
+        // "vs system +0.412 s" under the GPS-time tile; ~0 means in sync.
+        const t = this.timeSync();
+        if (!t || t.offset_s === null || t.offset_s === undefined) return "";
+        const s = t.offset_s;
+        return "{{locales.gps_time_offset}} " + (s >= 0 ? "+" : "") + s.toFixed(3) + " s";
+      },
+      syncTime() {
+        if (this.timeSyncing || !this.canSyncTime()) return;
+        this.timeSyncing = true;
+        fetch("/api/v1/gps/sync_time.json", { method: "POST" })
+          .then(r => r.json())
+          .then(d => {
+            this.timeSyncing = false;
+            if (d.status === "ok") {
+              const adj = (d.adjusted_s >= 0 ? "+" : "") + d.adjusted_s.toFixed(3);
+              this.timeSyncedText = "{{locales.gps_time_synced}} (" + adj + " s)";
+              this.timeSynced = true;
+              setTimeout(() => { this.timeSynced = false; }, 4000);
+              this.poll();
+            } else {
+              this.showNotification(d.message || "Time sync failed", "时间同步失败", "error");
+            }
+          })
+          .catch(() => { this.timeSyncing = false; });
+      },
+
+      showNotification(message_en, message_cn = '', type = 'info') {
+        this.notification.message_en = message_en;
+        this.notification.message_cn = message_cn;
+        this.notification.message = message_en;
+        this.notification.type = type;
+        this.notification.show = true;
+        clearTimeout(this._notificationTimer);
+        if (type !== 'error') {
+          this._notificationTimer = setTimeout(() => { this.notification.show = false; }, 4000);
+        }
+      },
+      hideNotification() {
+        clearTimeout(this._notificationTimer);
+        this.notification.show = false;
+      },
+    }));
+  });
+</script>
+{% endblock %}

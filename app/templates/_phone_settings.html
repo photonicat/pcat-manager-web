@@ -1,0 +1,252 @@
+{# Phone settings: everything that is configuration rather than telephony.
+
+   These all used to sit under the dialer on /phone, which meant the page you
+   look at to make a call was mostly things you set once and never touch -- the
+   audio path, the ringer, voicemail and its greeting, the TTS engine picker,
+   the speech-to-text model. They live in a drawer now so /phone is the dialer
+   and the call lists, and this is behind the gear.
+#}
+<!-- audio path (modem-side routing) -->
+<div class="mt-5">
+  <label class="block text-xs font-semibold text-gray-500 mb-2 uppercase tracking-wide">{{ locales.voice_audio_path }}</label>
+  <select x-model="audioPath" @change="setAudioPath()"
+    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white focus:ring-2 focus:ring-blue-500">
+    <option value="0">{{ locales.voice_speaker }}</option>
+    <option value="1">{{ locales.voice_earpiece }}</option>
+    <option value="2">{{ locales.voice_headset }}</option>
+    <option value="3">{{ locales.voice_bluetooth }}</option>
+  </select>
+</div>
+
+<!-- auto-record toggle -->
+<div class="mt-4 flex items-center justify-between">
+  <span class="text-xs font-semibold text-gray-500 uppercase tracking-wide">{{ locales.voice_auto_record }}</span>
+  <button @click="toggleAutoRecord()" :disabled="savingAutoRecord"
+    :class="autoRecord ? 'bg-green-500' : 'bg-gray-300'"
+    class="relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors">
+    <span :class="autoRecord ? 'translate-x-6' : 'translate-x-1'"
+      class="inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform"></span>
+  </button>
+</div>
+
+<!-- incoming-call ring buzzer -->
+<div class="mt-4 pt-4 border-t border-gray-100">
+  <div class="flex items-center justify-between">
+    <span class="text-xs font-semibold text-gray-500 uppercase tracking-wide">{{ locales.voice_ringer }}</span>
+    <button @click="ringer.enabled = !ringer.enabled; saveRingerConfig()" :disabled="savingRinger"
+      :class="ringer.enabled ? 'bg-green-500' : 'bg-gray-300'"
+      class="relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors">
+      <span :class="ringer.enabled ? 'translate-x-6' : 'translate-x-1'"
+        class="inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform"></span>
+    </button>
+  </div>
+  <div x-show="ringer.enabled" x-cloak class="mt-3 flex items-center space-x-2">
+    <select x-model="ringer.melody" @change="saveRingerConfig()"
+      class="flex-1 border border-gray-300 rounded-lg px-2 py-1 text-sm bg-white focus:ring-2 focus:ring-blue-500">
+      <option value="classic">{{ locales.voice_melody_classic }}</option>
+      <option value="digital">{{ locales.voice_melody_digital }}</option>
+      <option value="chirp">{{ locales.voice_melody_chirp }}</option>
+      <option value="trill">{{ locales.voice_melody_trill }}</option>
+    </select>
+    <button @click="previewMelody()"
+      class="px-3 py-1.5 text-xs font-medium rounded-lg bg-blue-50 text-blue-700 hover:bg-blue-100 transition-colors">
+      {{ locales.voice_preview }}
+    </button>
+  </div>
+</div>
+
+<!-- voicemail (answering machine) -->
+<div class="mt-4 pt-4 border-t border-gray-100">
+  <div class="flex items-center justify-between">
+    <span class="text-xs font-semibold text-gray-500 uppercase tracking-wide">{{ locales.voice_vm_enable }}</span>
+    <button @click="vm.enabled = !vm.enabled; saveVmConfig()" :disabled="savingVm"
+      :class="vm.enabled ? 'bg-green-500' : 'bg-gray-300'"
+      class="relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors">
+      <span :class="vm.enabled ? 'translate-x-6' : 'translate-x-1'"
+        class="inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform"></span>
+    </button>
+  </div>
+  <div x-show="vm.enabled" x-cloak class="mt-3 space-y-3">
+    <div class="flex items-center justify-between">
+      <span class="text-xs text-gray-500">{{ locales.voice_vm_answer_after }}</span>
+      <select x-model="vm.answer_secs" @change="saveVmConfig()"
+        class="border border-gray-300 rounded-lg px-2 py-1 text-sm bg-white focus:ring-2 focus:ring-blue-500">
+        <option value="5">5s</option>
+        <option value="10">10s</option>
+        <option value="15">15s</option>
+        <option value="20">20s</option>
+        <option value="30">30s</option>
+      </select>
+    </div>
+    <div>
+      <p class="text-xs text-gray-500 mb-2">
+        {{ locales.voice_vm_greeting }}:
+        <span class="font-semibold" x-text="vm.greeting ? locales.voice_vm_greeting_set : locales.voice_vm_greeting_default"></span>
+      </p>
+      <div class="flex space-x-2">
+        <button @click="toggleGreetingRecord()" :disabled="!secure"
+          :class="greetingRecording ? 'bg-red-500 text-white animate-pulse' : 'bg-gray-100 text-gray-700 hover:bg-gray-200 disabled:text-gray-400'"
+          class="flex-1 px-3 py-2 text-xs font-medium rounded-lg transition-colors"
+          x-text="greetingRecording ? locales.voice_stop_record : locales.voice_vm_record_greeting"></button>
+        <button x-show="vm.greeting" @click="playGreeting()"
+          class="px-3 py-2 text-xs font-medium rounded-lg bg-blue-50 text-blue-700 hover:bg-blue-100 transition-colors">
+          <svg class="h-4 w-4" fill="currentColor" viewBox="0 0 20 20">
+            <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clip-rule="evenodd"></path>
+          </svg>
+        </button>
+        <button x-show="vm.greeting" @click="deleteGreeting()"
+          class="px-3 py-2 text-xs font-medium rounded-lg bg-red-50 text-red-700 hover:bg-red-100 transition-colors">
+          <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+          </svg>
+        </button>
+      </div>
+      <p x-show="!secure" class="mt-1 text-xs text-amber-600">{{ locales.voice_vm_https }}</p>
+
+      <!-- greeting from typed text (no mic / no HTTPS needed) -->
+      <div class="mt-3 pt-3 border-t border-gray-100">
+        <p class="text-xs text-gray-500 mb-2">{{ locales.voice_greeting_from_text }}</p>
+        <template x-if="!tts.engine">
+          <div>
+            <button x-show="!tts.downloading" @click="installTts()"
+              class="w-full px-3 py-2 text-xs font-medium rounded-lg bg-blue-50 text-blue-700 hover:bg-blue-100 transition-colors">
+              {{ locales.voice_install_tts }}
+            </button>
+            <div x-show="tts.downloading" class="h-2 bg-gray-200 rounded-full overflow-hidden">
+              <div class="h-2 bg-blue-500 rounded-full transition-all" :style="'width:' + ttsPct() + '%'"></div>
+            </div>
+            <p x-show="tts.download && tts.download.error" class="mt-1 text-xs text-red-600" x-text="tts.download.error"></p>
+          </div>
+        </template>
+        <template x-if="tts.engine">
+          <div class="space-y-2">
+            <textarea x-model="ttsText" rows="2" maxlength="500"
+              :placeholder="locales.voice_greeting_text_hint"
+              class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none"></textarea>
+
+            <!-- engine: robotic (tiny) vs neural (natural Chinese) -->
+            <div class="flex space-x-1 bg-gray-100 rounded-lg p-1">
+              <button @click="tts.selected_engine = 'espeak'; saveTtsConfig()"
+                :class="tts.selected_engine !== 'kokoro' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500'"
+                class="flex-1 px-2 py-1 text-xs font-medium rounded-md transition-all">{{ locales.voice_tts_basic }}</button>
+              <button @click="tts.selected_engine = 'kokoro'; saveTtsConfig()"
+                :class="tts.selected_engine === 'kokoro' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500'"
+                class="flex-1 px-2 py-1 text-xs font-medium rounded-md transition-all">{{ locales.voice_tts_neural }}</button>
+            </div>
+
+            <!-- neural engine install / model choice -->
+            <template x-if="tts.selected_engine === 'kokoro' && !tts.kokoro.ready">
+              <div class="space-y-2 p-2 bg-slate-50 rounded-lg">
+                <p class="text-xs text-gray-500">{{ locales.voice_tts_neural_hint }}</p>
+                <button x-show="!tts.kokoro.engine && !tts.downloading" @click="installKokoro('kokoro-engine')"
+                  class="w-full px-3 py-2 text-xs font-medium rounded-lg bg-blue-50 text-blue-700 hover:bg-blue-100 transition-colors"
+                  x-text="locales.voice_install_engine_n.replace('%s', tts.kokoro.engine_size_mb)"></button>
+                <template x-if="tts.kokoro.engine && !tts.downloading">
+                  <div class="flex space-x-2">
+                    <select x-model="tts.kokoro.model" @change="saveTtsConfig()"
+                      class="flex-1 border border-gray-300 rounded-lg px-2 py-1 text-sm bg-white">
+                      <template x-for="m in tts.kokoro.models" :key="m.id">
+                        <option :value="m.id" x-text="m.label + ' (' + m.size_mb + 'MB)' + (m.installed ? ' ✓' : '')"></option>
+                      </template>
+                    </select>
+                    <button @click="installKokoro('kokoro-model')"
+                      class="px-3 py-1.5 text-xs font-medium rounded-lg bg-blue-50 text-blue-700 hover:bg-blue-100 transition-colors">
+                      {{ locales.voice_download }}
+                    </button>
+                  </div>
+                </template>
+                <div x-show="tts.downloading" class="h-2 bg-gray-200 rounded-full overflow-hidden">
+                  <div class="h-2 bg-blue-500 rounded-full transition-all" :style="'width:' + ttsPct() + '%'"></div>
+                </div>
+              </div>
+            </template>
+
+            <div class="flex space-x-2">
+              <select x-show="tts.selected_engine !== 'kokoro'" x-model="tts.voice"
+                class="flex-1 border border-gray-300 rounded-lg px-2 py-1 text-sm bg-white focus:ring-2 focus:ring-blue-500">
+                <template x-for="v in tts.voices" :key="v.id">
+                  <option :value="v.id" x-text="v.label"></option>
+                </template>
+              </select>
+              <select x-show="tts.selected_engine === 'kokoro'" x-model="tts.kokoro.voice"
+                class="flex-1 border border-gray-300 rounded-lg px-2 py-1 text-sm bg-white focus:ring-2 focus:ring-blue-500">
+                <template x-for="v in tts.kokoro.voices" :key="v.id">
+                  <option :value="v.id" x-text="v.label"></option>
+                </template>
+              </select>
+              <button @click="previewTts()" :disabled="!ttsText.trim()"
+                class="px-3 py-1.5 text-xs font-medium rounded-lg bg-gray-100 text-gray-700 hover:bg-gray-200 disabled:text-gray-400 transition-colors">
+                {{ locales.voice_preview }}
+              </button>
+              <button @click="saveTtsGreeting()" :disabled="!ttsText.trim() || savingTts"
+                class="px-3 py-1.5 text-xs font-semibold rounded-lg bg-pcatblue text-white hover:bg-blue-600 disabled:bg-gray-300 transition-colors">
+                {{ locales.voice_save }}
+              </button>
+            </div>
+          </div>
+        </template>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- transcription (whisper.cpp on CPU) -->
+<div class="mt-4 pt-4 border-t border-gray-100">
+  <div class="flex items-center justify-between">
+    <span class="text-xs font-semibold text-gray-500 uppercase tracking-wide">{{ locales.voice_transcription }}</span>
+    <span x-show="!trans.engine && !trans.downloading" class="text-xs text-gray-400">{{ locales.voice_engine_missing }}</span>
+    <span x-show="trans.engine && trans.ready" x-cloak class="text-xs font-semibold text-green-600">&#10003;</span>
+  </div>
+  <!-- engine missing: one-tap install from dl.photonicat.com -->
+  <div x-show="!trans.engine" x-cloak class="mt-3 space-y-2">
+    <button x-show="!trans.downloading" @click="installEngine()"
+      class="w-full px-3 py-2 text-xs font-medium rounded-lg bg-blue-50 text-blue-700 hover:bg-blue-100 transition-colors">
+      {{ locales.voice_install_engine }}
+    </button>
+    <div x-show="trans.downloading" class="h-2 bg-gray-200 rounded-full overflow-hidden">
+      <div class="h-2 bg-blue-500 rounded-full transition-all" :style="'width:' + downloadPct() + '%'"></div>
+    </div>
+    <p x-show="trans.download && trans.download.error" class="text-xs text-red-600" x-text="trans.download.error"></p>
+  </div>
+  <div x-show="trans.engine" x-cloak class="mt-3 space-y-3">
+    <!-- model -->
+    <div class="flex items-center space-x-2">
+      <select x-model="trans.model" @change="saveTransConfig()"
+        class="flex-1 border border-gray-300 rounded-lg px-2 py-1 text-sm bg-white focus:ring-2 focus:ring-blue-500">
+        <template x-for="m in trans.models" :key="m.name">
+          <option :value="m.name" :disabled="!m.fits"
+            x-text="m.name + ' (' + m.size_mb + 'MB)' + (m.installed ? ' ✓' : '') + (m.recommended ? ' ★' : '')"></option>
+        </template>
+      </select>
+      <button x-show="!activeModelInstalled() && !trans.downloading" @click="downloadModel()"
+        class="px-3 py-1.5 text-xs font-medium rounded-lg bg-blue-50 text-blue-700 hover:bg-blue-100 transition-colors">
+        {{ locales.voice_download }}
+      </button>
+    </div>
+    <!-- download progress -->
+    <div x-show="trans.downloading" x-cloak class="h-2 bg-gray-200 rounded-full overflow-hidden">
+      <div class="h-2 bg-blue-500 rounded-full transition-all" :style="'width:' + downloadPct() + '%'"></div>
+    </div>
+    <p x-show="trans.download && trans.download.error" x-cloak class="text-xs text-red-600" x-text="trans.download.error"></p>
+    <!-- language -->
+    <div class="flex items-center justify-between">
+      <span class="text-xs text-gray-500">{{ locales.voice_language }}</span>
+      <select x-model="trans.lang" @change="saveTransConfig()"
+        class="border border-gray-300 rounded-lg px-2 py-1 text-sm bg-white focus:ring-2 focus:ring-blue-500">
+        <template x-for="l in trans.langs" :key="l">
+          <option :value="l" x-text="l === 'auto' ? locales.voice_lang_auto : l"></option>
+        </template>
+      </select>
+    </div>
+    <!-- auto-transcribe voicemail -->
+    <div class="flex items-center justify-between">
+      <span class="text-xs text-gray-500">{{ locales.voice_auto_transcribe_vm }}</span>
+      <button @click="trans.auto_vm = !trans.auto_vm; saveTransConfig()"
+        :class="trans.auto_vm ? 'bg-green-500' : 'bg-gray-300'"
+        class="relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors">
+        <span :class="trans.auto_vm ? 'translate-x-6' : 'translate-x-1'"
+          class="inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform"></span>
+      </button>
+    </div>
+  </div>
+</div>

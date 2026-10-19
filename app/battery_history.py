@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
 # Battery History - Records SOC, voltage, current every 5 minutes for up to 30 days
+#
+# Host SOC is a whole percent (MCU reports a 1-byte integer). The /stats chart
+# de-steps those plateaus client-side so the SOC line tracks drain smoothly
+# next to continuous voltage; see destepSocSeries() in statistics.html.
 
 import sqlite3
 import os
@@ -16,7 +20,7 @@ SQL_CREATE = '''
 CREATE TABLE IF NOT EXISTS battery_history (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts INTEGER NOT NULL,
-  soc INTEGER,
+  soc REAL,
   voltage REAL,
   current REAL,
   charging INTEGER DEFAULT 0,
@@ -60,8 +64,15 @@ def init_db():
             pass
 
 
-def record(soc, voltage_v, current_ma, charging=False, temperature=None):
-    """Record a battery snapshot. Call every 5 minutes."""
+def record(soc, voltage_v, current_ma, charging=False, temperature=None,
+           full_capacity_mah=None):
+    """Record a battery snapshot. Call every 5 minutes.
+
+    ``full_capacity_mah`` is accepted for API compatibility with callers that
+    know pack capacity; SOC storage is still the host-reported value (the
+    chart de-steps integer plateaus for display).
+    """
+    del full_capacity_mah  # reserved for a future fractional-SOC recorder
     ts = int(time.time())
     with _lock:
         try:
@@ -88,8 +99,14 @@ def cleanup():
         try:
             conn = _get_conn()
             conn.execute("DELETE FROM battery_history WHERE ts < ?", (cutoff,))
-            conn.execute("VACUUM")
+            # Commit BEFORE VACUUM: the DELETE opens an implicit transaction
+            # and sqlite refuses to VACUUM inside one. With VACUUM first, its
+            # error skipped the commit and the close rolled the DELETE back --
+            # silently, behind the blanket except -- so the 30-day retention
+            # never actually deleted anything and the DB grew unbounded on
+            # /etc (flash).
             conn.commit()
+            conn.execute("VACUUM")
             conn.close()
         except Exception:
             pass

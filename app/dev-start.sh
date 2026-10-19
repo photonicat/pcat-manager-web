@@ -40,4 +40,5 @@ fi
 
 export FLASK_TEMPLATE_RELOAD=1
 export PCAT_LOG_STDOUT="$STDOUT_LOGGING"
+export PCAT_LOG_LEVEL="${PCAT_LOG_LEVEL:-DEBUG}"
 ./pcat-manager-web-main.py -p 80 --skip-auth 
